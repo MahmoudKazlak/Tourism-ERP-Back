@@ -1,0 +1,3583 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+app.js
+DB/adminSeed.js
+DB/connection.js
+DB/model/booking.model.js
+DB/model/expense.model.js
+DB/model/log.model.js
+DB/model/payment.model.js
+DB/model/provider.model.js
+DB/model/user.model.js
+package.json
+src/middleware/asyncHandler.js
+src/middleware/auth.js
+src/middleware/validation.js
+src/modules/auth/auth.router.js
+src/modules/auth/auth.validation.js
+src/modules/auth/controller/auth.controller.js
+src/modules/booking/booking.router.js
+src/modules/booking/booking.validation.js
+src/modules/booking/controller/booking.controller.js
+src/modules/dashboard/controller/dashboard.controller.js
+src/modules/dashboard/dashboard.router.js
+src/modules/expense/controller/expense.controller.js
+src/modules/expense/expense.router.js
+src/modules/expense/expense.validation.js
+src/modules/indexEndpoint.js
+src/modules/indexRouter.js
+src/modules/log/controller/log.controller.js
+src/modules/log/log.router.js
+src/modules/payment/controller/payment.controller.js
+src/modules/payment/payment.router.js
+src/modules/payment/payment.validation.js
+src/modules/provider/controller/provider.controller.js
+src/modules/provider/provider.router.js
+src/modules/statement/controller/statement.controller.js
+src/modules/statement/statement.router.js
+src/modules/voucher/controller/voucher.controller.js
+src/modules/voucher/voucher.router.js
+src/services/email.js
+src/services/pagination.js
+src/services/transaction.js
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".gitignore">
+node_modules/
+.env
+</file>
+
+<file path="DB/adminSeed.js">
+import logModel from "./model/log.model.js";
+import userModel from "./model/user.model.js";
+
+export const seedAdmin = async () => {
+  try {
+    const adminExists = await userModel.findOne({ role: "admin" });
+
+    if (!adminExists) {
+      console.log("🚀 No admin found. Creating initial admin account...");
+
+      const initialPassword = "Admin@123";
+
+      const user = await userModel.create({
+        userName: "SuperAdmin",
+        email: "admin@system.com",
+        password: initialPassword,
+        role: "admin",
+      });
+
+      // FIX: لا نحفظ كلمة المرور في الـ log
+      await logModel.create({
+        user: user._id,
+        action: "ADMIN_SEED",
+        details: { userId: user._id, userName: user.userName },
+      });
+
+      console.log("✅ Initial Admin created: admin@system.com / Admin@123");
+      console.log("⚠️  Change the password immediately after first login!");
+    }
+  } catch (error) {
+    console.error("❌ Error seeding admin:", error);
+  }
+};
+</file>
+
+<file path="DB/connection.js">
+import mongoose from "mongoose";
+import { seedAdmin } from "./adminSeed.js";
+
+const connectDB = async () => {
+  return await mongoose
+    .connect(process.env.DBURI)
+    .then(async (res) => {
+      console.log("connectDb");
+      await seedAdmin();
+    })
+    .catch((err) => {
+      console.log("faild to connect", err);
+    });
+};
+
+export default connectDB;
+</file>
+
+<file path="DB/model/expense.model.js">
+import mongoose from "mongoose";
+
+const expenseSchema = new mongoose.Schema(
+  {
+    category: {
+      type: String,
+      enum: ["rent", "utilities", "salary", "supplies", "maintenance", "other"],
+      required: [true, "Category is required"],
+    },
+    amount: {
+      type: Number,
+      required: [true, "Amount is required"],
+      min: [0.01, "Amount must be greater than 0"],
+    },
+    date: {
+      type: Date,
+      default: Date.now,
+      required: true,
+    },
+    description: {
+      type: String,
+      required: [true, "Description is required"],
+      trim: true,
+      maxlength: [200, "Description too long"],
+    },
+    method: {
+      type: String,
+      enum: ["cash", "bank_transfer", "check", "other"],
+      default: "cash",
+    },
+    // مرجع خارجي اختياري (مثلاً رقم فاتورة الكهرباء)
+    reference: { type: String, trim: true },
+    recordedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+  },
+  { timestamps: true },
+);
+
+// إضافة index على التاريخ للبحث السريع
+expenseSchema.index({ date: -1 });
+expenseSchema.index({ category: 1, date: -1 });
+
+export default mongoose.model("Expense", expenseSchema);
+</file>
+
+<file path="DB/model/log.model.js">
+import mongoose from "mongoose";
+
+const logSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    action: { type: String, required: true },
+    details: { type: Object },
+    ip: String,
+  },
+  { timestamps: true },
+);
+
+export default mongoose.model("Log", logSchema);
+</file>
+
+<file path="DB/model/payment.model.js">
+import mongoose from "mongoose";
+
+const paymentSchema = new mongoose.Schema(
+  {
+    booking: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Booking",
+      required: true,
+      index: true,
+    },
+    bookingID: {
+      type: Number,
+      required: true,
+    },
+    amount: {
+      type: Number,
+      required: [true, "Amount is required"],
+      min: [0.01, "Amount must be greater than 0"],
+    },
+    date: {
+      type: Date,
+      default: Date.now,
+    },
+    method: {
+      type: String,
+      enum: ["cash", "bank_transfer", "check", "other"],
+      default: "cash",
+    },
+    notes: String,
+    recordedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+  },
+  { timestamps: true },
+);
+
+export default mongoose.model("Payment", paymentSchema);
+</file>
+
+<file path="DB/model/provider.model.js">
+import mongoose from "mongoose";
+const providerSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    type: {
+      type: String,
+      enum: ["hotel", "car_rental", "driver_company", "tourism"],
+      required: true,
+    },
+    currentSequence: { type: Number, default: 0 },
+    totalBookings: { type: Number, default: 0 },
+    phone: String,
+    address: String,
+  },
+  { timestamps: true },
+);
+
+export default mongoose.model("Provider", providerSchema);
+</file>
+
+<file path="DB/model/user.model.js">
+import mongoose from "mongoose";
+import bcrypt from "bcrypt";
+
+const userSchema = new mongoose.Schema(
+  {
+    userName: {
+      type: String,
+      required: [true, "Username is required"],
+      minlength: [3, "Min length is 3"],
+      maxlength: [25, "Max length is 25"],
+      trim: true,
+    },
+    email: {
+      type: String,
+      unique: true,
+      required: [true, "Email is required"],
+      lowercase: true,
+      trim: true,
+    },
+    password: {
+      type: String,
+      required: [true, "Password is required"],
+      minlength: 6,
+    },
+    phone: String,
+    role: {
+      type: String,
+      enum: ["admin", "booking_staff", "accounting_staff"],
+      default: "booking_staff",
+    },
+    image: String,
+    blocked: {
+      type: Boolean,
+      default: false,
+    },
+    sendCode: {
+      type: String,
+      default: "dontTrust32",
+    },
+  },
+  { timestamps: true },
+);
+
+userSchema.pre("save", async function () {
+  if (!this.isModified("password")) return;
+  this.password = await bcrypt.hash(this.password, 10);
+});
+
+userSchema.methods.comparePassword = function (password) {
+  return bcrypt.compare(password, this.password);
+};
+
+export default mongoose.model("User", userSchema);
+</file>
+
+<file path="package.json">
+{
+  "name": "booking",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js"
+  },
+  "type": "module",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cloudinary": "^2.8.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.3.2",
+    "helmet": "^8.1.0",
+    "joi": "^18.0.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.1.2",
+    "multer": "^2.0.2",
+    "nanoid": "^5.1.6",
+    "nodemailer": "^7.0.12"
+  }
+}
+</file>
+
+<file path="src/middleware/asyncHandler.js">
+export const asyncHandler = (fn) => {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch((error) => {
+      next(error);
+    });
+  };
+};
+</file>
+
+<file path="src/middleware/validation.js">
+const dataMethod = ["body", "params", "query", "headers"];
+
+export const validation = (schema) => {
+  return (req, res, next) => {
+    try {
+      const validationArray = [];
+
+      dataMethod.forEach((key) => {
+        if (schema[key]) {
+          const validationResult = schema[key].validate(req[key], {
+            abortEarly: false,
+          });
+
+          if (validationResult.error) {
+            validationArray.push(validationResult.error.details);
+          }
+        }
+      });
+
+      if (validationArray.length) {
+        return res.status(400).json({
+          message: "validation error",
+          validationArray,
+        });
+      }
+
+      next();
+    } catch (err) {
+      return res.status(500).json({
+        message: "catch error",
+        error: err.message,
+      });
+    }
+  };
+};
+</file>
+
+<file path="src/modules/auth/auth.router.js">
+import { Router } from "express";
+import * as authController from "./controller/auth.controller.js";
+import { asyncHandler } from "../../middleware/asyncHandler.js";
+import { validation } from "../../middleware/validation.js";
+import * as validators from "./auth.validation.js";
+import { auth } from "../../middleware/auth.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// تسجيل الدخول
+router.post("/signin", asyncHandler(authController.signIn));
+
+// نسيان كلمة المرور
+router.post("/sendCode", asyncHandler(authController.sendCode));
+router.post("/forgotPassword", asyncHandler(authController.forgotPassword));
+
+// إدارة المستخدمين (Admin فقط)
+//create user
+router.post(
+  "/createUser",
+  auth(endpoint.AdminOnly),
+  validation(validators.createUser),
+  asyncHandler(authController.createUser),
+);
+//update user
+router.patch(
+  "/update/:id",
+  auth(endpoint.AdminOnly),
+  asyncHandler(authController.updateUser),
+);
+router.get(
+  "/",
+  auth(endpoint.AdminOnly),
+  asyncHandler(authController.getAllUsers),
+);
+
+export default router;
+</file>
+
+<file path="src/modules/auth/auth.validation.js">
+import Joi from "joi";
+
+// الـ password pattern القديم كان خاطئ: ^[A-Z][a-z]{2,6}$ = بس 3-7 حروف مثل "Abc"
+// الـ pattern الجديد: 6+ حروف، حرف كبير، حرف صغير، رقم
+const passwordPattern = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{6,}$/;
+const passwordMessage =
+  "Password must be at least 6 characters with uppercase, lowercase, and a number";
+
+export const createUser = {
+  body: Joi.object()
+    .required()
+    .keys({
+      userName: Joi.string().min(3).max(25).required().messages({
+        "any.required": "Username is required",
+        "string.min": "Username must be at least 3 characters",
+      }),
+      email: Joi.string().email().required().messages({
+        "any.required": "Email is required",
+      }),
+      password: Joi.string().pattern(passwordPattern).required().messages({
+        "any.required": "Password is required",
+        "string.pattern.base": passwordMessage,
+      }),
+      cPassword: Joi.string().valid(Joi.ref("password")).required().messages({
+        "any.only": "Passwords do not match",
+      }),
+      role: Joi.string()
+        .valid("admin", "booking_staff", "accounting_staff")
+        .required()
+        .messages({
+          "any.only": "Role must be admin, booking_staff, or accounting_staff",
+          "any.required": "Role is required",
+        }),
+    }),
+};
+</file>
+
+<file path="src/modules/booking/booking.validation.js">
+import Joi from "joi";
+
+// Reusable ObjectId validator
+const objectId = Joi.string().hex().length(24);
+
+const customerSchema = Joi.object({
+  name: Joi.string().trim().min(2).max(100).required().messages({
+    "any.required": "Customer name is required",
+    "string.min": "Customer name must be at least 2 characters",
+  }),
+  ageType: Joi.string().valid("adult", "child", "infant").default("adult"),
+});
+
+const accommodationSchema = Joi.object({
+  hotel: objectId.required().messages({
+    "any.required": "Hotel ID is required",
+    "string.hex": "Invalid hotel ID format",
+    "string.length": "Invalid hotel ID length",
+  }),
+  checkIn: Joi.date().required().messages({
+    "any.required": "Check-in date is required",
+  }),
+  checkOut: Joi.date().greater(Joi.ref("checkIn")).required().messages({
+    "any.required": "Check-out date is required",
+    "date.greater": "Check-out must be after check-in",
+  }),
+  room: Joi.string().trim().max(50).optional().allow(""),
+  roomType: Joi.string().trim().max(50).optional().allow(""),
+  board: Joi.string().trim().max(50).optional().allow(""),
+  buy: Joi.number().min(0).default(0),
+  sell: Joi.number().min(0).default(0),
+});
+
+const carRentalSchema = Joi.object({
+  provider: objectId.required().messages({
+    "any.required": "Provider ID is required",
+    "string.hex": "Invalid provider ID format",
+    "string.length": "Invalid provider ID length",
+  }),
+  brand: Joi.string().trim().max(100).optional().allow(""),
+  pickUp: Joi.date().required().messages({
+    "any.required": "Pick-up date is required",
+  }),
+  dropOff: Joi.date().greater(Joi.ref("pickUp")).required().messages({
+    "any.required": "Drop-off date is required",
+    "date.greater": "Drop-off must be after pick-up",
+  }),
+  buy: Joi.number().min(0).default(0),
+  sell: Joi.number().min(0).default(0),
+});
+
+const tripSchema = Joi.object({
+  provider: objectId.required().messages({
+    "any.required": "Provider ID is required",
+    "string.hex": "Invalid provider ID format",
+    "string.length": "Invalid provider ID length",
+  }),
+  driverName: Joi.string().trim().max(100).optional().allow(""),
+  brand: Joi.string().trim().max(100).optional().allow(""),
+  buy: Joi.number().min(0).default(0),
+  sell: Joi.number().min(0).default(0),
+});
+
+const totalPaxSchema = Joi.object({
+  adults: Joi.number().integer().min(0).default(0),
+  kids: Joi.number().integer().min(0).default(0),
+});
+
+// ── Route schemas ─────────────────────────────────────────────────────────────
+
+export const createBooking = {
+  body: Joi.object({
+    provider: objectId.required().messages({
+      "any.required": "Main provider is required",
+      "string.hex": "Invalid provider ID format",
+      "string.length": "Invalid provider ID length",
+    }),
+    status: Joi.string()
+      .valid("pending", "confirmed", "cancelled", "completed")
+      .default("pending"),
+    customers: Joi.array().items(customerSchema).min(1).required().messages({
+      "any.required": "At least one customer is required",
+      "array.min": "At least one customer is required",
+    }),
+    accommodations: Joi.array().items(accommodationSchema).default([]),
+    carRentals: Joi.array().items(carRentalSchema).default([]),
+    tripsWithDrivers: Joi.array().items(tripSchema).default([]),
+    totalPax: totalPaxSchema.optional(),
+  }),
+};
+
+export const updateBooking = {
+  body: Joi.object({
+    status: Joi.string().valid(
+      "pending",
+      "confirmed",
+      "cancelled",
+      "completed",
+    ),
+    customers: Joi.array().items(customerSchema).min(1),
+    accommodations: Joi.array().items(accommodationSchema),
+    carRentals: Joi.array().items(carRentalSchema),
+    tripsWithDrivers: Joi.array().items(tripSchema),
+    totalPax: totalPaxSchema,
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    id: objectId.required().messages({
+      "string.hex": "Invalid booking ID",
+      "string.length": "Invalid booking ID",
+    }),
+  }),
+};
+
+export const addService = {
+  body: Joi.object({
+    serviceType: Joi.string()
+      .valid("accommodations", "carRentals", "tripsWithDrivers")
+      .required()
+      .messages({
+        "any.required": "serviceType is required",
+        "any.only":
+          "serviceType must be accommodations, carRentals, or tripsWithDrivers",
+      }),
+    serviceData: Joi.object().required().messages({
+      "any.required": "serviceData is required",
+    }),
+  }),
+  params: Joi.object({
+    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
+  }),
+};
+
+export const removeService = {
+  body: Joi.object({
+    serviceType: Joi.string()
+      .valid("accommodations", "carRentals", "tripsWithDrivers")
+      .required(),
+    serviceId: objectId.required().messages({
+      "string.hex": "Invalid service ID",
+    }),
+  }),
+  params: Joi.object({
+    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
+  }),
+};
+
+export const bookingIdParam = {
+  params: Joi.object({
+    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
+  }),
+};
+</file>
+
+<file path="src/modules/dashboard/controller/dashboard.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+import userModel from "../../../../DB/model/user.model.js";
+
+export const getDashboard = asyncHandler(async (req, res, next) => {
+  const now = new Date();
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const endOfLastMonth = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    0,
+    23,
+    59,
+    59,
+  );
+
+  // FIX: استبدال find().lean() بـ aggregate — أسرع بكثير مع بيانات كبيرة
+  const [
+    thisMonthStats,
+    lastMonthStats,
+    overallStats,
+    byStatus,
+    byPaymentStatus,
+    providersCount,
+    usersCount,
+    totalBookings,
+  ] = await Promise.all([
+    // إحصائيات هذا الشهر
+    bookingModel.aggregate([
+      { $match: { createdAt: { $gte: startOfMonth } } },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+          revenue: { $sum: "$totalToPay" },
+          profit: { $sum: "$totalProfit" },
+          collected: { $sum: "$totalPaid" },
+        },
+      },
+    ]),
+
+    // إحصائيات الشهر الماضي
+    bookingModel.aggregate([
+      {
+        $match: { createdAt: { $gte: startOfLastMonth, $lte: endOfLastMonth } },
+      },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+          revenue: { $sum: "$totalToPay" },
+          profit: { $sum: "$totalProfit" },
+        },
+      },
+    ]),
+
+    // الإجمالي الكلي
+    bookingModel.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: "$totalToPay" },
+          totalProfit: { $sum: "$totalProfit" },
+          totalCollected: { $sum: "$totalPaid" },
+          totalPending: { $sum: "$remainingBalance" },
+        },
+      },
+    ]),
+
+    // توزيع حسب الحالة
+    bookingModel.aggregate([
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
+
+    // توزيع حسب حالة الدفع
+    bookingModel.aggregate([
+      { $group: { _id: "$paymentStatus", count: { $sum: 1 } } },
+    ]),
+
+    providerModel.countDocuments(),
+    userModel.countDocuments(),
+    bookingModel.countDocuments(),
+  ]);
+
+  const tm = thisMonthStats[0] || {
+    count: 0,
+    revenue: 0,
+    profit: 0,
+    collected: 0,
+  };
+  const lm = lastMonthStats[0] || { count: 0, revenue: 0, profit: 0 };
+  const ov = overallStats[0] || {
+    totalRevenue: 0,
+    totalProfit: 0,
+    totalCollected: 0,
+    totalPending: 0,
+  };
+
+  const calcGrowth = (curr, prev) =>
+    prev > 0 ? `${(((curr - prev) / prev) * 100).toFixed(1)}%` : "N/A";
+
+  return res.status(200).json({
+    success: true,
+    message: "Dashboard data retrieved successfully",
+    data: {
+      thisMonth: {
+        bookingsCount: tm.count,
+        revenue: tm.revenue,
+        profit: tm.profit,
+        collected: tm.collected,
+        revenueGrowth: calcGrowth(tm.revenue, lm.revenue),
+        bookingsGrowth: calcGrowth(tm.count, lm.count),
+      },
+      lastMonth: {
+        bookingsCount: lm.count,
+        revenue: lm.revenue,
+        profit: lm.profit,
+      },
+      overall: {
+        totalRevenue: ov.totalRevenue,
+        totalProfit: ov.totalProfit,
+        totalCollected: ov.totalCollected,
+        totalPending: ov.totalPending,
+      },
+      byStatus: Object.fromEntries(byStatus.map((b) => [b._id, b.count])),
+      byPaymentStatus: Object.fromEntries(
+        byPaymentStatus.map((b) => [b._id, b.count]),
+      ),
+      counts: { providers: providersCount, users: usersCount, totalBookings },
+    },
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/dashboard/dashboard.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import * as dashboardController from "./controller/dashboard.controller.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+router.get("/", auth(endpoint.booking_view), dashboardController.getDashboard);
+
+export default router;
+</file>
+
+<file path="src/modules/expense/controller/expense.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import expenseModel from "../../../../DB/model/expense.model.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+import logModel from "../../../../DB/model/log.model.js";
+import { pagination } from "../../../services/pagination.js";
+
+// إضافة مصروف
+export const createExpense = asyncHandler(async (req, res, next) => {
+  const { category, amount, date, description, method, reference } = req.body;
+
+  const expense = await expenseModel.create({
+    category,
+    amount,
+    date: date || new Date(),
+    description,
+    method,
+    reference,
+    recordedBy: req.user._id,
+  });
+
+  await logModel.create({
+    user: req.user._id,
+    action: "CREATE_EXPENSE",
+    details: { expenseId: expense._id, category, amount, description },
+  });
+
+  return res.status(201).json({
+    success: true,
+    message: "Expense recorded successfully",
+    data: { expense },
+    errors: null,
+  });
+});
+
+// جلب المصاريف مع فلترة وتجميع
+export const getAllExpenses = asyncHandler(async (req, res) => {
+  const { category, fromDate, toDate, page, size } = req.query;
+
+  const query = {};
+  if (category) query.category = category;
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const { limit, skip } = pagination(page, size);
+
+  const [expenses, totalCount, totalByCategory] = await Promise.all([
+    expenseModel
+      .find(query)
+      .populate("recordedBy", "userName")
+      .sort({ date: -1 })
+      .limit(limit)
+      .skip(skip),
+    expenseModel.countDocuments(query),
+    // تجميع حسب الفئة
+    expenseModel.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: "$category",
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { total: -1 } },
+    ]),
+  ]);
+
+  const grandTotal = totalByCategory.reduce((s, c) => s + c.total, 0);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      grandTotal,
+      byCategory: Object.fromEntries(
+        totalByCategory.map((c) => [c._id, { total: c.total, count: c.count }]),
+      ),
+      expenses,
+    },
+    errors: null,
+  });
+});
+
+// تعديل مصروف
+export const updateExpense = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+
+  const expense = await expenseModel.findByIdAndUpdate(
+    id,
+    { $set: req.body },
+    { new: true, runValidators: true },
+  );
+  if (!expense) return next(new Error("Expense not found", { cause: 404 }));
+
+  await logModel.create({
+    user: req.user._id,
+    action: "UPDATE_EXPENSE",
+    details: { expenseId: id, updatedFields: Object.keys(req.body) },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Expense updated successfully",
+    data: { expense },
+    errors: null,
+  });
+});
+
+// حذف مصروف
+export const deleteExpense = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const expense = await expenseModel.findByIdAndDelete(id);
+  if (!expense) return next(new Error("Expense not found", { cause: 404 }));
+
+  await logModel.create({
+    user: req.user._id,
+    action: "DELETE_EXPENSE",
+    details: {
+      expenseId: id,
+      amount: expense.amount,
+      category: expense.category,
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Expense deleted successfully",
+    data: null,
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────
+// إغلاق الصندوق اليومي
+// يحسب: الكاش الموجود = إجمالي دفعات الكاش - إجمالي مصاريف الكاش
+// ─────────────────────────────────────────────
+export const getDailyCashClosing = asyncHandler(async (req, res) => {
+  // التاريخ: اليوم أو تاريخ محدد
+  const targetDate = req.query.date ? new Date(req.query.date) : new Date();
+
+  const dayStart = new Date(targetDate);
+  dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = new Date(targetDate);
+  dayEnd.setHours(23, 59, 59, 999);
+
+  const dateFilter = { $gte: dayStart, $lte: dayEnd };
+
+  const [cashPayments, cashExpenses, allPayments, allExpenses] =
+    await Promise.all([
+      // دفعات الكاش اليوم (من الزبائن)
+      paymentModel.aggregate([
+        { $match: { method: "cash", date: dateFilter } },
+        {
+          $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } },
+        },
+      ]),
+
+      // مصاريف الكاش اليوم
+      expenseModel.aggregate([
+        { $match: { method: "cash", date: dateFilter } },
+        {
+          $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } },
+        },
+      ]),
+
+      // كل وسائل الدفع اليوم
+      paymentModel.aggregate([
+        { $match: { date: dateFilter } },
+        {
+          $group: {
+            _id: "$method",
+            total: { $sum: "$amount" },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      // كل المصاريف اليوم
+      expenseModel.aggregate([
+        { $match: { date: dateFilter } },
+        {
+          $group: {
+            _id: "$category",
+            total: { $sum: "$amount" },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+  const cashIn = cashPayments[0]?.total || 0;
+  const cashOut = cashExpenses[0]?.total || 0;
+  const cashInDrawer = cashIn - cashOut;
+
+  const totalCollectedToday = allPayments.reduce((s, p) => s + p.total, 0);
+  const totalExpensesToday = allExpenses.reduce((s, e) => s + e.total, 0);
+  const netForDay = totalCollectedToday - totalExpensesToday;
+
+  return res.status(200).json({
+    success: true,
+    message: "Daily cash closing report",
+    data: {
+      date: targetDate.toDateString(),
+      cash: {
+        in: cashIn,
+        out: cashOut,
+        inDrawer: cashInDrawer,
+        label:
+          cashInDrawer >= 0
+            ? `في الدرج ${cashInDrawer}`
+            : `عجز كاش ${Math.abs(cashInDrawer)}`,
+      },
+      allIncome: {
+        total: totalCollectedToday,
+        breakdown: Object.fromEntries(
+          allPayments.map((p) => [p._id, { total: p.total, count: p.count }]),
+        ),
+      },
+      allExpenses: {
+        total: totalExpensesToday,
+        breakdown: Object.fromEntries(
+          allExpenses.map((e) => [e._id, { total: e.total, count: e.count }]),
+        ),
+      },
+      netForDay,
+      netLabel:
+        netForDay >= 0
+          ? `صافي ربح اليوم: ${netForDay}`
+          : `خسارة اليوم: ${Math.abs(netForDay)}`,
+    },
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/expense/expense.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as expenseController from "./controller/expense.controller.js";
+import * as validators from "./expense.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// إغلاق الصندوق اليومي — static قبل dynamic
+// GET /api/v1/expense/cash-closing?date=2024-01-15
+router.get(
+  "/cash-closing",
+  auth(endpoint.accounting_only),
+  expenseController.getDailyCashClosing,
+);
+
+// جلب كل المصاريف مع فلترة
+// GET /api/v1/expense?category=rent&fromDate=&toDate=&page=1&size=10
+router.get(
+  "/",
+  auth(endpoint.accounting_only),
+  validation(validators.getExpenses),
+  expenseController.getAllExpenses,
+);
+
+// إضافة مصروف
+// POST /api/v1/expense
+router.post(
+  "/",
+  auth(endpoint.accounting_only),
+  validation(validators.createExpense),
+  expenseController.createExpense,
+);
+
+// تعديل مصروف
+// PATCH /api/v1/expense/:id
+router.patch(
+  "/:id",
+  auth(endpoint.AdminOnly),
+  validation(validators.updateExpense),
+  expenseController.updateExpense,
+);
+
+// حذف مصروف
+// DELETE /api/v1/expense/:id
+router.delete(
+  "/:id",
+  auth(endpoint.AdminOnly),
+  expenseController.deleteExpense,
+);
+
+export default router;
+</file>
+
+<file path="src/modules/expense/expense.validation.js">
+import Joi from "joi";
+
+export const createExpense = {
+  body: Joi.object({
+    category: Joi.string()
+      .valid("rent", "utilities", "salary", "supplies", "maintenance", "other")
+      .required()
+      .messages({
+        "any.only":
+          "Category must be one of: rent, utilities, salary, supplies, maintenance, other",
+        "any.required": "Category is required",
+      }),
+    amount: Joi.number().positive().required().messages({
+      "number.positive": "Amount must be greater than 0",
+      "any.required": "Amount is required",
+    }),
+    date: Joi.date()
+      .max("now")
+      .default(() => new Date())
+      .messages({
+        "date.max": "Date cannot be in the future",
+      }),
+    description: Joi.string().trim().min(3).max(200).required().messages({
+      "string.min": "Description must be at least 3 characters",
+      "any.required": "Description is required",
+    }),
+    method: Joi.string()
+      .valid("cash", "bank_transfer", "check", "other")
+      .default("cash"),
+    reference: Joi.string().trim().max(100).optional().allow(""),
+  }),
+};
+
+export const updateExpense = {
+  body: Joi.object({
+    category: Joi.string().valid(
+      "rent",
+      "utilities",
+      "salary",
+      "supplies",
+      "maintenance",
+      "other",
+    ),
+    amount: Joi.number().positive(),
+    date: Joi.date().max("now"),
+    description: Joi.string().trim().min(3).max(200),
+    method: Joi.string().valid("cash", "bank_transfer", "check", "other"),
+    reference: Joi.string().trim().max(100).allow(""),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+};
+
+export const getExpenses = {
+  query: Joi.object({
+    category: Joi.string().valid(
+      "rent",
+      "utilities",
+      "salary",
+      "supplies",
+      "maintenance",
+      "other",
+    ),
+    fromDate: Joi.date(),
+    toDate: Joi.date().when("fromDate", {
+      is: Joi.exist(),
+      then: Joi.date().min(Joi.ref("fromDate")).messages({
+        "date.min": "toDate must be after fromDate",
+      }),
+    }),
+    page: Joi.number().integer().min(1).default(1),
+    size: Joi.number().integer().min(1).max(100).default(10),
+  }),
+};
+</file>
+
+<file path="src/modules/indexEndpoint.js">
+const roles = {
+  Admin: "admin",
+  Booking: "booking_staff",
+  Accounting: "accounting_staff",
+};
+
+export const endpoint = {
+  booking_manage: [roles.Admin, roles.Booking],
+  booking_view: [roles.Admin, roles.Booking, roles.Accounting],
+  booking_delete: [roles.Admin],
+
+  provider_manage: [roles.Admin],
+  provider_view: [roles.Admin, roles.Booking, roles.Accounting],
+
+  accounting_only: [roles.Admin, roles.Accounting],
+
+  AdminOnly: [roles.Admin],
+  All: [roles.Admin, roles.Booking, roles.Accounting],
+  view_logs: [roles.Admin],
+};
+</file>
+
+<file path="src/modules/indexRouter.js">
+import authRouter from "./auth/auth.router.js";
+import bookingRouter from "./booking/booking.router.js";
+import providerRouter from "./provider/provider.router.js";
+import logRouter from "./log/log.router.js";
+import paymentRouter from "./payment/payment.router.js";
+import dashboardRouter from "./dashboard/dashboard.router.js";
+import statementRouter from "./statement/statement.router.js";
+import voucherRouter from "./voucher/voucher.router.js";
+import expenseRouter from "./expense/expense.router.js";
+
+export {
+  authRouter,
+  bookingRouter,
+  providerRouter,
+  logRouter,
+  paymentRouter,
+  dashboardRouter,
+  statementRouter,
+  voucherRouter,
+  expenseRouter,
+};
+</file>
+
+<file path="src/modules/log/controller/log.controller.js">
+import logModel from "../../../../DB/model/log.model.js";
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import { pagination } from "../../../services/pagination.js";
+
+// FIX: أضفنا pagination — كان بيرجع كل السجلات بدون حد
+export const getAllLogs = asyncHandler(async (req, res, next) => {
+  const { action, userId, page, size } = req.query;
+  const query = {};
+  if (action) query.action = action;
+  if (userId) query.user = userId;
+
+  const { limit, skip } = pagination(page, size);
+
+  const [logs, totalCount] = await Promise.all([
+    logModel
+      .find(query)
+      .populate("user", "userName email role")
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .skip(skip),
+    logModel.countDocuments(query),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      logs,
+    },
+    errors: null,
+  });
+});
+
+export const getLogsByUser = asyncHandler(async (req, res, next) => {
+  const { userId } = req.params;
+  const { page, size } = req.query;
+  const { limit, skip } = pagination(page, size);
+
+  const [logs, totalCount] = await Promise.all([
+    logModel
+      .find({ user: userId })
+      .populate("user", "userName email")
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .skip(skip),
+    logModel.countDocuments({ user: userId }),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: { totalCount, totalPages: Math.ceil(totalCount / limit), logs },
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/log/log.router.js">
+import { Router } from "express";
+    import * as logController from "./controller/log.controller.js";
+    import { auth } from "../../middleware/auth.js";
+    import { endpoint } from "../indexEndpoint.js";
+
+    const router = Router();
+
+    router.get("/", auth(endpoint.AdminOnly), logController.getAllLogs);
+
+    router.get(
+    "/user/:userId",
+    auth(endpoint.AdminOnly),
+    logController.getLogsByUser,
+    );
+
+    export default router;
+</file>
+
+<file path="src/modules/payment/payment.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as paymentController from "./controller/payment.controller.js";
+import * as validators from "./payment.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// Static routes أولاً
+router.get(
+  "/payments/all",
+  auth(endpoint.accounting_only),
+  paymentController.getAllPayments,
+);
+
+router.delete(
+  "/payments/:paymentId",
+  auth(endpoint.AdminOnly),
+  validation(validators.deletePayment),
+  paymentController.deletePayment,
+);
+
+// Dynamic routes بعدها
+router.post(
+  "/:id/payments",
+  auth(endpoint.booking_manage),
+  validation(validators.addPayment),
+  paymentController.addPayment,
+);
+
+router.get(
+  "/:id/payments",
+  auth(endpoint.booking_view),
+  paymentController.getPaymentsByBooking,
+);
+
+export default router;
+</file>
+
+<file path="src/modules/payment/payment.validation.js">
+import Joi from "joi";
+
+export const addPayment = {
+  body: Joi.object({
+    amount: Joi.number().positive().required().messages({
+      "number.positive": "Amount must be greater than 0",
+      "number.base": "Amount must be a number",
+      "any.required": "Amount is required",
+    }),
+    date: Joi.date().max("now").optional().messages({
+      "date.max": "Payment date cannot be in the future",
+    }),
+    method: Joi.string()
+      .valid("cash", "bank_transfer", "check", "other")
+      .default("cash"),
+    notes: Joi.string().trim().max(300).optional().allow(""),
+  }),
+  params: Joi.object({
+    id: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid booking ID",
+      "string.length": "Invalid booking ID",
+    }),
+  }),
+};
+
+export const deletePayment = {
+  params: Joi.object({
+    paymentId: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid payment ID",
+    }),
+  }),
+};
+</file>
+
+<file path="src/modules/provider/provider.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import * as providerController from "./controller/provider.controller.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+router.post(
+  "/create",
+  auth(endpoint.provider_manage),
+  providerController.createProvider,
+);
+router.get(
+  "/getAll",
+  auth(endpoint.provider_view),
+  providerController.getAllProviders,
+);
+router.get(
+  "/get/:id",
+  auth(endpoint.provider_view),
+  providerController.getProviderById,
+);
+router.patch(
+  "/update/:id",
+  auth(endpoint.provider_manage),
+  providerController.updateProvider,
+);
+router.delete(
+  "/delete/:id",
+  auth(endpoint.provider_manage),
+  providerController.deleteProvider,
+);
+
+export default router;
+</file>
+
+<file path="src/modules/statement/statement.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import * as statementController from "./controller/statement.controller.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// كشف حساب مورد
+// GET /api/v1/statement/provider/:providerId?fromDate=&toDate=
+router.get(
+  "/provider/:providerId",
+  auth(endpoint.accounting_only),
+  statementController.getProviderStatement,
+);
+
+// كشف حساب زبون
+// GET /api/v1/statement/customer/:customerName?fromDate=&toDate=
+router.get(
+  "/customer/:customerName",
+  auth(endpoint.accounting_only),
+  statementController.getCustomerStatement,
+);
+
+export default router;
+</file>
+
+<file path="src/modules/voucher/controller/voucher.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+
+// ─────────────────────────────────────────────
+// Service Voucher — ورقة للمورد (فندق / باص)
+// بدون أسعار البيع، فقط معلومات الخدمة
+// ─────────────────────────────────────────────
+export const getServiceVoucher = asyncHandler(async (req, res, next) => {
+  const { bookingId } = req.params;
+  const { serviceType, serviceIndex } = req.query;
+  // serviceType: accommodations | carRentals | tripsWithDrivers
+  // serviceIndex: رقم الخدمة في المصفوفة (اختياري — لو ما موجود يرجع كلهم)
+
+  const booking = await bookingModel
+    .findById(bookingId)
+    .populate("provider", "name phone address")
+    .populate("accommodations.hotel", "name phone address")
+    .populate("carRentals.provider", "name phone")
+    .populate("tripsWithDrivers.provider", "name phone")
+    .lean();
+
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const generateAccommodationVouchers = () =>
+    booking.accommodations?.map((acc, i) => ({
+      voucherType: "SERVICE_VOUCHER",
+      voucherFor: "hotel",
+      voucherNumber: `VCH-${booking.bookingID}-ACC-${acc.serviceNumber || i + 1}`,
+      issueDate: new Date().toISOString(),
+      hotel: {
+        name: acc.hotel?.name || "N/A",
+        phone: acc.hotel?.phone || "",
+        address: acc.hotel?.address || "",
+      },
+      guests: booking.customers?.map((c) => ({
+        name: c.name,
+        type: c.ageType || "Adult",
+      })),
+      checkIn: acc.checkIn,
+      checkOut: acc.checkOut,
+      duration: acc.duration,
+      roomType: acc.roomType,
+      room: acc.room,
+      board: acc.board,
+      totalPax: booking.totalPax,
+      notes: "Kindly provide the mentioned services for the above guests.",
+    })) || [];
+
+  const generateCarVouchers = () =>
+    booking.carRentals?.map((car, i) => ({
+      voucherType: "SERVICE_VOUCHER",
+      voucherFor: "car_rental",
+      voucherNumber: `VCH-${booking.bookingID}-CAR-${car.serviceNumber || i + 1}`,
+      issueDate: new Date().toISOString(),
+      provider: {
+        name: car.provider?.name || "N/A",
+        phone: car.provider?.phone || "",
+      },
+      guests: booking.customers?.map((c) => ({
+        name: c.name,
+        type: c.ageType,
+      })),
+      brand: car.brand,
+      pickUp: car.pickUp,
+      dropOff: car.dropOff,
+      totalPax: booking.totalPax,
+    })) || [];
+
+  const generateTripVouchers = () =>
+    booking.tripsWithDrivers?.map((trip, i) => ({
+      voucherType: "SERVICE_VOUCHER",
+      voucherFor: "trip_driver",
+      voucherNumber: `VCH-${booking.bookingID}-TRIP-${trip.serviceNumber || i + 1}`,
+      issueDate: new Date().toISOString(),
+      provider: {
+        name: trip.provider?.name || "N/A",
+        phone: trip.provider?.phone || "",
+      },
+      guests: booking.customers?.map((c) => ({
+        name: c.name,
+        type: c.ageType,
+      })),
+      driverName: trip.driverName,
+      brand: trip.brand,
+      totalPax: booking.totalPax,
+    })) || [];
+
+  let vouchers = [];
+
+  if (!serviceType || serviceType === "accommodations") {
+    const v = generateAccommodationVouchers();
+    vouchers.push(
+      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
+    );
+  }
+  if (!serviceType || serviceType === "carRentals") {
+    const v = generateCarVouchers();
+    vouchers.push(
+      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
+    );
+  }
+  if (!serviceType || serviceType === "tripsWithDrivers") {
+    const v = generateTripVouchers();
+    vouchers.push(
+      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
+    );
+  }
+
+  vouchers = vouchers.filter(Boolean);
+
+  if (!vouchers.length) {
+    return next(
+      new Error("No services found for this booking", { cause: 404 }),
+    );
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: "Service voucher generated",
+    data: {
+      bookingID: booking.bookingID,
+      issuedBy: booking.createdBy,
+      vouchersCount: vouchers.length,
+      vouchers,
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────
+// Invoice — فاتورة للزبون بكل الخدمات والأسعار
+// ─────────────────────────────────────────────
+export const getInvoice = asyncHandler(async (req, res, next) => {
+  const { bookingId } = req.params;
+  // استلام نوع الخدمة المطلوبة من الـ Query (اختياري)
+  // القيم المتوقعة: 'accommodations', 'carRentals', 'tripsWithDrivers'
+  const { serviceType } = req.query; 
+
+  const booking = await bookingModel
+    .findById(bookingId)
+    .populate("provider", "name phone address")
+    .populate("accommodations.hotel", "name")
+    .populate("carRentals.provider", "name")
+    .populate("tripsWithDrivers.provider", "name")
+    .populate("createdBy", "userName")
+    .lean();
+
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const payments = await paymentModel
+    .find({ booking: booking._id })
+    .sort({ date: 1 })
+    .lean();
+
+  const lineItems = [];
+  let filteredTotal = 0;
+
+  // 1. فندق (Accommodations)
+  if (!serviceType || serviceType === "accommodations") {
+    booking.accommodations?.forEach((acc) => {
+      lineItems.push({
+        serviceNumber: acc.serviceNumber,
+        type: "Hotel Accommodation",
+        description: `${acc.hotel?.name || "Hotel"} — ${acc.roomType || ""} / ${acc.board || ""} / ${acc.duration || 0} Nights`,
+        checkIn: acc.checkIn,
+        checkOut: acc.checkOut,
+        amount: acc.sell,
+      });
+      filteredTotal += Number(acc.sell) || 0;
+    });
+  }
+
+  // 2. سيارات (Car Rentals)
+  if (!serviceType || serviceType === "carRentals") {
+    booking.carRentals?.forEach((car) => {
+      lineItems.push({
+        serviceNumber: car.serviceNumber,
+        type: "Car Rental",
+        description: `${car.provider?.name || "Provider"} — ${car.brand || ""}`,
+        pickUp: car.pickUp,
+        dropOff: car.dropOff,
+        amount: car.sell,
+      });
+      filteredTotal += Number(car.sell) || 0;
+    });
+  }
+
+  // 3. رحلات (Trips with Drivers)
+  if (!serviceType || serviceType === "tripsWithDrivers") {
+    booking.tripsWithDrivers?.forEach((trip) => {
+      lineItems.push({
+        serviceNumber: trip.serviceNumber,
+        type: "Trip with Driver",
+        description: `${trip.provider?.name || "Provider"} — ${trip.brand || ""} / ${trip.driverName || ""}`,
+        amount: trip.sell,
+      });
+      filteredTotal += Number(trip.sell) || 0;
+    });
+  }
+
+  // بناء الفاتورة بناءً على الفلترة
+  const invoice = {
+    invoiceType: serviceType ? `INVOICE - ${serviceType.toUpperCase()}` : "FULL INVOICE",
+    invoiceNumber: `INV-${booking.bookingID}-${Date.now().toString().slice(-4)}`,
+    issueDate: new Date().toISOString(),
+    booking: {
+      id: booking._id,
+      bookingID: booking.bookingID,
+    },
+    billTo: {
+      names: booking.customers?.map((c) => c.name) || [],
+      pax: booking.totalPax,
+    },
+    issuedBy: booking.createdBy?.userName || "N/A",
+    lineItems,
+    totals: {
+      // إذا كانت فاتورة مخصصة، السعر الإجمالي هو سعر الخدمة فقط
+      // إذا كانت فاتورة كاملة، السعر الإجمالي هو السعر الكلي للحجز
+      subtotal: serviceType ? filteredTotal : booking.totalToPay,
+      totalToPay: serviceType ? filteredTotal : booking.totalToPay,
+      totalPaid: booking.totalPaid,
+      remainingBalance: booking.remainingBalance,
+    },
+    // إظهار الدفعات فقط في الفاتورة الكاملة (أو حسب رغبتك)
+    payments: !serviceType ? payments.map((p) => ({
+      date: p.date,
+      amount: p.amount,
+      method: p.method,
+    })) : [],
+  };
+
+  return res.status(200).json({
+    success: true,
+    message: serviceType ? `Invoice for ${serviceType} generated` : "Full invoice generated",
+    data: invoice,
+  });
+});
+
+// ─────────────────────────────────────────────
+// Receipt — سند قبض لدفعة معينة
+// ─────────────────────────────────────────────
+export const getReceipt = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+
+  const payment = await paymentModel
+    .findById(paymentId)
+    .populate("recordedBy", "userName")
+    .lean();
+
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  const booking = await bookingModel
+    .findById(payment.booking)
+    .populate("provider", "name")
+    .lean();
+
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const receipt = {
+    receiptType: "RECEIPT",
+    receiptNumber: `RCP-${booking.bookingID}-${payment._id.toString().slice(-6).toUpperCase()}`,
+    issueDate: new Date().toISOString(),
+    paymentDate: payment.date,
+    receivedFrom: booking.customers?.[0]?.name || "Unknown",
+    amount: payment.amount,
+    method: payment.method,
+    methodLabel:
+      {
+        cash: "نقداً",
+        bank_transfer: "حوالة بنكية",
+        check: "شيك",
+        other: "أخرى",
+      }[payment.method] || payment.method,
+    notes: payment.notes,
+    forBooking: {
+      bookingID: booking.bookingID,
+      provider: booking.provider?.name,
+    },
+    bookingSummary: {
+      totalToPay: booking.totalToPay,
+      totalPaid: booking.totalPaid,
+      remainingBalance: booking.remainingBalance,
+      paymentStatus: booking.paymentStatus,
+    },
+    recordedBy: payment.recordedBy?.userName || "N/A",
+  };
+
+  return res.status(200).json({
+    success: true,
+    message: "Receipt generated",
+    data: receipt,
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/voucher/voucher.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import * as voucherController from "./controller/voucher.controller.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// Service Voucher — ورقة للمورد (بدون أسعار)
+// GET /api/v1/voucher/service/:bookingId?serviceType=accommodations&serviceIndex=0
+router.get(
+  "/service/:bookingId",
+  auth(endpoint.booking_view),
+  voucherController.getServiceVoucher,
+);
+
+// Invoice — فاتورة كاملة للزبون بالأسعار
+// GET /api/v1/voucher/invoice/:bookingId
+router.get(
+  "/invoice/:bookingId",
+  auth(endpoint.booking_view),
+  voucherController.getInvoice,
+);
+
+// Receipt — سند قبض لدفعة محددة
+// GET /api/v1/voucher/receipt/:paymentId
+router.get(
+  "/receipt/:paymentId",
+  auth(endpoint.booking_view),
+  voucherController.getReceipt,
+);
+
+export default router;
+</file>
+
+<file path="src/services/email.js">
+import nodemailer from "nodemailer";
+
+async function sendEmail(dest, subject, message) {
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: process.env.SENDEREMAIL,
+      pass: process.env.SENDEREMAILPASSWORD,
+    },
+  });
+
+  const info = await transporter.sendMail({
+    from: `"Inventory App" <${process.env.SENDEREMAIL}>`,
+    to: dest,
+    subject,
+    html: message,
+  });
+  return info;
+}
+export default sendEmail;
+</file>
+
+<file path="src/services/transaction.js">
+import mongoose from "mongoose";
+
+/**
+ * Executes `callback` inside a Mongoose transaction when a replica set is
+ * available. Falls back to a plain (non-transactional) execution on
+ * standalone MongoDB instances (common in dev/small deployments).
+ *
+ * The callback receives `session | null`. All Mongoose operations inside the
+ * callback should pass the session through — Mongoose silently ignores a
+ * null session, so the same callback body works in both modes.
+ *
+ * @param {(session: import('mongoose').ClientSession | null) => Promise<T>} callback
+ * @returns {Promise<T>}
+ */
+export const withTransaction = async (callback) => {
+  let session = null;
+
+  try {
+    session = await mongoose.startSession();
+    session.startTransaction();
+
+    const result = await callback(session);
+
+    await session.commitTransaction();
+    return result;
+  } catch (error) {
+    if (session) {
+      try {
+        await session.abortTransaction();
+      } catch (_) {
+        // Swallow abort errors — the original error is what matters.
+      }
+    }
+
+    // Standalone MongoDB instances reject transactions with this code.
+    // In that case we retry without a session so the app still functions.
+    // NOTE: without a transaction, the operations are no longer atomic.
+    // For production use, always run MongoDB as a replica set.
+    const isNoReplicaSetError =
+      error?.codeName === "IllegalOperation" ||
+      error?.message?.includes(
+        "Transaction numbers are only allowed on a replica set",
+      );
+
+    if (isNoReplicaSetError) {
+      console.warn(
+        "⚠️  MongoDB transactions require a replica set. " +
+          "Falling back to non-transactional execution. " +
+          "Operations are NOT atomic in this mode.",
+      );
+      return callback(null);
+    }
+
+    throw error;
+  } finally {
+    if (session) {
+      session.endSession();
+    }
+  }
+};
+</file>
+
+<file path="app.js">
+import express from "express";
+import dotenv from "dotenv";
+import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import connectDB from "./DB/connection.js";
+import * as indexRouter from "./src/modules/indexRouter.js";
+
+dotenv.config({ path: "./config/.env" });
+
+// ── Fail fast if any critical env var is absent ──────────────────────────────
+// This prevents the app from starting in a broken state and producing cryptic
+// runtime errors deep inside request handlers.
+const REQUIRED_ENV = [
+  "DBURI",
+  "SIGNINTOKEN",
+  "FORGOTPASSWORDTOKEN",
+  "BEARERKEY",
+  "SALTROUND",
+  "SENDEREMAIL",
+  "SENDEREMAILPASSWORD",
+];
+
+const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
+if (missingEnv.length) {
+  console.error(
+    `❌ Missing required environment variables: ${missingEnv.join(", ")}`,
+  );
+  console.error("   Add them to config/.env and restart.");
+  process.exit(1);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(helmet());
+
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",")
+  : ["http://localhost:3000", "http://localhost:5173"];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin))
+        return callback(null, true);
+      callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+  }),
+);
+
+app.use(express.json({ limit: "10kb" }));
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: {
+    success: false,
+    message: "Too many requests, please try again later.",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+connectDB();
+
+const baseUrl = process.env.BASEURL || "/api/v1";
+
+app.use(`${baseUrl}/auth`, authLimiter, indexRouter.authRouter);
+app.use(`${baseUrl}/booking`, indexRouter.bookingRouter);
+app.use(`${baseUrl}/booking`, indexRouter.paymentRouter);
+app.use(`${baseUrl}/provider`, indexRouter.providerRouter);
+app.use(`${baseUrl}/log`, indexRouter.logRouter);
+app.use(`${baseUrl}/dashboard`, indexRouter.dashboardRouter);
+app.use(`${baseUrl}/statement`, indexRouter.statementRouter);
+app.use(`${baseUrl}/voucher`, indexRouter.voucherRouter);
+app.use(`${baseUrl}/expense`, indexRouter.expenseRouter);
+
+// Global Error Handler
+app.use((err, req, res, next) => {
+  const status = err.cause || 500;
+  return res.status(status).json({
+    success: false,
+    message: err.message || "Server Error",
+    stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+  });
+});
+
+// 404
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: "Route not found" });
+});
+
+app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+</file>
+
+<file path="DB/model/booking.model.js">
+import mongoose from "mongoose";
+
+const bookingSchema = new mongoose.Schema(
+  {
+    bookingID: Number,
+    provider: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Provider",
+      required: true,
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    status: {
+      type: String,
+      enum: ["pending", "confirmed", "cancelled", "completed"],
+      default: "pending",
+    },
+    totalToPay: { type: Number, default: 0 },
+    totalToBuy: { type: Number, default: 0 },
+    totalProfit: { type: Number, default: 0 },
+    totalPaid: { type: Number, default: 0 },
+    remainingBalance: { type: Number, default: 0 },
+    paymentStatus: {
+      type: String,
+      enum: ["unpaid", "partial", "paid"],
+      default: "unpaid",
+    },
+    customers: [{ name: String, ageType: String }],
+    accommodations: [
+      {
+        serviceNumber: Number,
+        hotel: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Provider",
+          required: true,
+        },
+        checkIn: Date,
+        checkOut: Date,
+        duration: Number,
+        room: String,
+        roomType: String,
+        board: String,
+        buy: { type: Number, default: 0 },
+        sell: { type: Number, default: 0 },
+        profit: { type: Number, default: 0 },
+      },
+    ],
+    carRentals: [
+      {
+        serviceNumber: Number,
+        provider: { type: mongoose.Schema.Types.ObjectId, ref: "Provider" },
+        brand: String,
+        pickUp: Date,
+        dropOff: Date,
+        buy: { type: Number, default: 0 },
+        sell: { type: Number, default: 0 },
+        profit: { type: Number, default: 0 },
+      },
+    ],
+    tripsWithDrivers: [
+      {
+        serviceNumber: Number,
+        provider: { type: mongoose.Schema.Types.ObjectId, ref: "Provider" },
+        driverName: String,
+        brand: String,
+        buy: { type: Number, default: 0 },
+        sell: { type: Number, default: 0 },
+        profit: { type: Number, default: 0 },
+      },
+    ],
+    totalPax: { adults: Number, kids: Number, total: Number },
+  },
+  { timestamps: true },
+);
+
+// FIX: Unique compound index prevents two simultaneous inserts from
+// getting the same bookingID for the same provider (race condition).
+// The DB will reject the duplicate and the caller will receive an error
+// rather than silently producing ambiguous IDs.
+bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
+
+bookingSchema.pre("save", async function () {
+  try {
+    const Provider = mongoose.model("Provider");
+    const Booking = mongoose.model("Booking");
+
+    // ── Sequence / counter logic ─────────────────────────────────────────
+    if (!this.isNew && this.isModified("provider")) {
+      const oldDoc = await Booking.findById(this._id).lean();
+      if (oldDoc && oldDoc.provider.toString() !== this.provider.toString()) {
+        await Provider.findByIdAndUpdate(oldDoc.provider, {
+          $inc: { currentSequence: -1, totalBookings: -1 },
+        });
+        const newP = await Provider.findByIdAndUpdate(
+          this.provider,
+          { $inc: { currentSequence: 1, totalBookings: 1 } },
+          { new: true },
+        );
+        this.bookingID = newP.currentSequence;
+      }
+    }
+
+    if (this.isNew) {
+      const mainP = await Provider.findByIdAndUpdate(
+        this.provider,
+        { $inc: { currentSequence: 1, totalBookings: 1 } },
+        { new: true },
+      );
+      if (!mainP) throw new Error("Main Provider not found");
+      this.bookingID = mainP.currentSequence;
+    }
+
+    // ── Per-service sequence numbers ─────────────────────────────────────
+    const processServices = async (fieldName, providerKey) => {
+      if (!this[fieldName] || this[fieldName].length === 0) return;
+      const oldDoc = !this.isNew
+        ? await Booking.findById(this._id).lean()
+        : null;
+
+      for (let i = 0; i < this[fieldName].length; i++) {
+        const item = this[fieldName][i];
+        const currentPid = item[providerKey]?.toString();
+        if (!currentPid) continue;
+
+        if (!item.serviceNumber) {
+          if (currentPid === this.provider.toString()) {
+            this[fieldName][i].serviceNumber = this.bookingID;
+          } else {
+            const otherP = await Provider.findByIdAndUpdate(
+              currentPid,
+              { $inc: { currentSequence: 1 } },
+              { new: true },
+            );
+            this[fieldName][i].serviceNumber = otherP
+              ? otherP.currentSequence
+              : 0;
+          }
+        } else if (item._id && oldDoc?.[fieldName]) {
+          const oldItem = oldDoc[fieldName].find(
+            (o) => o._id.toString() === item._id.toString(),
+          );
+          const oldPid = oldItem?.[providerKey]?.toString();
+          if (oldPid && oldPid !== currentPid) {
+            await Provider.findByIdAndUpdate(oldPid, {
+              $inc: { currentSequence: -1 },
+            });
+            if (currentPid === this.provider.toString()) {
+              this[fieldName][i].serviceNumber = this.bookingID;
+            } else {
+              const otherP = await Provider.findByIdAndUpdate(
+                currentPid,
+                { $inc: { currentSequence: 1 } },
+                { new: true },
+              );
+              this[fieldName][i].serviceNumber = otherP
+                ? otherP.currentSequence
+                : 0;
+            }
+          }
+        }
+      }
+    };
+
+    await processServices("accommodations", "hotel");
+    await processServices("carRentals", "provider");
+    await processServices("tripsWithDrivers", "provider");
+
+    this.markModified("accommodations");
+    this.markModified("carRentals");
+    this.markModified("tripsWithDrivers");
+
+    // ── Auto-calculate hotel durations ───────────────────────────────────
+    if (this.accommodations) {
+      this.accommodations.forEach((acc) => {
+        if (acc.checkIn && acc.checkOut) {
+          acc.duration = Math.ceil(
+            (new Date(acc.checkOut) - new Date(acc.checkIn)) /
+              (1000 * 60 * 60 * 24),
+          );
+        }
+      });
+    }
+
+    // ── Financial roll-up ────────────────────────────────────────────────
+    let totalSell = 0;
+    let totalBuy = 0;
+    let totalProf = 0;
+
+    const allServices = [
+      ...(this.accommodations || []),
+      ...(this.carRentals || []),
+      ...(this.tripsWithDrivers || []),
+    ];
+
+    allServices.forEach((s) => {
+      s.profit = (Number(s.sell) || 0) - (Number(s.buy) || 0);
+      totalSell += Number(s.sell) || 0;
+      totalBuy += Number(s.buy) || 0;
+      totalProf += s.profit;
+    });
+
+    this.totalToPay = totalSell;
+    this.totalToBuy = totalBuy;
+    this.totalProfit = totalProf;
+    this.remainingBalance = this.totalToPay - this.totalPaid;
+
+    if (this.totalPaid <= 0) this.paymentStatus = "unpaid";
+    else if (this.totalPaid >= this.totalToPay) this.paymentStatus = "paid";
+    else this.paymentStatus = "partial";
+  } catch (error) {
+    throw error;
+  }
+});
+
+export default mongoose.model("Booking", bookingSchema);
+</file>
+
+<file path="src/middleware/auth.js">
+import jwt from "jsonwebtoken";
+import userModel from "../../DB/model/user.model.js";
+
+export const auth = (accessRoles = []) => {
+  return async (req, res, next) => {
+    try {
+      const { token } = req.headers;
+
+      if (!token) {
+        return res.status(401).json({ message: "Token is required" });
+      }
+
+      const bearerKey = process.env.BEARERKEY;
+
+      if (!token.startsWith(bearerKey)) {
+        return res.status(401).json({ message: "Invalid token format" });
+      }
+
+      // slice() safely strips the prefix regardless of whether the prefix
+      // string happens to appear again inside the token itself.
+      // split(bearerKey)[1] would break in that (admittedly unlikely) case.
+      const rawToken = token.slice(bearerKey.length);
+
+      if (!rawToken) {
+        return res.status(401).json({ message: "Token is empty" });
+      }
+
+      const decoded = jwt.verify(rawToken, process.env.SIGNINTOKEN);
+
+      if (!decoded?.id) {
+        return res.status(401).json({ message: "Invalid token payload" });
+      }
+
+      const user = await userModel
+        .findById(decoded.id)
+        .select("_id role blocked");
+
+      if (!user) {
+        return res.status(401).json({ message: "User not found" });
+      }
+
+      if (user.blocked) {
+        return res.status(403).json({ message: "Account is blocked" });
+      }
+
+      if (!accessRoles.includes(user.role)) {
+        return res.status(403).json({ message: "Unauthorized" });
+      }
+
+      req.user = user;
+      next();
+    } catch (error) {
+      if (error.name === "TokenExpiredError") {
+        return res.status(401).json({ message: "Token expired" });
+      }
+      if (error.name === "JsonWebTokenError") {
+        return res.status(401).json({ message: "Invalid token" });
+      }
+      return res.status(500).json({ message: "Server error" });
+    }
+  };
+};
+</file>
+
+<file path="src/modules/auth/controller/auth.controller.js">
+import sendEmail from "../../../services/email.js";
+import jwt from "jsonwebtoken";
+import userModel from "../../../../DB/model/user.model.js";
+import logModel from "../../../../DB/model/log.model.js";
+import { nanoid } from "nanoid";
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+
+export const signIn = asyncHandler(async (req, res, next) => {
+  const { email, password } = req.body;
+
+  const user = await userModel.findOne({ email });
+  if (!user) {
+    return next(new Error("Invalid login credentials", { cause: 400 }));
+  }
+
+  const isMatch = await user.comparePassword(password);
+  if (!isMatch) {
+    return next(new Error("Invalid login credentials", { cause: 400 }));
+  }
+
+  if (user.blocked) {
+    return res.status(403).json({ message: "This account is blocked" });
+  }
+
+  const token = jwt.sign({ id: user._id }, process.env.SIGNINTOKEN, {
+    expiresIn: "8h",
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Login successfully",
+    data: {
+      token,
+      user: {
+        id: user._id,
+        userName: user.userName,
+        email: user.email,
+        role: user.role,
+      },
+    },
+    errors: null,
+  });
+});
+
+export const sendCode = asyncHandler(async (req, res, next) => {
+  const { email } = req.body;
+
+  const user = await userModel.findOne({ email }).select("_id email");
+  if (!user) {
+    // Do not reveal whether the email exists (security best practice).
+    return res.status(200).json({
+      success: true,
+      message: "If this email exists, a code has been sent.",
+      data: null,
+      errors: null,
+    });
+  }
+
+  const code = nanoid();
+  await sendEmail(
+    email,
+    "Forgot Password",
+    `Your verification code: <b>${code}</b>`,
+  );
+  await userModel.updateOne({ _id: user._id }, { sendCode: code });
+
+  const token = jwt.sign({ id: user._id }, process.env.FORGOTPASSWORDTOKEN, {
+    expiresIn: "1h",
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "If this email exists, a code has been sent.",
+    data: { token },
+    errors: null,
+  });
+});
+
+export const forgotPassword = asyncHandler(async (req, res, next) => {
+  const { otp, email, newPassword } = req.body;
+  let { token } = req.headers;
+
+  if (!token || !token.startsWith(process.env.BEARERKEY)) {
+    return next(new Error("Invalid token", { cause: 400 }));
+  }
+
+  token = token.slice(process.env.BEARERKEY.length);
+  const decoded = jwt.verify(token, process.env.FORGOTPASSWORDTOKEN);
+
+  if (!otp || !decoded) {
+    return next(new Error("Invalid request", { cause: 400 }));
+  }
+
+  // FIX: Use find() + save() instead of findOneAndUpdate() so the
+  // userSchema.pre('save') hook handles hashing consistently.
+  // Previously this path manually called bcrypt.hash(), creating a third
+  // hashing path that ignored SALTROUND.
+  const user = await userModel.findOne({
+    email,
+    sendCode: otp,
+    _id: decoded.id,
+  });
+
+  if (!user) {
+    return next(new Error("Invalid OTP or email", { cause: 400 }));
+  }
+
+  user.password = newPassword; // pre('save') will hash this
+  user.sendCode = "dontTrust32";
+  await user.save();
+
+  return res.status(200).json({
+    success: true,
+    message: "Password changed successfully",
+    data: null,
+    errors: null,
+  });
+});
+
+export const createUser = asyncHandler(async (req, res, next) => {
+  const { userName, email, password, role } = req.body;
+
+  const exists = await userModel.findOne({ email }).select("_id");
+  if (exists) {
+    return res
+      .status(409)
+      .json({ success: false, message: "Email already exists" });
+  }
+
+  // userModel.create() triggers pre('save'), so password is hashed correctly.
+  const savedUser = await userModel.create({ userName, email, password, role });
+
+  await logModel.create({
+    user: req.user._id,
+    action: "CREATE_USER",
+    details: {
+      userId: savedUser._id,
+      userName: savedUser.userName,
+      email: savedUser.email,
+      role: savedUser.role,
+    },
+  });
+
+  return res.status(201).json({
+    success: true,
+    message: "User created successfully",
+    data: { user_id: savedUser._id },
+    errors: null,
+  });
+});
+
+export const updateUser = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+
+  // Fields that must never be modified through this endpoint.
+  const protectedFields = ["_id", "sendCode"];
+
+  const user = await userModel.findById(id);
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  const passwordChanged = Boolean(req.body.password);
+
+  // Apply every permitted field directly onto the document.
+  // Because we use user.save() below, the pre('save') hook will hash the
+  // password if it was modified — no manual bcrypt.hash() needed, and
+  // SALTROUND from env is always respected.
+  for (const [key, value] of Object.entries(req.body)) {
+    if (!protectedFields.includes(key) && value != null) {
+      user[key] = value;
+    }
+  }
+
+  await user.save();
+
+  await logModel.create({
+    user: req.user._id,
+    action: "UPDATE_USER",
+    details: {
+      userId: id,
+      updatedFields: Object.keys(req.body).filter(
+        (k) => !protectedFields.includes(k) && k !== "password",
+      ),
+      passwordChanged,
+    },
+  });
+
+  // Return the document without sensitive fields.
+  const safeUser = user.toObject();
+  delete safeUser.password;
+  delete safeUser.sendCode;
+
+  return res.status(200).json({
+    success: true,
+    message: "User updated successfully",
+    data: { user: safeUser },
+    errors: null,
+  });
+});
+
+export const getAllUsers = asyncHandler(async (req, res, next) => {
+  const { role, blocked } = req.query;
+  const query = {};
+  if (role) query.role = role;
+  if (blocked !== undefined) query.blocked = blocked === "true";
+
+  const users = await userModel
+    .find(query)
+    .select("-password -sendCode")
+    .sort({ createdAt: -1 });
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: { count: users.length, users },
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/booking/booking.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as bookingController from "./controller/booking.controller.js";
+import * as validators from "./booking.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// Create booking
+router.post(
+  "/create",
+  auth(endpoint.booking_manage),
+  validation(validators.createBooking),
+  bookingController.createBooking,
+);
+
+// Get all bookings
+router.get(
+  "/getAll",
+  auth(endpoint.booking_view),
+  bookingController.getAllBookings,
+);
+
+// Get a booking by ID
+router.get(
+  "/get/:id",
+  auth(endpoint.booking_view),
+  validation(validators.bookingIdParam),
+  bookingController.getBookingById,
+);
+
+// Update booking
+router.patch(
+  "/edit/:id",
+  auth(endpoint.booking_manage),
+  validation(validators.updateBooking),
+  bookingController.updateBooking,
+);
+
+// Add a service to an existing booking
+router.patch(
+  "/:id/addService",
+  auth(endpoint.booking_manage),
+  validation(validators.addService),
+  bookingController.addServiceToBooking,
+);
+
+// Remove a service from an existing booking
+router.patch(
+  "/:id/remove",
+  auth(endpoint.booking_manage),
+  validation(validators.removeService),
+  bookingController.removeServiceFromBooking,
+);
+
+// Delete booking
+router.delete(
+  "/delete/:id",
+  auth(endpoint.booking_delete),
+  validation(validators.bookingIdParam),
+  bookingController.deleteBooking,
+);
+
+// NOTE: Provider statement was previously duplicated here under
+// GET /booking/statement/:providerId. It has been removed.
+// Use GET /api/v1/statement/provider/:providerId instead.
+
+export default router;
+</file>
+
+<file path="src/modules/booking/controller/booking.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+import logModel from "../../../../DB/model/log.model.js";
+import { pagination } from "../../../services/pagination.js";
+import mongoose from "mongoose";
+
+// Fields that must never be overwritten via updateBooking.
+// These are computed values managed by the pre-save hook and payment logic.
+const PROTECTED_BOOKING_FIELDS = [
+  "bookingID",
+  "createdBy",
+  "totalPaid",
+  "remainingBalance",
+  "paymentStatus",
+  "totalToPay",
+  "totalProfit",
+];
+
+export const createBooking = asyncHandler(async (req, res, next) => {
+  const data = req.body;
+
+  const providerExists = await providerModel.findById(data.provider);
+  if (!providerExists)
+    return next(new Error("Main Provider not found", { cause: 404 }));
+
+  if (data.accommodations) {
+    data.accommodations.forEach((acc) => {
+      if (acc.checkIn && acc.checkOut) {
+        acc.duration = Math.ceil(
+          (new Date(acc.checkOut) - new Date(acc.checkIn)) /
+            (1000 * 60 * 60 * 24),
+        );
+      }
+    });
+  }
+
+  if (data.totalPax) {
+    data.totalPax.total =
+      (Number(data.totalPax.adults) || 0) + (Number(data.totalPax.kids) || 0);
+  }
+
+  data.createdBy = req.user._id;
+
+  const booking = await bookingModel.create(data);
+
+  await logModel.create({
+    user: req.user._id,
+    action: "CREATE_BOOKING",
+    details: {
+      bookingID: booking.bookingID,
+      mongoId: booking._id,
+      customerNames: booking.customers
+        .filter((c) => c?.name)
+        .map((c) => c.name),
+    },
+  });
+
+  return res.status(201).json({
+    success: true,
+    message: "Booking created successfully",
+    data: { bookingID: booking.bookingID, booking },
+    errors: null,
+  });
+});
+
+export const getAllBookings = asyncHandler(async (req, res) => {
+  const {
+    provider,
+    status,
+    paymentStatus,
+    customerName,
+    fromDate,
+    toDate,
+    minAmount,
+    maxAmount,
+    sortBy = "createdAt",
+    sortOrder = "desc",
+    page,
+    size,
+  } = req.query;
+
+  const query = {};
+  if (provider) query.provider = provider;
+  if (status) query.status = status;
+  if (paymentStatus) query.paymentStatus = paymentStatus;
+  if (customerName)
+    query["customers.name"] = { $regex: customerName, $options: "i" };
+
+  if (fromDate || toDate) {
+    query.createdAt = {};
+    if (fromDate) query.createdAt.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.createdAt.$lte = to;
+    }
+  }
+
+  if (minAmount || maxAmount) {
+    query.totalToPay = {};
+    if (minAmount) query.totalToPay.$gte = Number(minAmount);
+    if (maxAmount) query.totalToPay.$lte = Number(maxAmount);
+  }
+
+  const allowedSortFields = [
+    "createdAt",
+    "bookingID",
+    "totalToPay",
+    "totalProfit",
+  ];
+  const sortField = allowedSortFields.includes(sortBy) ? sortBy : "createdAt";
+  const sort = { [sortField]: sortOrder === "asc" ? 1 : -1 };
+
+  const { limit, skip } = pagination(page, size);
+
+  const [bookings, totalCount] = await Promise.all([
+    bookingModel
+      .find(query)
+      .populate("provider", "name type")
+      .populate("createdBy", "userName")
+      .limit(limit)
+      .skip(skip)
+      .sort(sort),
+    bookingModel.countDocuments(query),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      totalCount,
+      page: parseInt(page) || 1,
+      totalPages: Math.ceil(totalCount / limit),
+      results: bookings.length,
+      bookings,
+    },
+    errors: null,
+  });
+});
+
+export const getBookingById = asyncHandler(async (req, res, next) => {
+  const booking = await bookingModel
+    .findById(req.params.id)
+    .populate(
+      "provider accommodations.hotel carRentals.provider tripsWithDrivers.provider createdBy",
+    );
+
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const payments = await paymentModel
+    .find({ booking: booking._id })
+    .populate("recordedBy", "userName")
+    .sort({ date: -1 });
+
+  return res.status(200).json({
+    success: true,
+    message: "Booking retrieved successfully",
+    data: { booking, payments },
+    errors: null,
+  });
+});
+
+export const updateBooking = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const data = req.body;
+
+  const booking = await bookingModel.findById(id);
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const serviceArrays = ["accommodations", "carRentals", "tripsWithDrivers"];
+
+  Object.keys(data).forEach((key) => {
+    if (PROTECTED_BOOKING_FIELDS.includes(key)) return;
+
+    if (serviceArrays.includes(key) && Array.isArray(data[key])) {
+      booking[key] = data[key].map((newItem, index) => {
+        const oldItem = booking[key][index];
+        if (oldItem) {
+          return {
+            ...oldItem.toObject(),
+            ...newItem,
+            _id: oldItem._id,
+            serviceNumber: newItem.serviceNumber || oldItem.serviceNumber,
+          };
+        }
+        return newItem;
+      });
+    } else if (key === "totalPax") {
+      booking.totalPax = { ...booking.totalPax.toObject(), ...data[key] };
+    } else {
+      booking[key] = data[key];
+    }
+  });
+
+  if (booking.totalPax) {
+    booking.totalPax.total =
+      (Number(booking.totalPax.adults) || 0) +
+      (Number(booking.totalPax.kids) || 0);
+  }
+
+  await booking.save();
+
+  await logModel.create({
+    user: req.user._id,
+    action: "UPDATE_BOOKING",
+    details: {
+      bookingID: booking.bookingID,
+      updatedFields: Object.keys(data).filter(
+        (k) => !PROTECTED_BOOKING_FIELDS.includes(k),
+      ),
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Booking updated successfully",
+    data: { booking },
+    errors: null,
+  });
+});
+
+export const addServiceToBooking = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const { serviceType, serviceData } = req.body;
+
+  const validServiceTypes = [
+    "accommodations",
+    "carRentals",
+    "tripsWithDrivers",
+  ];
+  if (!validServiceTypes.includes(serviceType)) {
+    return next(new Error("Invalid service type", { cause: 400 }));
+  }
+
+  const booking = await bookingModel.findById(id);
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  booking[serviceType].push(serviceData);
+  booking.markModified(serviceType);
+  await booking.save();
+
+  const addedService = booking[serviceType][booking[serviceType].length - 1];
+
+  await logModel.create({
+    user: req.user._id,
+    action: "ADD_SERVICE",
+    details: {
+      bookingID: booking.bookingID,
+      serviceType,
+      serviceNumber: addedService.serviceNumber,
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Service added successfully",
+    data: { serviceNumber: addedService.serviceNumber, booking },
+    errors: null,
+  });
+});
+
+export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const { serviceType, serviceId } = req.body;
+
+  const booking = await bookingModel.findById(id);
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const serviceItem = booking[serviceType].find(
+    (item) => item._id.toString() === serviceId,
+  );
+  if (!serviceItem) return next(new Error("Service not found", { cause: 404 }));
+
+  const pKey = serviceType === "accommodations" ? "hotel" : "provider";
+  const providerId = serviceItem[pKey]?.toString();
+
+  // FIX: Only decrement the sub-provider's sequence if this service belongs
+  // to a *different* provider than the booking's main provider.
+  // Previously this always decremented, causing a double-decrement when the
+  // service's provider was the same as the booking's main provider (since
+  // deleteBooking also decrements the main provider's sequence).
+  if (providerId && providerId !== booking.provider.toString()) {
+    await mongoose.model("Provider").findByIdAndUpdate(providerId, {
+      $inc: { currentSequence: -1 },
+    });
+  }
+
+  await logModel.create({
+    user: req.user._id,
+    action: "REMOVE_SERVICE",
+    details: {
+      bookingID: booking.bookingID,
+      serviceType,
+      serviceNumber: serviceItem.serviceNumber,
+      providerId,
+    },
+  });
+
+  booking[serviceType] = booking[serviceType].filter(
+    (item) => item._id.toString() !== serviceId,
+  );
+  await booking.save();
+
+  return res.status(200).json({
+    success: true,
+    message: "Service removed successfully",
+    data: { booking },
+    errors: null,
+  });
+});
+
+export const deleteBooking = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const booking = await bookingModel.findById(id);
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const Provider = mongoose.model("Provider");
+
+  await Provider.findByIdAndUpdate(booking.provider, {
+    $inc: { currentSequence: -1, totalBookings: -1 },
+  });
+
+  const services = [
+    { items: booking.accommodations, pKey: "hotel" },
+    { items: booking.carRentals, pKey: "provider" },
+    { items: booking.tripsWithDrivers, pKey: "provider" },
+  ];
+
+  for (const service of services) {
+    for (const item of service.items) {
+      const pId = item[service.pKey]?.toString();
+      // Only decrement sub-providers that differ from the main provider.
+      if (pId && pId !== booking.provider.toString()) {
+        await Provider.findByIdAndUpdate(pId, {
+          $inc: { currentSequence: -1 },
+        });
+      }
+    }
+  }
+
+  await paymentModel.deleteMany({ booking: id });
+
+  await logModel.create({
+    user: req.user._id,
+    action: "DELETE_BOOKING",
+    details: {
+      bookingID: booking.bookingID,
+      customer: booking.customers[0]?.name,
+    },
+  });
+
+  await booking.deleteOne();
+
+  return res.status(200).json({
+    success: true,
+    message: "Booking deleted successfully",
+    data: null,
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/payment/controller/payment.controller.js">
+import mongoose from "mongoose";
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import logModel from "../../../../DB/model/log.model.js";
+import { pagination } from "../../../services/pagination.js";
+import { withTransaction } from "../../../services/transaction.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: recalculate totalPaid from all payments and sync the booking.
+// Accepts an optional session for transactional execution.
+// Passing session=null runs the same operations outside a transaction (fallback).
+// ─────────────────────────────────────────────────────────────────────────────
+const syncBookingPayments = async (bookingId, session = null) => {
+  const aggregateOptions = session ? { session } : {};
+  const queryOptions = session ? { session } : {};
+
+  const result = await paymentModel.aggregate(
+    [
+      { $match: { booking: new mongoose.Types.ObjectId(bookingId) } },
+      { $group: { _id: null, totalPaid: { $sum: "$amount" } } },
+    ],
+    aggregateOptions,
+  );
+
+  const totalPaid = result[0]?.totalPaid || 0;
+  const booking = await bookingModel
+    .findById(bookingId)
+    .session(session || null);
+
+  if (!booking) return null;
+
+  let paymentStatus = "unpaid";
+  if (totalPaid >= booking.totalToPay && totalPaid > 0) {
+    paymentStatus = "paid";
+  } else if (totalPaid > 0) {
+    paymentStatus = "partial";
+  }
+
+  await bookingModel.updateOne(
+    { _id: bookingId },
+    {
+      $set: {
+        totalPaid,
+        remainingBalance: booking.totalToPay - totalPaid,
+        paymentStatus,
+      },
+    },
+    queryOptions,
+  );
+
+  return {
+    totalToPay: booking.totalToPay,
+    totalPaid,
+    remainingBalance: booking.totalToPay - totalPaid,
+    paymentStatus,
+  };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Add payment
+// ─────────────────────────────────────────────────────────────────────────────
+export const addPayment = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const { amount, date, method, notes } = req.body;
+
+  const booking = await bookingModel
+    .findById(id)
+    .select("bookingID customers totalToPay totalPaid paymentStatus");
+
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  if (booking.paymentStatus === "paid") {
+    return next(new Error("Booking is already fully paid", { cause: 400 }));
+  }
+
+  const numAmount = Number(amount);
+
+  // withTransaction handles the replica set check and falls back gracefully.
+  // See src/services/transaction.js for details.
+  const result = await withTransaction(async (session) => {
+    const payment = await paymentModel.create(
+      [
+        {
+          booking: id,
+          bookingID: booking.bookingID,
+          amount: numAmount,
+          date: date || new Date(),
+          method: method || "cash",
+          notes,
+          recordedBy: req.user._id,
+        },
+      ],
+      { session },
+    );
+
+    const updated = await syncBookingPayments(booking._id, session);
+
+    await logModel.create(
+      [
+        {
+          user: req.user._id,
+          action: "ADD_PAYMENT",
+          details: {
+            bookingID: booking.bookingID,
+            paymentId: payment[0]._id,
+            amount: numAmount,
+            method,
+            newTotalPaid: updated.totalPaid,
+            newRemainingBalance: updated.remainingBalance,
+            newPaymentStatus: updated.paymentStatus,
+          },
+        },
+      ],
+      { session },
+    );
+
+    return { payment: payment[0], bookingSummary: updated };
+  });
+
+  return res.status(201).json({
+    success: true,
+    message: "Payment added successfully",
+    data: result,
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get payments for a specific booking
+// ─────────────────────────────────────────────────────────────────────────────
+export const getPaymentsByBooking = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+
+  const booking = await bookingModel
+    .findById(id)
+    .select(
+      "bookingID customers totalToPay totalPaid remainingBalance paymentStatus",
+    );
+
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const payments = await paymentModel
+    .find({ booking: id })
+    .populate("recordedBy", "userName")
+    .sort({ date: -1 });
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      bookingID: booking.bookingID,
+      customer: booking.customers[0]?.name || "Unknown",
+      totalToPay: booking.totalToPay,
+      totalPaid: booking.totalPaid,
+      remainingBalance: booking.remainingBalance,
+      paymentStatus: booking.paymentStatus,
+      paymentsCount: payments.length,
+      payments,
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all payments (with filtering — for accounting)
+// ─────────────────────────────────────────────────────────────────────────────
+export const getAllPayments = asyncHandler(async (req, res) => {
+  const { method, fromDate, toDate, page, size } = req.query;
+
+  const query = {};
+  if (method) query.method = method;
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const { limit, skip } = pagination(page, size);
+
+  const [payments, totalCount, totalAmountResult] = await Promise.all([
+    paymentModel
+      .find(query)
+      .populate("booking", "bookingID customers status")
+      .populate("recordedBy", "userName")
+      .sort({ date: -1 })
+      .limit(limit)
+      .skip(skip),
+    paymentModel.countDocuments(query),
+    paymentModel.aggregate([
+      { $match: query },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      totalAmount: totalAmountResult[0]?.total || 0,
+      payments,
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete payment
+// ─────────────────────────────────────────────────────────────────────────────
+export const deletePayment = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+
+  const payment = await paymentModel.findById(paymentId);
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  const result = await withTransaction(async (session) => {
+    const bookingId = payment.booking;
+    const deletedAmount = payment.amount;
+
+    await paymentModel.findByIdAndDelete(paymentId, { session });
+    const updated = await syncBookingPayments(bookingId, session);
+
+    await logModel.create(
+      [
+        {
+          user: req.user._id,
+          action: "DELETE_PAYMENT",
+          details: {
+            paymentId,
+            bookingID: payment.bookingID,
+            deletedAmount,
+            newTotalPaid: updated.totalPaid,
+            newPaymentStatus: updated.paymentStatus,
+          },
+        },
+      ],
+      { session },
+    );
+
+    return { bookingSummary: updated };
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Payment deleted successfully",
+    data: result,
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/provider/controller/provider.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+import logModel from "../../../../DB/model/log.model.js";
+import mongoose from "mongoose";
+import { pagination } from "../../../services/pagination.js";
+
+export const createProvider = asyncHandler(async (req, res, next) => {
+  const { name, type, phone, address } = req.body;
+
+  const isExist = await providerModel.findOne({ name });
+  if (isExist)
+    return next(new Error("Provider name already exists", { cause: 400 }));
+
+  const provider = await providerModel.create({
+    name,
+    type,
+    phone,
+    address,
+    currentSequence: 0,
+  });
+
+  await logModel.create({
+    user: req.user._id,
+    action: "CREATE_PROVIDER",
+    details: { providerId: provider._id, providerName: provider.name },
+  });
+
+  res.status(201).json({
+    success: true,
+    message: "Provider created successfully",
+    data: { provider },
+    errors: null,
+  });
+});
+
+export const deleteProvider = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+
+  const hasBookings = await mongoose.model("Booking").findOne({
+    $or: [{ provider: id }, { "accommodations.hotel": id }],
+  });
+
+  if (hasBookings) {
+    return next(
+      new Error("Cannot delete provider linked to active bookings", {
+        cause: 400,
+      }),
+    );
+  }
+
+  const provider = await providerModel.findByIdAndDelete(id);
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  await logModel.create({
+    user: req.user._id,
+    action: "DELETE_PROVIDER",
+    details: { providerId: id, providerName: provider.name },
+  });
+
+  res.status(200).json({
+    success: true,
+    message: "Provider deleted successfully",
+    data: null,
+    errors: null,
+  });
+});
+
+export const getAllProviders = asyncHandler(async (req, res, next) => {
+  const { type, page, size } = req.query;
+
+  const query = {};
+  if (type) query.type = type;
+
+  // Providers are a relatively small dataset, so we default to 50 per page
+  // rather than the standard 10, but still enforce the global MAX_PAGE_SIZE cap
+  // to prevent unbounded queries.
+  const { limit, skip } = pagination(page, size || 50);
+
+  const [providers, totalCount] = await Promise.all([
+    providerModel.find(query).sort({ name: 1 }).limit(limit).skip(skip),
+    providerModel.countDocuments(query),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      page: parseInt(page) || 1,
+      count: providers.length,
+      providers,
+    },
+    errors: null,
+  });
+});
+
+export const getProviderById = asyncHandler(async (req, res, next) => {
+  const provider = await providerModel.findById(req.params.id);
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: { provider },
+    errors: null,
+  });
+});
+
+export const updateProvider = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const update = {};
+
+  for (const [key, value] of Object.entries(req.body)) {
+    // Prevent overwriting internal counters managed by the booking logic.
+    if (
+      key !== "_id" &&
+      key !== "currentSequence" &&
+      key !== "totalBookings" &&
+      value != null
+    ) {
+      update[key] = value;
+    }
+  }
+
+  const provider = await providerModel.findByIdAndUpdate(
+    id,
+    { $set: update },
+    { new: true, runValidators: true },
+  );
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  await logModel.create({
+    user: req.user._id,
+    action: "UPDATE_PROVIDER",
+    details: { providerId: id, updatedFields: Object.keys(req.body) },
+  });
+
+  res.status(200).json({
+    success: true,
+    message: "Provider updated successfully",
+    data: { provider },
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/statement/controller/statement.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider statement
+//
+// Shows every service line where this provider was involved, with its buy
+// price (i.e. what you owe the provider). The "amount paid to provider" field
+// is intentionally omitted — that requires a separate ProviderPayment
+// collection which does not yet exist. Shipping a hardcoded 0 would mislead
+// any frontend or accountant reading the report.
+// ─────────────────────────────────────────────────────────────────────────────
+export const getProviderStatement = asyncHandler(async (req, res, next) => {
+  const { providerId } = req.params;
+  const { fromDate, toDate } = req.query;
+
+  const provider = await providerModel.findById(providerId);
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  const dateFilter = {};
+  if (fromDate) dateFilter.$gte = new Date(fromDate);
+  if (toDate) {
+    const to = new Date(toDate);
+    to.setHours(23, 59, 59, 999);
+    dateFilter.$lte = to;
+  }
+
+  const bookingQuery = {
+    $or: [
+      { provider: providerId },
+      { "accommodations.hotel": providerId },
+      { "carRentals.provider": providerId },
+      { "tripsWithDrivers.provider": providerId },
+    ],
+  };
+  if (Object.keys(dateFilter).length) bookingQuery.createdAt = dateFilter;
+
+  const bookings = await bookingModel
+    .find(bookingQuery)
+    .populate(
+      "accommodations.hotel carRentals.provider tripsWithDrivers.provider",
+    )
+    .lean();
+
+  const serviceLines = [];
+  let totalCostFromProvider = 0;
+
+  bookings.forEach((booking) => {
+    const addLines = (items, serviceType, providerKey, getLabel) => {
+      items?.forEach((item) => {
+        const pid =
+          item[providerKey]?._id?.toString() || item[providerKey]?.toString();
+        if (pid !== providerId) return;
+
+        const buy = Number(item.buy) || 0;
+        totalCostFromProvider += buy;
+
+        serviceLines.push({
+          bookingID: booking.bookingID,
+          bookingMongoId: booking._id,
+          customer: booking.customers?.[0]?.name || "Unknown",
+          date: booking.createdAt,
+          serviceType,
+          label: getLabel(item),
+          costToPay: buy,
+        });
+      });
+    };
+
+    addLines(
+      booking.accommodations,
+      "Hotel",
+      "hotel",
+      (a) =>
+        `${a.roomType || ""} - ${a.board || ""} - ${a.duration || 0} Nights`,
+    );
+    addLines(
+      booking.carRentals,
+      "Car Rental",
+      "provider",
+      (c) =>
+        `${c.brand || ""} - ${c.pickUp ? new Date(c.pickUp).toLocaleDateString("ar") : "N/A"}`,
+    );
+    addLines(
+      booking.tripsWithDrivers,
+      "Trip",
+      "provider",
+      (t) => `${t.brand || ""} - Driver: ${t.driverName || ""}`,
+    );
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Provider statement generated successfully",
+    data: {
+      provider: {
+        id: provider._id,
+        name: provider.name,
+        type: provider.type,
+        phone: provider.phone,
+      },
+      period: {
+        from: fromDate || "All time",
+        to: toDate || "All time",
+      },
+      summary: {
+        totalTransactions: serviceLines.length,
+        // Total amount owed to this provider across all service lines.
+        totalCostFromProvider,
+        // NOTE: "Amount actually paid to provider" is not tracked yet.
+        // Add a ProviderPayment collection to implement that feature.
+      },
+      lines: serviceLines.sort((a, b) => new Date(a.date) - new Date(b.date)),
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Customer statement
+//
+// Searches all bookings containing a customer with a matching name, then
+// aggregates their totals and payment history.
+// ─────────────────────────────────────────────────────────────────────────────
+export const getCustomerStatement = asyncHandler(async (req, res, next) => {
+  const { customerName } = req.params;
+  const { fromDate, toDate } = req.query;
+
+  if (!customerName || customerName.trim().length < 2) {
+    return next(
+      new Error("Customer name must be at least 2 characters", { cause: 400 }),
+    );
+  }
+
+  const bookingQuery = {
+    "customers.name": { $regex: customerName.trim(), $options: "i" },
+  };
+
+  if (fromDate || toDate) {
+    bookingQuery.createdAt = {};
+    if (fromDate) bookingQuery.createdAt.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      bookingQuery.createdAt.$lte = to;
+    }
+  }
+
+  const bookings = await bookingModel
+    .find(bookingQuery)
+    .populate("provider", "name type")
+    .lean();
+
+  if (!bookings.length) {
+    return res.status(200).json({
+      success: true,
+      message: "No bookings found for this customer",
+      data: {
+        customerName,
+        summary: {
+          totalBookings: 0,
+          totalToPay: 0,
+          totalPaid: 0,
+          remainingBalance: 0,
+        },
+        bookings: [],
+      },
+      errors: null,
+    });
+  }
+
+  // Fetch all payments for these bookings in a single query.
+  const bookingIds = bookings.map((b) => b._id);
+  const payments = await paymentModel
+    .find({ booking: { $in: bookingIds } })
+    .lean();
+
+  // Group payments by booking ID for O(n) lookup.
+  const paymentsByBooking = {};
+  payments.forEach((p) => {
+    const key = p.booking.toString();
+    if (!paymentsByBooking[key]) paymentsByBooking[key] = [];
+    paymentsByBooking[key].push(p);
+  });
+
+  let totalToPay = 0;
+  let totalPaid = 0;
+
+  const bookingLines = bookings.map((b) => {
+    const bPayments = paymentsByBooking[b._id.toString()] || [];
+    const paidForThis = bPayments.reduce((s, p) => s + p.amount, 0);
+
+    totalToPay += b.totalToPay || 0;
+    totalPaid += paidForThis;
+
+    const matchedCustomer = b.customers?.find((c) =>
+      c.name?.toLowerCase().includes(customerName.toLowerCase()),
+    );
+
+    return {
+      bookingID: b.bookingID,
+      mongoId: b._id,
+      date: b.createdAt,
+      status: b.status,
+      paymentStatus: b.paymentStatus,
+      provider: b.provider?.name || "N/A",
+      customer: matchedCustomer?.name || b.customers?.[0]?.name,
+      allCustomers: b.customers,
+      totalToPay: b.totalToPay,
+      totalPaid: paidForThis,
+      remainingBalance: (b.totalToPay || 0) - paidForThis,
+      payments: bPayments.map((p) => ({
+        amount: p.amount,
+        method: p.method,
+        date: p.date,
+      })),
+    };
+  });
+
+  const remainingBalance = totalToPay - totalPaid;
+
+  return res.status(200).json({
+    success: true,
+    message: "Customer statement generated successfully",
+    data: {
+      customerName,
+      period: {
+        from: fromDate || "All time",
+        to: toDate || "All time",
+      },
+      summary: {
+        totalBookings: bookings.length,
+        totalToPay,
+        totalPaid,
+        remainingBalance,
+        balanceLabel:
+          remainingBalance > 0
+            ? `الزبون مدين بـ ${remainingBalance}`
+            : "الحساب صافي",
+      },
+      bookings: bookingLines.sort(
+        (a, b) => new Date(a.date) - new Date(b.date),
+      ),
+    },
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/services/pagination.js">
+// Max page size prevents clients from requesting unbounded result sets.
+// Adjust MAX_PAGE_SIZE if your use case genuinely needs larger pages.
+const MAX_PAGE_SIZE = 100;
+const DEFAULT_PAGE_SIZE = 10;
+
+export function pagination(page, size) {
+  const parsedPage = parseInt(page);
+  const parsedSize = parseInt(size);
+
+  const safePage = parsedPage > 0 ? parsedPage : 1;
+  const safeSize =
+    parsedSize > 0 ? Math.min(parsedSize, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
+
+  return {
+    limit: safeSize,
+    skip: (safePage - 1) * safeSize,
+  };
+}
+</file>
+
+</files>
