@@ -6,16 +6,25 @@ export const auth = (accessRoles = []) => {
     try {
       const { token } = req.headers;
 
-      // FIX: كان بيـ crash لو ما في token
       if (!token) {
         return res.status(401).json({ message: "Token is required" });
       }
 
-      if (!token.startsWith(process.env.BEARERKEY)) {
+      const bearerKey = process.env.BEARERKEY;
+
+      if (!token.startsWith(bearerKey)) {
         return res.status(401).json({ message: "Invalid token format" });
       }
 
-      const rawToken = token.split(process.env.BEARERKEY)[1];
+      // slice() safely strips the prefix regardless of whether the prefix
+      // string happens to appear again inside the token itself.
+      // split(bearerKey)[1] would break in that (admittedly unlikely) case.
+      const rawToken = token.slice(bearerKey.length);
+
+      if (!rawToken) {
+        return res.status(401).json({ message: "Token is empty" });
+      }
+
       const decoded = jwt.verify(rawToken, process.env.SIGNINTOKEN);
 
       if (!decoded?.id) {
@@ -25,6 +34,7 @@ export const auth = (accessRoles = []) => {
       const user = await userModel
         .findById(decoded.id)
         .select("_id role blocked");
+
       if (!user) {
         return res.status(401).json({ message: "User not found" });
       }

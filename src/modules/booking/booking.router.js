@@ -1,59 +1,69 @@
 import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
 import * as bookingController from "./controller/booking.controller.js";
+import * as validators from "./booking.validation.js";
 import { endpoint } from "../indexEndpoint.js";
 
 const router = Router();
 
-//Create booking
+// Create booking
 router.post(
   "/create",
   auth(endpoint.booking_manage),
+  validation(validators.createBooking),
   bookingController.createBooking,
 );
-//Get all bookings
+
+// Get all bookings
 router.get(
   "/getAll",
   auth(endpoint.booking_view),
   bookingController.getAllBookings,
 );
 
-//Get a booking by Id
+// Get a booking by ID
 router.get(
   "/get/:id",
   auth(endpoint.booking_view),
+  validation(validators.bookingIdParam),
   bookingController.getBookingById,
 );
-//Edit booking
+
+// Update booking
 router.patch(
   "/edit/:id",
   auth(endpoint.booking_manage),
+  validation(validators.updateBooking),
   bookingController.updateBooking,
 );
 
-//Add service for existing Booking
+// Add a service to an existing booking
 router.patch(
   "/:id/addService",
   auth(endpoint.booking_manage),
+  validation(validators.addService),
   bookingController.addServiceToBooking,
 );
-//Remove service for existing Booking
+
+// Remove a service from an existing booking
 router.patch(
   "/:id/remove",
   auth(endpoint.booking_manage),
+  validation(validators.removeService),
   bookingController.removeServiceFromBooking,
 );
-//Delete booking by Id
+
+// Delete booking
 router.delete(
   "/delete/:id",
   auth(endpoint.booking_delete),
+  validation(validators.bookingIdParam),
   bookingController.deleteBooking,
 );
-//Statement
-router.get(
-  "/statement/:providerId",
-  auth(endpoint.booking_delete),
-  bookingController.getProviderStatement,
-);
+
+// NOTE: Provider statement was previously duplicated here under
+// GET /booking/statement/:providerId. It has been removed.
+// Use GET /api/v1/statement/provider/:providerId instead.
 
 export default router;

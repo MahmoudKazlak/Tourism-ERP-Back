@@ -8,6 +8,29 @@ import * as indexRouter from "./src/modules/indexRouter.js";
 
 dotenv.config({ path: "./config/.env" });
 
+// ── Fail fast if any critical env var is absent ──────────────────────────────
+// This prevents the app from starting in a broken state and producing cryptic
+// runtime errors deep inside request handlers.
+const REQUIRED_ENV = [
+  "DBURI",
+  "SIGNINTOKEN",
+  "FORGOTPASSWORDTOKEN",
+  "BEARERKEY",
+  "SALTROUND",
+  "SENDEREMAIL",
+  "SENDEREMAILPASSWORD",
+];
+
+const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
+if (missingEnv.length) {
+  console.error(
+    `❌ Missing required environment variables: ${missingEnv.join(", ")}`,
+  );
+  console.error("   Add them to config/.env and restart.");
+  process.exit(1);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -51,9 +74,9 @@ app.use(`${baseUrl}/booking`, indexRouter.paymentRouter);
 app.use(`${baseUrl}/provider`, indexRouter.providerRouter);
 app.use(`${baseUrl}/log`, indexRouter.logRouter);
 app.use(`${baseUrl}/dashboard`, indexRouter.dashboardRouter);
-app.use(`${baseUrl}/statement`, indexRouter.statementRouter); // كشوفات الحساب
-app.use(`${baseUrl}/voucher`, indexRouter.voucherRouter); // الفواتير والوثائق
-app.use(`${baseUrl}/expense`, indexRouter.expenseRouter); // المصاريف
+app.use(`${baseUrl}/statement`, indexRouter.statementRouter);
+app.use(`${baseUrl}/voucher`, indexRouter.voucherRouter);
+app.use(`${baseUrl}/expense`, indexRouter.expenseRouter);
 
 // Global Error Handler
 app.use((err, req, res, next) => {

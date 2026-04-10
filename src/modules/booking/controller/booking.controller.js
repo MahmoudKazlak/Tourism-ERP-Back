@@ -6,7 +6,8 @@ import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
 import mongoose from "mongoose";
 
-// الحقول المحمية — لا يمكن تعديلها من updateBooking
+// Fields that must never be overwritten via updateBooking.
+// These are computed values managed by the pre-save hook and payment logic.
 const PROTECTED_BOOKING_FIELDS = [
   "bookingID",
   "createdBy",
@@ -148,7 +149,6 @@ export const getBookingById = asyncHandler(async (req, res, next) => {
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  // FIX: الدفعات في collection منفصل — جيبهم بquery منفصل
   const payments = await paymentModel
     .find({ booking: booking._id })
     .populate("recordedBy", "userName")
@@ -172,7 +172,6 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
   const serviceArrays = ["accommodations", "carRentals", "tripsWithDrivers"];
 
   Object.keys(data).forEach((key) => {
-    // FIX: منع تعديل الحقول المحمية
     if (PROTECTED_BOOKING_FIELDS.includes(key)) return;
 
     if (serviceArrays.includes(key) && Array.isArray(data[key])) {
@@ -277,9 +276,16 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   const pKey = serviceType === "accommodations" ? "hotel" : "provider";
   const providerId = serviceItem[pKey]?.toString();
 
-  await mongoose.model("Provider").findByIdAndUpdate(providerId, {
-    $inc: { currentSequence: -1 },
-  });
+  // FIX: Only decrement the sub-provider's sequence if this service belongs
+  // to a *different* provider than the booking's main provider.
+  // Previously this always decremented, causing a double-decrement when the
+  // service's provider was the same as the booking's main provider (since
+  // deleteBooking also decrements the main provider's sequence).
+  if (providerId && providerId !== booking.provider.toString()) {
+    await mongoose.model("Provider").findByIdAndUpdate(providerId, {
+      $inc: { currentSequence: -1 },
+    });
+  }
 
   await logModel.create({
     user: req.user._id,
@@ -325,6 +331,7 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
   for (const service of services) {
     for (const item of service.items) {
       const pId = item[service.pKey]?.toString();
+      // Only decrement sub-providers that differ from the main provider.
       if (pId && pId !== booking.provider.toString()) {
         await Provider.findByIdAndUpdate(pId, {
           $inc: { currentSequence: -1 },
@@ -333,7 +340,6 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
     }
   }
 
-  // حذف الدفعات المرتبطة بالحجز
   await paymentModel.deleteMany({ booking: id });
 
   await logModel.create({
@@ -351,112 +357,6 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
     success: true,
     message: "Booking deleted successfully",
     data: null,
-    errors: null,
-  });
-});
-
-export const getProviderStatement = asyncHandler(async (req, res, next) => {
-  const { providerId } = req.params;
-  const { fromDate, toDate } = req.query;
-
-  const provider = await providerModel.findById(providerId);
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  const query = {
-    $or: [
-      { provider: providerId },
-      { "accommodations.hotel": providerId },
-      { "carRentals.provider": providerId },
-      { "tripsWithDrivers.provider": providerId },
-    ],
-  };
-
-  if (fromDate || toDate) {
-    query.createdAt = {};
-    if (fromDate) query.createdAt.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      query.createdAt.$lte = to;
-    }
-  }
-
-  const bookings = await bookingModel
-    .find(query)
-    .populate(
-      "provider accommodations.hotel carRentals.provider tripsWithDrivers.provider",
-    )
-    .sort({ createdAt: -1 });
-
-  let statementItems = [];
-  let totalBuy = 0,
-    totalSell = 0,
-    totalProfit = 0;
-
-  bookings.forEach((booking) => {
-    const processService = (items, serviceType, providerKey, getDetails) => {
-      items?.forEach((item) => {
-        const itemProviderId =
-          item[providerKey]?._id?.toString() || item[providerKey]?.toString();
-        if (itemProviderId !== providerId) return;
-
-        const buy = item.buy || 0;
-        const sell = item.sell || 0;
-        const profit = item.profit || 0;
-
-        statementItems.push({
-          date: booking.createdAt,
-          bookingID: booking.bookingID,
-          customer: booking.customers[0]?.name || "Unknown",
-          serviceType,
-          details: getDetails(item),
-          buy,
-          sell,
-          profit,
-        });
-
-        totalBuy += buy;
-        totalSell += sell;
-        totalProfit += profit;
-      });
-    };
-
-    processService(
-      booking.accommodations,
-      "Hotel Accommodation",
-      "hotel",
-      (acc) =>
-        `${acc.roomType || ""} / ${acc.board || ""} / ${acc.duration || 0} Nights`,
-    );
-    processService(
-      booking.carRentals,
-      "Car Rental",
-      "provider",
-      (car) =>
-        `${car.brand || ""} / Pickup: ${car.pickUp ? new Date(car.pickUp).toLocaleDateString() : "N/A"}`,
-    );
-    processService(
-      booking.tripsWithDrivers,
-      "Trip with Driver",
-      "provider",
-      (trip) => `${trip.brand || ""} / Driver: ${trip.driverName || ""}`,
-    );
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: "Provider statement generated",
-    data: {
-      provider: { id: provider._id, name: provider.name, type: provider.type },
-      period: { from: fromDate || "All time", to: toDate || "All time" },
-      summary: {
-        totalTransactions: statementItems.length,
-        totalCost: totalBuy,
-        totalRevenue: totalSell,
-        totalProfit,
-      },
-      details: statementItems,
-    },
     errors: null,
   });
 });

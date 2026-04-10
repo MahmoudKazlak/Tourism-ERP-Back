@@ -3,10 +3,15 @@ import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 import providerModel from "../../../../DB/model/provider.model.js";
 
-// ─────────────────────────────────────────────
-// كشف حساب مورد
-// المنطق: ما اشتريناه منه (buy) مقابل ما دفعناه له (payments للحجوزات)
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider statement
+//
+// Shows every service line where this provider was involved, with its buy
+// price (i.e. what you owe the provider). The "amount paid to provider" field
+// is intentionally omitted — that requires a separate ProviderPayment
+// collection which does not yet exist. Shipping a hardcoded 0 would mislead
+// any frontend or accountant reading the report.
+// ─────────────────────────────────────────────────────────────────────────────
 export const getProviderStatement = asyncHandler(async (req, res, next) => {
   const { providerId } = req.params;
   const { fromDate, toDate } = req.query;
@@ -14,7 +19,6 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
   const provider = await providerModel.findById(providerId);
   if (!provider) return next(new Error("Provider not found", { cause: 404 }));
 
-  // بناء فلتر التاريخ
   const dateFilter = {};
   if (fromDate) dateFilter.$gte = new Date(fromDate);
   if (toDate) {
@@ -23,7 +27,6 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
     dateFilter.$lte = to;
   }
 
-  // جلب كل الحجوزات المرتبطة بهاد المورد
   const bookingQuery = {
     $or: [
       { provider: providerId },
@@ -41,9 +44,8 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
     )
     .lean();
 
-  // ─── استخراج الخدمات المرتبطة بهاد المورد فقط ───
   const serviceLines = [];
-  let totalOwedToProvider = 0; // إجمالي ما اشتريناه منه (buy)
+  let totalCostFromProvider = 0;
 
   bookings.forEach((booking) => {
     const addLines = (items, serviceType, providerKey, getLabel) => {
@@ -53,7 +55,7 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
         if (pid !== providerId) return;
 
         const buy = Number(item.buy) || 0;
-        totalOwedToProvider += buy;
+        totalCostFromProvider += buy;
 
         serviceLines.push({
           bookingID: booking.bookingID,
@@ -62,7 +64,7 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
           date: booking.createdAt,
           serviceType,
           label: getLabel(item),
-          amount: buy, // ما بدنا ندفعه للمورد
+          costToPay: buy,
         });
       });
     };
@@ -89,20 +91,6 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
     );
   });
 
-  // ─── الدفعات اللي صرفناها بالفعل لهالمورد ───
-  // ملاحظة: الدفعات الحالية هي من الزبون للشركة، ليس من الشركة للمورد.
-  // هون بنعرض ما يستحقه المورد وما تم صرفه (لو عندك payment للمورد بالمستقبل)
-  // حالياً: نعرض ما هو مستحق فقط
-  const summary = {
-    totalOwedToProvider, // ما بدك تدفعه للمورد (buy total)
-    totalPaid: 0, // ما دفعته فعلاً (للتطوير المستقبلي)
-    netBalance: totalOwedToProvider, // الرصيد المتبقي للمورد
-    balanceLabel:
-      totalOwedToProvider > 0
-        ? `المورد له ${totalOwedToProvider} عندك`
-        : `المورد مدين لك بـ ${Math.abs(totalOwedToProvider)}`,
-  };
-
   return res.status(200).json({
     success: true,
     message: "Provider statement generated successfully",
@@ -119,7 +107,10 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
       },
       summary: {
         totalTransactions: serviceLines.length,
-        ...summary,
+        // Total amount owed to this provider across all service lines.
+        totalCostFromProvider,
+        // NOTE: "Amount actually paid to provider" is not tracked yet.
+        // Add a ProviderPayment collection to implement that feature.
       },
       lines: serviceLines.sort((a, b) => new Date(a.date) - new Date(b.date)),
     },
@@ -127,10 +118,12 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
   });
 });
 
-// ─────────────────────────────────────────────
-// كشف حساب زبون
-// البحث بالاسم عبر كل الحجوزات (لأنه مش موجود كـ entity مستقل)
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Customer statement
+//
+// Searches all bookings containing a customer with a matching name, then
+// aggregates their totals and payment history.
+// ─────────────────────────────────────────────────────────────────────────────
 export const getCustomerStatement = asyncHandler(async (req, res, next) => {
   const { customerName } = req.params;
   const { fromDate, toDate } = req.query;
@@ -178,13 +171,13 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // جلب كل الدفعات لهاي الحجوزات دفعة وحدة
+  // Fetch all payments for these bookings in a single query.
   const bookingIds = bookings.map((b) => b._id);
   const payments = await paymentModel
     .find({ booking: { $in: bookingIds } })
     .lean();
 
-  // تجميع الدفعات حسب الحجز
+  // Group payments by booking ID for O(n) lookup.
   const paymentsByBooking = {};
   payments.forEach((p) => {
     const key = p.booking.toString();
@@ -192,7 +185,6 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     paymentsByBooking[key].push(p);
   });
 
-  // بناء التفاصيل
   let totalToPay = 0;
   let totalPaid = 0;
 
@@ -203,7 +195,6 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     totalToPay += b.totalToPay || 0;
     totalPaid += paidForThis;
 
-    // الزبون المطابق تحديداً
     const matchedCustomer = b.customers?.find((c) =>
       c.name?.toLowerCase().includes(customerName.toLowerCase()),
     );
@@ -228,6 +219,8 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     };
   });
 
+  const remainingBalance = totalToPay - totalPaid;
+
   return res.status(200).json({
     success: true,
     message: "Customer statement generated successfully",
@@ -241,10 +234,10 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
         totalBookings: bookings.length,
         totalToPay,
         totalPaid,
-        remainingBalance: totalToPay - totalPaid,
+        remainingBalance,
         balanceLabel:
-          totalToPay - totalPaid > 0
-            ? `الزبون مدين بـ ${totalToPay - totalPaid}`
+          remainingBalance > 0
+            ? `الزبون مدين بـ ${remainingBalance}`
             : "الحساب صافي",
       },
       bookings: bookingLines.sort(

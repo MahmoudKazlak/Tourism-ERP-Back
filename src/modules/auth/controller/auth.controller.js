@@ -1,4 +1,3 @@
-import bcrypt from "bcrypt";
 import sendEmail from "../../../services/email.js";
 import jwt from "jsonwebtoken";
 import userModel from "../../../../DB/model/user.model.js";
@@ -48,7 +47,7 @@ export const sendCode = asyncHandler(async (req, res, next) => {
 
   const user = await userModel.findOne({ email }).select("_id email");
   if (!user) {
-    // لا نكشف إذا الإيميل موجود أو لا (security best practice)
+    // Do not reveal whether the email exists (security best practice).
     return res.status(200).json({
       success: true,
       message: "If this email exists, a code has been sent.",
@@ -85,23 +84,30 @@ export const forgotPassword = asyncHandler(async (req, res, next) => {
     return next(new Error("Invalid token", { cause: 400 }));
   }
 
-  token = token.split(process.env.BEARERKEY)[1];
+  token = token.slice(process.env.BEARERKEY.length);
   const decoded = jwt.verify(token, process.env.FORGOTPASSWORDTOKEN);
 
   if (!otp || !decoded) {
     return next(new Error("Invalid request", { cause: 400 }));
   }
 
-  const hash = await bcrypt.hash(newPassword, parseInt(process.env.SALTROUND));
-
-  const user = await userModel.findOneAndUpdate(
-    { email, sendCode: otp, _id: decoded.id },
-    { password: hash, sendCode: "dontTrust32" },
-  );
+  // FIX: Use find() + save() instead of findOneAndUpdate() so the
+  // userSchema.pre('save') hook handles hashing consistently.
+  // Previously this path manually called bcrypt.hash(), creating a third
+  // hashing path that ignored SALTROUND.
+  const user = await userModel.findOne({
+    email,
+    sendCode: otp,
+    _id: decoded.id,
+  });
 
   if (!user) {
     return next(new Error("Invalid OTP or email", { cause: 400 }));
   }
+
+  user.password = newPassword; // pre('save') will hash this
+  user.sendCode = "dontTrust32";
+  await user.save();
 
   return res.status(200).json({
     success: true,
@@ -121,9 +127,9 @@ export const createUser = asyncHandler(async (req, res, next) => {
       .json({ success: false, message: "Email already exists" });
   }
 
+  // userModel.create() triggers pre('save'), so password is hashed correctly.
   const savedUser = await userModel.create({ userName, email, password, role });
 
-  // FIX: لا نحفظ كلمة المرور في الـ log
   await logModel.create({
     user: req.user._id,
     action: "CREATE_USER",
@@ -146,44 +152,47 @@ export const createUser = asyncHandler(async (req, res, next) => {
 export const updateUser = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
-  // الحقول المحمية — لا يمكن تعديلها من هنا
-  const protectedFields = ["_id", "password", "sendCode"];
-  const update = {};
+  // Fields that must never be modified through this endpoint.
+  const protectedFields = ["_id", "sendCode"];
 
-  for (const key of Object.keys(req.body)) {
-    if (!protectedFields.includes(key) && req.body[key] != null) {
-      update[key] = req.body[key];
+  const user = await userModel.findById(id);
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  const passwordChanged = Boolean(req.body.password);
+
+  // Apply every permitted field directly onto the document.
+  // Because we use user.save() below, the pre('save') hook will hash the
+  // password if it was modified — no manual bcrypt.hash() needed, and
+  // SALTROUND from env is always respected.
+  for (const [key, value] of Object.entries(req.body)) {
+    if (!protectedFields.includes(key) && value != null) {
+      user[key] = value;
     }
   }
 
-  // إذا بدهم يغيروا الباسورد ليش ما بيستخدموا forgotPassword؟
-  // هون بنسمح فقط للـ admin يعدل عليها بشكل صريح
-  if (req.body.password) {
-    update.password = await bcrypt.hash(req.body.password, 10);
-  }
+  await user.save();
 
-  const user = await userModel
-    .findByIdAndUpdate(id, { $set: update }, { new: true, runValidators: true })
-    .select("-password -sendCode");
-
-  // FIX: رسالة الخطأ كانت "fail to register"
-  if (!user) return next(new Error("User not found", { cause: 404 }));
-
-  // FIX: لا نحفظ كلمة المرور في الـ log
   await logModel.create({
     user: req.user._id,
     action: "UPDATE_USER",
     details: {
       userId: id,
-      updatedFields: Object.keys(req.body).filter((k) => k !== "password"),
-      passwordChanged: !!req.body.password,
+      updatedFields: Object.keys(req.body).filter(
+        (k) => !protectedFields.includes(k) && k !== "password",
+      ),
+      passwordChanged,
     },
   });
+
+  // Return the document without sensitive fields.
+  const safeUser = user.toObject();
+  delete safeUser.password;
+  delete safeUser.sendCode;
 
   return res.status(200).json({
     success: true,
     message: "User updated successfully",
-    data: { user },
+    data: { user: safeUser },
     errors: null,
   });
 });

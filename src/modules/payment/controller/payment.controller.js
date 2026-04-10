@@ -4,31 +4,38 @@ import paymentModel from "../../../../DB/model/payment.model.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
+import { withTransaction } from "../../../services/transaction.js";
 
-// ─────────────────────────────────────────────
-// دالة مساعدة: تحسب مجموع الدفعات وتحدث الحجز
-// تستخدم session للـ transactions
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: recalculate totalPaid from all payments and sync the booking.
+// Accepts an optional session for transactional execution.
+// Passing session=null runs the same operations outside a transaction (fallback).
+// ─────────────────────────────────────────────────────────────────────────────
 const syncBookingPayments = async (bookingId, session = null) => {
-  const opts = session ? { session } : {};
+  const aggregateOptions = session ? { session } : {};
+  const queryOptions = session ? { session } : {};
 
   const result = await paymentModel.aggregate(
     [
       { $match: { booking: new mongoose.Types.ObjectId(bookingId) } },
       { $group: { _id: null, totalPaid: { $sum: "$amount" } } },
     ],
-    session ? { session } : {},
+    aggregateOptions,
   );
 
   const totalPaid = result[0]?.totalPaid || 0;
   const booking = await bookingModel
     .findById(bookingId)
     .session(session || null);
+
   if (!booking) return null;
 
   let paymentStatus = "unpaid";
-  if (totalPaid >= booking.totalToPay && totalPaid > 0) paymentStatus = "paid";
-  else if (totalPaid > 0) paymentStatus = "partial";
+  if (totalPaid >= booking.totalToPay && totalPaid > 0) {
+    paymentStatus = "paid";
+  } else if (totalPaid > 0) {
+    paymentStatus = "partial";
+  }
 
   await bookingModel.updateOne(
     { _id: bookingId },
@@ -39,7 +46,7 @@ const syncBookingPayments = async (bookingId, session = null) => {
         paymentStatus,
       },
     },
-    opts,
+    queryOptions,
   );
 
   return {
@@ -50,17 +57,17 @@ const syncBookingPayments = async (bookingId, session = null) => {
   };
 };
 
-// ─────────────────────────────────────────────
-// إضافة دفعة — مع Mongoose Transaction
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Add payment
+// ─────────────────────────────────────────────────────────────────────────────
 export const addPayment = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const { amount, date, method, notes } = req.body;
 
-  // التحقق من وجود الحجز أولاً قبل فتح الـ session
   const booking = await bookingModel
     .findById(id)
     .select("bookingID customers totalToPay totalPaid paymentStatus");
+
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
   if (booking.paymentStatus === "paid") {
@@ -68,16 +75,10 @@ export const addPayment = asyncHandler(async (req, res, next) => {
   }
 
   const numAmount = Number(amount);
-  if (numAmount > booking.totalToPay - booking.totalPaid + 0.001) {
-    // نحكيهم بس ما نمنعهم — ممكن يكون دفع زيادة عن قصد
-    // يمكن تغيير هاي السياسة حسب ما تريد
-  }
 
-  // ─── بداية الـ Transaction ───
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
+  // withTransaction handles the replica set check and falls back gracefully.
+  // See src/services/transaction.js for details.
+  const result = await withTransaction(async (session) => {
     const payment = await paymentModel.create(
       [
         {
@@ -114,28 +115,20 @@ export const addPayment = asyncHandler(async (req, res, next) => {
       { session },
     );
 
-    await session.commitTransaction();
+    return { payment: payment[0], bookingSummary: updated };
+  });
 
-    return res.status(201).json({
-      success: true,
-      message: "Payment added successfully",
-      data: {
-        payment: payment[0],
-        bookingSummary: updated,
-      },
-      errors: null,
-    });
-  } catch (error) {
-    await session.abortTransaction();
-    return next(new Error(error.message, { cause: 500 }));
-  } finally {
-    session.endSession();
-  }
+  return res.status(201).json({
+    success: true,
+    message: "Payment added successfully",
+    data: result,
+    errors: null,
+  });
 });
 
-// ─────────────────────────────────────────────
-// دفعات حجز معين
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Get payments for a specific booking
+// ─────────────────────────────────────────────────────────────────────────────
 export const getPaymentsByBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
@@ -144,6 +137,7 @@ export const getPaymentsByBooking = asyncHandler(async (req, res, next) => {
     .select(
       "bookingID customers totalToPay totalPaid remainingBalance paymentStatus",
     );
+
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
   const payments = await paymentModel
@@ -168,9 +162,9 @@ export const getPaymentsByBooking = asyncHandler(async (req, res, next) => {
   });
 });
 
-// ─────────────────────────────────────────────
-// كل الدفعات مع فلترة (للحسابات)
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all payments (with filtering — for accounting)
+// ─────────────────────────────────────────────────────────────────────────────
 export const getAllPayments = asyncHandler(async (req, res) => {
   const { method, fromDate, toDate, page, size } = req.query;
 
@@ -216,19 +210,16 @@ export const getAllPayments = asyncHandler(async (req, res) => {
   });
 });
 
-// ─────────────────────────────────────────────
-// حذف دفعة — مع Transaction
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete payment
+// ─────────────────────────────────────────────────────────────────────────────
 export const deletePayment = asyncHandler(async (req, res, next) => {
   const { paymentId } = req.params;
 
   const payment = await paymentModel.findById(paymentId);
   if (!payment) return next(new Error("Payment not found", { cause: 404 }));
 
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
+  const result = await withTransaction(async (session) => {
     const bookingId = payment.booking;
     const deletedAmount = payment.amount;
 
@@ -252,18 +243,13 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
       { session },
     );
 
-    await session.commitTransaction();
+    return { bookingSummary: updated };
+  });
 
-    return res.status(200).json({
-      success: true,
-      message: "Payment deleted successfully",
-      data: { bookingSummary: updated },
-      errors: null,
-    });
-  } catch (error) {
-    await session.abortTransaction();
-    return next(new Error(error.message, { cause: 500 }));
-  } finally {
-    session.endSession();
-  }
+  return res.status(200).json({
+    success: true,
+    message: "Payment deleted successfully",
+    data: result,
+    errors: null,
+  });
 });

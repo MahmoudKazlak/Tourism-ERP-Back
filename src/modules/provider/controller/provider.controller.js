@@ -2,9 +2,10 @@ import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import providerModel from "../../../../DB/model/provider.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import mongoose from "mongoose";
+import { pagination } from "../../../services/pagination.js";
 
 export const createProvider = asyncHandler(async (req, res, next) => {
-  const { name, type, phone, address, email } = req.body;
+  const { name, type, phone, address } = req.body;
 
   const isExist = await providerModel.findOne({ name });
   if (isExist)
@@ -15,7 +16,6 @@ export const createProvider = asyncHandler(async (req, res, next) => {
     type,
     phone,
     address,
-    email,
     currentSequence: 0,
   });
 
@@ -66,15 +66,31 @@ export const deleteProvider = asyncHandler(async (req, res, next) => {
 });
 
 export const getAllProviders = asyncHandler(async (req, res, next) => {
-  const { type } = req.query;
-  let query = {};
+  const { type, page, size } = req.query;
+
+  const query = {};
   if (type) query.type = type;
 
-  const providers = await providerModel.find(query).sort({ name: 1 });
+  // Providers are a relatively small dataset, so we default to 50 per page
+  // rather than the standard 10, but still enforce the global MAX_PAGE_SIZE cap
+  // to prevent unbounded queries.
+  const { limit, skip } = pagination(page, size || 50);
+
+  const [providers, totalCount] = await Promise.all([
+    providerModel.find(query).sort({ name: 1 }).limit(limit).skip(skip),
+    providerModel.countDocuments(query),
+  ]);
+
   res.status(200).json({
     success: true,
-    message: "Data retrived successfully",
-    data: { count: providers.length, providers },
+    message: "Data retrieved successfully",
+    data: {
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      page: parseInt(page) || 1,
+      count: providers.length,
+      providers,
+    },
     errors: null,
   });
 });
@@ -82,9 +98,10 @@ export const getAllProviders = asyncHandler(async (req, res, next) => {
 export const getProviderById = asyncHandler(async (req, res, next) => {
   const provider = await providerModel.findById(req.params.id);
   if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
   res.status(200).json({
     success: true,
-    message: "Data retrived successfully",
+    message: "Data retrieved successfully",
     data: { provider },
     errors: null,
   });
@@ -94,15 +111,15 @@ export const updateProvider = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const update = {};
 
-  for (const key of Object.keys(req.body)) {
+  for (const [key, value] of Object.entries(req.body)) {
+    // Prevent overwriting internal counters managed by the booking logic.
     if (
       key !== "_id" &&
       key !== "currentSequence" &&
       key !== "totalBookings" &&
-      req.body[key] !== null &&
-      req.body[key] !== undefined
+      value != null
     ) {
-      update[key] = req.body[key];
+      update[key] = value;
     }
   }
 

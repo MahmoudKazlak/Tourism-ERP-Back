@@ -18,9 +18,9 @@ const bookingSchema = new mongoose.Schema(
       enum: ["pending", "confirmed", "cancelled", "completed"],
       default: "pending",
     },
-    totalToPay: { type: Number, default: 0 }, // إجمالي سعر البيع للزبون
-    totalToBuy: { type: Number, default: 0 }, // إجمالي سعر الشراء من الموردين (جديد)
-    totalProfit: { type: Number, default: 0 }, // صافي الربح (ToPay - ToBuy)
+    totalToPay: { type: Number, default: 0 },
+    totalToBuy: { type: Number, default: 0 },
+    totalProfit: { type: Number, default: 0 },
     totalPaid: { type: Number, default: 0 },
     remainingBalance: { type: Number, default: 0 },
     paymentStatus: {
@@ -28,7 +28,6 @@ const bookingSchema = new mongoose.Schema(
       enum: ["unpaid", "partial", "paid"],
       default: "unpaid",
     },
-    // ... باقي الحقول (customers, accommodations, carRentals, tripsWithDrivers, totalPax)
     customers: [{ name: String, ageType: String }],
     accommodations: [
       {
@@ -77,12 +76,18 @@ const bookingSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// FIX: Unique compound index prevents two simultaneous inserts from
+// getting the same bookingID for the same provider (race condition).
+// The DB will reject the duplicate and the caller will receive an error
+// rather than silently producing ambiguous IDs.
+bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
+
 bookingSchema.pre("save", async function () {
   try {
     const Provider = mongoose.model("Provider");
     const Booking = mongoose.model("Booking");
 
-    // 1. منطق الـ Sequence والـ Counters (كودك الأصلي كما هو)
+    // ── Sequence / counter logic ─────────────────────────────────────────
     if (!this.isNew && this.isModified("provider")) {
       const oldDoc = await Booking.findById(this._id).lean();
       if (oldDoc && oldDoc.provider.toString() !== this.provider.toString()) {
@@ -108,7 +113,7 @@ bookingSchema.pre("save", async function () {
       this.bookingID = mainP.currentSequence;
     }
 
-    // 2. معالجة الخدمات وأرقامها
+    // ── Per-service sequence numbers ─────────────────────────────────────
     const processServices = async (fieldName, providerKey) => {
       if (!this[fieldName] || this[fieldName].length === 0) return;
       const oldDoc = !this.isNew
@@ -167,7 +172,7 @@ bookingSchema.pre("save", async function () {
     this.markModified("carRentals");
     this.markModified("tripsWithDrivers");
 
-    // 3. حساب المدد (Duration) للفنادق تلقائياً
+    // ── Auto-calculate hotel durations ───────────────────────────────────
     if (this.accommodations) {
       this.accommodations.forEach((acc) => {
         if (acc.checkIn && acc.checkOut) {
@@ -179,7 +184,7 @@ bookingSchema.pre("save", async function () {
       });
     }
 
-    // 4. الحسابات المالية الاحترافية (هنا التعديل الجوهري)
+    // ── Financial roll-up ────────────────────────────────────────────────
     let totalSell = 0;
     let totalBuy = 0;
     let totalProf = 0;
@@ -191,21 +196,15 @@ bookingSchema.pre("save", async function () {
     ];
 
     allServices.forEach((s) => {
-      // حساب الربح لكل بند على حدة
       s.profit = (Number(s.sell) || 0) - (Number(s.buy) || 0);
-
-      // تجميع الإجماليات
       totalSell += Number(s.sell) || 0;
       totalBuy += Number(s.buy) || 0;
       totalProf += s.profit;
     });
 
-    // تحديث حقول الحجز الرئيسية
-    this.totalToPay = totalSell; // ما سيتم قبضه من الزبون
-    this.totalToBuy = totalBuy; // ما سيتم صرفه للموردين
-    this.totalProfit = totalProf; // صافي الربح المتوقع
-
-    // تحديث حالة الدفع والمتبقي (على ذمة الزبون)
+    this.totalToPay = totalSell;
+    this.totalToBuy = totalBuy;
+    this.totalProfit = totalProf;
     this.remainingBalance = this.totalToPay - this.totalPaid;
 
     if (this.totalPaid <= 0) this.paymentStatus = "unpaid";
