@@ -2,15 +2,14 @@ import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 import providerModel from "../../../../DB/model/provider.model.js";
+import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
+import { pagination } from "../../../services/pagination.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider statement
 //
-// Shows every service line where this provider was involved, with its buy
-// price (i.e. what you owe the provider). The "amount paid to provider" field
-// is intentionally omitted — that requires a separate ProviderPayment
-// collection which does not yet exist. Shipping a hardcoded 0 would mislead
-// any frontend or accountant reading the report.
+// Feature [1]: Now also returns totalPaidToProvider from the
+// ProviderPayment collection, completing both sides of the ledger.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getProviderStatement = asyncHandler(async (req, res, next) => {
   const { providerId } = req.params;
@@ -37,12 +36,22 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
   };
   if (Object.keys(dateFilter).length) bookingQuery.createdAt = dateFilter;
 
-  const bookings = await bookingModel
-    .find(bookingQuery)
-    .populate(
-      "accommodations.hotel carRentals.provider tripsWithDrivers.provider",
-    )
-    .lean();
+  // Run bookings and provider payments queries in parallel.
+  const providerPaymentQuery = { provider: providerId };
+  if (Object.keys(dateFilter).length) providerPaymentQuery.date = dateFilter;
+
+  const [bookings, providerPaymentsResult] = await Promise.all([
+    bookingModel
+      .find(bookingQuery)
+      .populate(
+        "accommodations.hotel carRentals.provider tripsWithDrivers.provider",
+      )
+      .lean(),
+    providerPaymentModel.aggregate([
+      { $match: providerPaymentQuery },
+      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+    ]),
+  ]);
 
   const serviceLines = [];
   let totalCostFromProvider = 0;
@@ -91,6 +100,9 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
     );
   });
 
+  const totalPaidToProvider = providerPaymentsResult[0]?.total || 0;
+  const outstandingBalance = totalCostFromProvider - totalPaidToProvider;
+
   return res.status(200).json({
     success: true,
     message: "Provider statement generated successfully",
@@ -107,10 +119,18 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
       },
       summary: {
         totalTransactions: serviceLines.length,
-        // Total amount owed to this provider across all service lines.
+        // What you OWE the provider across all service lines.
         totalCostFromProvider,
-        // NOTE: "Amount actually paid to provider" is not tracked yet.
-        // Add a ProviderPayment collection to implement that feature.
+        // What you have already PAID the provider.
+        totalPaidToProvider,
+        // Positive = still owe provider; negative = overpaid.
+        outstandingBalance,
+        balanceLabel:
+          outstandingBalance > 0
+            ? `Outstanding: ${outstandingBalance}`
+            : outstandingBalance < 0
+              ? `Overpaid by: ${Math.abs(outstandingBalance)}`
+              : "Account settled",
       },
       lines: serviceLines.sort((a, b) => new Date(a.date) - new Date(b.date)),
     },
@@ -121,12 +141,12 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Customer statement
 //
-// Searches all bookings containing a customer with a matching name, then
-// aggregates their totals and payment history.
+// Fix [8]: Added pagination — previously returned all matching bookings
+// in one unbounded query.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getCustomerStatement = asyncHandler(async (req, res, next) => {
   const { customerName } = req.params;
-  const { fromDate, toDate } = req.query;
+  const { fromDate, toDate, page, size } = req.query;
 
   if (!customerName || customerName.trim().length < 2) {
     return next(
@@ -148,12 +168,33 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     }
   }
 
-  const bookings = await bookingModel
-    .find(bookingQuery)
-    .populate("provider", "name type")
-    .lean();
+  const { limit, skip } = pagination(page, size);
 
-  if (!bookings.length) {
+  // Aggregate totals (all pages) and paginated bookings in parallel.
+  const [bookings, totalCount, aggregateTotals] = await Promise.all([
+    bookingModel
+      .find(bookingQuery)
+      .populate("provider", "name type")
+      .sort({ createdAt: 1 })
+      .limit(limit)
+      .skip(skip)
+      .lean(),
+    bookingModel.countDocuments(bookingQuery),
+    // Get grand totals across ALL pages (not just the current page).
+    bookingModel.aggregate([
+      { $match: bookingQuery },
+      {
+        $group: {
+          _id: null,
+          totalToPay: { $sum: "$totalToPay" },
+          totalPaid: { $sum: "$totalPaid" },
+          remainingBalance: { $sum: "$remainingBalance" },
+        },
+      },
+    ]),
+  ]);
+
+  if (totalCount === 0) {
     return res.status(200).json({
       success: true,
       message: "No bookings found for this customer",
@@ -171,13 +212,12 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // Fetch all payments for these bookings in a single query.
+  // Fetch payments only for the bookings on this page.
   const bookingIds = bookings.map((b) => b._id);
   const payments = await paymentModel
     .find({ booking: { $in: bookingIds } })
     .lean();
 
-  // Group payments by booking ID for O(n) lookup.
   const paymentsByBooking = {};
   payments.forEach((p) => {
     const key = p.booking.toString();
@@ -185,15 +225,9 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     paymentsByBooking[key].push(p);
   });
 
-  let totalToPay = 0;
-  let totalPaid = 0;
-
   const bookingLines = bookings.map((b) => {
     const bPayments = paymentsByBooking[b._id.toString()] || [];
     const paidForThis = bPayments.reduce((s, p) => s + p.amount, 0);
-
-    totalToPay += b.totalToPay || 0;
-    totalPaid += paidForThis;
 
     const matchedCustomer = b.customers?.find((c) =>
       c.name?.toLowerCase().includes(customerName.toLowerCase()),
@@ -219,7 +253,11 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     };
   });
 
-  const remainingBalance = totalToPay - totalPaid;
+  const grand = aggregateTotals[0] || {
+    totalToPay: 0,
+    totalPaid: 0,
+    remainingBalance: 0,
+  };
 
   return res.status(200).json({
     success: true,
@@ -230,19 +268,24 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
         from: fromDate || "All time",
         to: toDate || "All time",
       },
+      // Grand totals are always across ALL bookings, regardless of page.
       summary: {
-        totalBookings: bookings.length,
-        totalToPay,
-        totalPaid,
-        remainingBalance,
+        totalBookings: totalCount,
+        totalToPay: grand.totalToPay,
+        totalPaid: grand.totalPaid,
+        remainingBalance: grand.remainingBalance,
         balanceLabel:
-          remainingBalance > 0
-            ? `الزبون مدين بـ ${remainingBalance}`
-            : "الحساب صافي",
+          grand.remainingBalance > 0
+            ? `Customer owes: ${grand.remainingBalance}`
+            : "Account settled",
       },
-      bookings: bookingLines.sort(
-        (a, b) => new Date(a.date) - new Date(b.date),
-      ),
+      // Pagination metadata
+      pagination: {
+        page: parseInt(page) || 1,
+        totalPages: Math.ceil(totalCount / limit),
+        totalCount,
+      },
+      bookings: bookingLines,
     },
     errors: null,
   });

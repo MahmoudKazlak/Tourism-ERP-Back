@@ -8,17 +8,18 @@ import * as indexRouter from "./src/modules/indexRouter.js";
 
 dotenv.config({ path: "./config/.env" });
 
-// ── Fail fast if any critical env var is absent ──────────────────────────────
-// This prevents the app from starting in a broken state and producing cryptic
-// runtime errors deep inside request handlers.
+// ── Fail fast: abort startup if any critical env var is absent ───────────────
 const REQUIRED_ENV = [
   "DBURI",
   "SIGNINTOKEN",
   "FORGOTPASSWORDTOKEN",
-  "BEARERKEY",
   "SALTROUND",
   "SENDEREMAIL",
   "SENDEREMAILPASSWORD",
+  // Cloudinary — required for image uploads (Feature 5)
+  "CLOUDINARY_CLOUD_NAME",
+  "CLOUDINARY_API_KEY",
+  "CLOUDINARY_API_SECRET",
 ];
 
 const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
@@ -35,6 +36,10 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(helmet());
+
+// Trust the first proxy hop (e.g. Nginx, Railway, Render).
+// Required for accurate req.ip in logs and rate limiters behind a reverse proxy.
+app.set("trust proxy", 1);
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",")
@@ -53,6 +58,7 @@ app.use(
 
 app.use(express.json({ limit: "10kb" }));
 
+// Rate limiter for auth endpoints — brute force protection.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -68,6 +74,7 @@ connectDB();
 
 const baseUrl = process.env.BASEURL || "/api/v1";
 
+// ── Route registration ────────────────────────────────────────────────────────
 app.use(`${baseUrl}/auth`, authLimiter, indexRouter.authRouter);
 app.use(`${baseUrl}/booking`, indexRouter.bookingRouter);
 app.use(`${baseUrl}/booking`, indexRouter.paymentRouter);
@@ -77,18 +84,23 @@ app.use(`${baseUrl}/dashboard`, indexRouter.dashboardRouter);
 app.use(`${baseUrl}/statement`, indexRouter.statementRouter);
 app.use(`${baseUrl}/voucher`, indexRouter.voucherRouter);
 app.use(`${baseUrl}/expense`, indexRouter.expenseRouter);
+// Feature [1]: Provider payments — money paid OUT to providers.
+app.use(`${baseUrl}/provider-payment`, indexRouter.providerPaymentRouter);
+// Feature [2]: CSV/Excel export + P&L report.
+app.use(`${baseUrl}/report`, indexRouter.reportRouter);
 
-// Global Error Handler
+// ── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   const status = err.cause || 500;
   return res.status(status).json({
     success: false,
     message: err.message || "Server Error",
+    errors: null,
     stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
   });
 });
 
-// 404
+// ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });

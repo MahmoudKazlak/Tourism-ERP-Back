@@ -151,3 +151,38 @@ export const bookingIdParam = {
     id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
   }),
 };
+
+// Feature [3]: Validates query params for getAllBookings,
+// including the new numeric bookingID filter.
+export const getAllBookingsQuery = {
+  query: Joi.object({
+    bookingID: Joi.number().integer().min(1), // NEW: search by human-readable ID
+    provider: objectId,
+    status: Joi.string().valid(
+      "pending",
+      "confirmed",
+      "cancelled",
+      "completed",
+    ),
+    paymentStatus: Joi.string().valid("unpaid", "partial", "paid"),
+    customerName: Joi.string().trim().min(1).max(100),
+    fromDate: Joi.date(),
+    toDate: Joi.date().when("fromDate", {
+      is: Joi.exist(),
+      then: Joi.date().min(Joi.ref("fromDate")).messages({
+        "date.min": "toDate must be after fromDate",
+      }),
+    }),
+    minAmount: Joi.number().min(0),
+    maxAmount: Joi.number().min(0),
+    sortBy: Joi.string().valid(
+      "createdAt",
+      "bookingID",
+      "totalToPay",
+      "totalProfit",
+    ),
+    sortOrder: Joi.string().valid("asc", "desc"),
+    page: Joi.number().integer().min(1).default(1),
+    size: Joi.number().integer().min(1).max(100).default(10),
+  }),
+};

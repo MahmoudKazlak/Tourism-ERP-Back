@@ -2,15 +2,13 @@ import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 
-// ─────────────────────────────────────────────
-// Service Voucher — ورقة للمورد (فندق / باص)
-// بدون أسعار البيع، فقط معلومات الخدمة
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Service Voucher — for the provider (hotel / car company / driver)
+// Contains service details only — NO sell prices.
+// ─────────────────────────────────────────────────────────────────────────────
 export const getServiceVoucher = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
   const { serviceType, serviceIndex } = req.query;
-  // serviceType: accommodations | carRentals | tripsWithDrivers
-  // serviceIndex: رقم الخدمة في المصفوفة (اختياري — لو ما موجود يرجع كلهم)
 
   const booking = await bookingModel
     .findById(bookingId)
@@ -128,14 +126,20 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
   });
 });
 
-// ─────────────────────────────────────────────
-// Invoice — فاتورة للزبون بكل الخدمات والأسعار
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Invoice — customer-facing invoice with sell prices
+//
+// FIX [9]: When serviceType filter is applied, totals.totalPaid and
+// totals.remainingBalance now reflect ONLY the filtered service amount,
+// not the entire booking balance. This prevents showing a confusing
+// remaining-balance figure that doesn't match the line items on the invoice.
+//
+// Full booking payment status is still included separately as
+// `bookingPaymentStatus` for reference.
+// ─────────────────────────────────────────────────────────────────────────────
 export const getInvoice = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
-  // استلام نوع الخدمة المطلوبة من الـ Query (اختياري)
-  // القيم المتوقعة: 'accommodations', 'carRentals', 'tripsWithDrivers'
-  const { serviceType } = req.query; 
+  const { serviceType } = req.query;
 
   const booking = await bookingModel
     .findById(bookingId)
@@ -156,7 +160,6 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
   const lineItems = [];
   let filteredTotal = 0;
 
-  // 1. فندق (Accommodations)
   if (!serviceType || serviceType === "accommodations") {
     booking.accommodations?.forEach((acc) => {
       lineItems.push({
@@ -171,7 +174,6 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // 2. سيارات (Car Rentals)
   if (!serviceType || serviceType === "carRentals") {
     booking.carRentals?.forEach((car) => {
       lineItems.push({
@@ -186,7 +188,6 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // 3. رحلات (Trips with Drivers)
   if (!serviceType || serviceType === "tripsWithDrivers") {
     booking.tripsWithDrivers?.forEach((trip) => {
       lineItems.push({
@@ -199,47 +200,68 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // بناء الفاتورة بناءً على الفلترة
+  const totalPaidForAll = payments.reduce((s, p) => s + p.amount, 0);
+
+  // FIX [9]: For a filtered invoice we cannot attribute specific payments
+  // to specific services (payments cover the booking, not a service).
+  // So we show the filtered subtotal with a note, rather than showing
+  // the full booking's paid/remaining which would be misleading.
+  const filteredTotals = serviceType
+    ? {
+        subtotal: filteredTotal,
+        note: "Payment totals below reflect the full booking — individual service payments are not tracked separately.",
+        fullBooking: {
+          totalToPay: booking.totalToPay,
+          totalPaid: booking.totalPaid,
+          remainingBalance: booking.remainingBalance,
+          paymentStatus: booking.paymentStatus,
+        },
+      }
+    : {
+        subtotal: booking.totalToPay,
+        totalToPay: booking.totalToPay,
+        totalPaid: booking.totalPaid,
+        remainingBalance: booking.remainingBalance,
+        paymentStatus: booking.paymentStatus,
+      };
+
   const invoice = {
-    invoiceType: serviceType ? `INVOICE - ${serviceType.toUpperCase()}` : "FULL INVOICE",
+    invoiceType: serviceType
+      ? `PARTIAL INVOICE - ${serviceType.toUpperCase()}`
+      : "FULL INVOICE",
     invoiceNumber: `INV-${booking.bookingID}-${Date.now().toString().slice(-4)}`,
     issueDate: new Date().toISOString(),
-    booking: {
-      id: booking._id,
-      bookingID: booking.bookingID,
-    },
+    booking: { id: booking._id, bookingID: booking.bookingID },
     billTo: {
       names: booking.customers?.map((c) => c.name) || [],
       pax: booking.totalPax,
     },
     issuedBy: booking.createdBy?.userName || "N/A",
     lineItems,
-    totals: {
-      // إذا كانت فاتورة مخصصة، السعر الإجمالي هو سعر الخدمة فقط
-      // إذا كانت فاتورة كاملة، السعر الإجمالي هو السعر الكلي للحجز
-      subtotal: serviceType ? filteredTotal : booking.totalToPay,
-      totalToPay: serviceType ? filteredTotal : booking.totalToPay,
-      totalPaid: booking.totalPaid,
-      remainingBalance: booking.remainingBalance,
-    },
-    // إظهار الدفعات فقط في الفاتورة الكاملة (أو حسب رغبتك)
-    payments: !serviceType ? payments.map((p) => ({
-      date: p.date,
-      amount: p.amount,
-      method: p.method,
-    })) : [],
+    totals: filteredTotals,
+    // Payments are shown only on full invoices.
+    payments: !serviceType
+      ? payments.map((p) => ({
+          date: p.date,
+          amount: p.amount,
+          method: p.method,
+        }))
+      : [],
   };
 
   return res.status(200).json({
     success: true,
-    message: serviceType ? `Invoice for ${serviceType} generated` : "Full invoice generated",
+    message: serviceType
+      ? `Partial invoice for ${serviceType} generated`
+      : "Full invoice generated",
     data: invoice,
+    errors: null,
   });
 });
 
-// ─────────────────────────────────────────────
-// Receipt — سند قبض لدفعة معينة
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Receipt — payment receipt for a single payment
+// ─────────────────────────────────────────────────────────────────────────────
 export const getReceipt = asyncHandler(async (req, res, next) => {
   const { paymentId } = req.params;
 
@@ -267,10 +289,10 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
     method: payment.method,
     methodLabel:
       {
-        cash: "نقداً",
-        bank_transfer: "حوالة بنكية",
-        check: "شيك",
-        other: "أخرى",
+        cash: "Cash (نقداً)",
+        bank_transfer: "Bank Transfer (حوالة بنكية)",
+        check: "Check (شيك)",
+        other: "Other (أخرى)",
       }[payment.method] || payment.method,
     notes: payment.notes,
     forBooking: {

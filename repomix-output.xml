@@ -49,10 +49,13 @@ DB/model/expense.model.js
 DB/model/log.model.js
 DB/model/payment.model.js
 DB/model/provider.model.js
+DB/model/providerPayment.model.js
+DB/model/refreshToken.model.js
 DB/model/user.model.js
 package.json
 src/middleware/asyncHandler.js
 src/middleware/auth.js
+src/middleware/upload.js
 src/middleware/validation.js
 src/modules/auth/auth.router.js
 src/modules/auth/auth.validation.js
@@ -74,17 +77,1395 @@ src/modules/payment/payment.router.js
 src/modules/payment/payment.validation.js
 src/modules/provider/controller/provider.controller.js
 src/modules/provider/provider.router.js
+src/modules/provider/provider.validation.js
+src/modules/providerPayment/controller/providerPayment.controller.js
+src/modules/providerPayment/providerPayment.router.js
+src/modules/providerPayment/providerPayment.validation.js
+src/modules/report/controller/report.controller.js
+src/modules/report/report.router.js
 src/modules/statement/controller/statement.controller.js
 src/modules/statement/statement.router.js
 src/modules/voucher/controller/voucher.controller.js
 src/modules/voucher/voucher.router.js
+src/services/bookingService.js
+src/services/cloudinary.js
 src/services/email.js
+src/services/notification.js
 src/services/pagination.js
 src/services/transaction.js
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="DB/model/providerPayment.model.js">
+import mongoose from "mongoose";
+
+/**
+ * Records money paid OUT to a provider (hotel, car company, etc.).
+ *
+ * This is the liability side of the ledger:
+ *   - paymentModel  → money received FROM customers
+ *   - providerPaymentModel → money paid TO providers
+ *
+ * The getProviderStatement controller uses both to show the full picture:
+ *   totalCostFromProvider (what you owe) vs totalPaidToProvider (what you've paid).
+ */
+const providerPaymentSchema = new mongoose.Schema(
+  {
+    provider: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Provider",
+      required: [true, "Provider is required"],
+      index: true,
+    },
+    amount: {
+      type: Number,
+      required: [true, "Amount is required"],
+      min: [0.01, "Amount must be greater than 0"],
+    },
+    date: {
+      type: Date,
+      default: Date.now,
+      required: true,
+    },
+    method: {
+      type: String,
+      enum: ["cash", "bank_transfer", "check", "other"],
+      default: "cash",
+    },
+    notes: {
+      type: String,
+      trim: true,
+      maxlength: [300, "Notes too long"],
+    },
+    // External reference: invoice number, wire transfer ID, cheque number, etc.
+    reference: {
+      type: String,
+      trim: true,
+      maxlength: [100, "Reference too long"],
+    },
+    recordedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+  },
+  { timestamps: true },
+);
+
+providerPaymentSchema.index({ provider: 1, date: -1 });
+
+export default mongoose.model("ProviderPayment", providerPaymentSchema);
+</file>
+
+<file path="DB/model/refreshToken.model.js">
+import mongoose from "mongoose";
+
+const refreshTokenSchema = new mongoose.Schema({
+  user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+    index: true,
+  },
+  // Store only the SHA-256 hash of the raw token, never the token itself.
+  // If this collection is ever exposed, the hashes are useless without the raw token.
+  tokenHash: {
+    type: String,
+    required: true,
+    unique: true,
+  },
+  expiresAt: {
+    type: Date,
+    required: true,
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+  // Optional: track which device/IP issued this token for audit purposes.
+  userAgent: String,
+  ip: String,
+});
+
+// MongoDB auto-removes documents once expiresAt passes.
+// No cron job or manual cleanup required.
+refreshTokenSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+export default mongoose.model("RefreshToken", refreshTokenSchema);
+</file>
+
+<file path="src/middleware/upload.js">
+import multer from "multer";
+
+// Store uploaded files in memory so we can stream them directly to Cloudinary
+// without writing temporary files to disk.
+const storage = multer.memoryStorage();
+
+const fileFilter = (req, file, cb) => {
+  if (file.mimetype.startsWith("image/")) {
+    cb(null, true);
+  } else {
+    cb(
+      new Error("Only image files are allowed (jpeg, png, webp, etc.)"),
+      false,
+    );
+  }
+};
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5 MB hard cap
+  },
+});
+
+/**
+ * Middleware: accept a single image field named "image".
+ * Attach file to req.file as a Buffer via memoryStorage.
+ */
+export const uploadSingle = upload.single("image");
+
+/**
+ * Error-normalising wrapper for multer.
+ * Converts MulterError into a structured JSON response instead of
+ * leaking the raw error object to the global handler.
+ */
+export const handleUploadError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    const messages = {
+      LIMIT_FILE_SIZE: "File too large. Maximum allowed size is 5 MB.",
+      LIMIT_UNEXPECTED_FILE:
+        "Unexpected field name. Use 'image' as the field key.",
+    };
+    return res.status(400).json({
+      success: false,
+      message: messages[err.code] || err.message,
+      errors: null,
+    });
+  }
+  if (err) {
+    return res
+      .status(400)
+      .json({ success: false, message: err.message, errors: null });
+  }
+  next();
+};
+</file>
+
+<file path="src/modules/provider/provider.validation.js">
+import Joi from "joi";
+
+export const createProvider = {
+  body: Joi.object({
+    name: Joi.string().trim().min(2).max(100).required().messages({
+      "any.required": "Provider name is required",
+      "string.min": "Name must be at least 2 characters",
+    }),
+    type: Joi.string()
+      .valid("hotel", "car_rental", "driver_company", "tourism")
+      .required()
+      .messages({
+        "any.required": "Provider type is required",
+        "any.only":
+          "Type must be hotel, car_rental, driver_company, or tourism",
+      }),
+    phone: Joi.string()
+      .pattern(/^\+?[\d\s\-().]{7,20}$/)
+      .optional()
+      .allow("")
+      .messages({
+        "string.pattern.base": "Invalid phone number format",
+      }),
+    address: Joi.string().trim().max(200).optional().allow(""),
+  }),
+};
+
+export const updateProvider = {
+  body: Joi.object({
+    name: Joi.string().trim().min(2).max(100).messages({
+      "string.min": "Name must be at least 2 characters",
+    }),
+    type: Joi.string()
+      .valid("hotel", "car_rental", "driver_company", "tourism")
+      .messages({
+        "any.only":
+          "Type must be hotel, car_rental, driver_company, or tourism",
+      }),
+    phone: Joi.string()
+      .pattern(/^\+?[\d\s\-().]{7,20}$/)
+      .allow("")
+      .messages({
+        "string.pattern.base": "Invalid phone number format",
+      }),
+    address: Joi.string().trim().max(200).allow(""),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    id: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid provider ID",
+      "string.length": "Invalid provider ID",
+    }),
+  }),
+};
+</file>
+
+<file path="src/modules/providerPayment/controller/providerPayment.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+import logModel from "../../../../DB/model/log.model.js";
+import { pagination } from "../../../services/pagination.js";
+import { notifyProviderPaymentRecorded } from "../../../services/notification.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Record a payment made TO a provider
+// POST /api/v1/provider-payment/:providerId
+// ─────────────────────────────────────────────────────────────────────────────
+export const createProviderPayment = asyncHandler(async (req, res, next) => {
+  const { providerId } = req.params;
+  const { amount, date, method, notes, reference } = req.body;
+
+  const provider = await providerModel.findById(providerId);
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  const payment = await providerPaymentModel.create({
+    provider: providerId,
+    amount,
+    date: date || new Date(),
+    method: method || "cash",
+    notes,
+    reference,
+    recordedBy: req.user._id,
+  });
+
+  await logModel.create({
+    user: req.user._id,
+    action: "CREATE_PROVIDER_PAYMENT",
+    details: {
+      paymentId: payment._id,
+      providerId,
+      providerName: provider.name,
+      amount,
+      method,
+    },
+  });
+
+  // Feature [6]: Email notification — best-effort.
+  await notifyProviderPaymentRecorded(
+    provider,
+    payment,
+    req.user.email,
+    req.user.userName,
+  );
+
+  return res.status(201).json({
+    success: true,
+    message: "Provider payment recorded successfully",
+    data: { payment },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all payments for a provider (paginated)
+// GET /api/v1/provider-payment/:providerId
+// ─────────────────────────────────────────────────────────────────────────────
+export const getProviderPayments = asyncHandler(async (req, res, next) => {
+  const { providerId } = req.params;
+  const { fromDate, toDate, page, size } = req.query;
+
+  const provider = await providerModel.findById(providerId).lean();
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  const query = { provider: providerId };
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const { limit, skip } = pagination(page, size);
+
+  const [payments, totalCount, totalAmountResult] = await Promise.all([
+    providerPaymentModel
+      .find(query)
+      .populate("recordedBy", "userName")
+      .sort({ date: -1 })
+      .limit(limit)
+      .skip(skip),
+    providerPaymentModel.countDocuments(query),
+    providerPaymentModel.aggregate([
+      { $match: { provider: provider._id } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      provider: { id: provider._id, name: provider.name, type: provider.type },
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      totalPaidToProvider: totalAmountResult[0]?.total || 0,
+      payments,
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete a provider payment (Admin only)
+// DELETE /api/v1/provider-payment/:paymentId
+// ─────────────────────────────────────────────────────────────────────────────
+export const deleteProviderPayment = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+
+  const payment = await providerPaymentModel
+    .findById(paymentId)
+    .populate("provider", "name");
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  await payment.deleteOne();
+
+  await logModel.create({
+    user: req.user._id,
+    action: "DELETE_PROVIDER_PAYMENT",
+    details: {
+      paymentId,
+      providerId: payment.provider._id,
+      providerName: payment.provider?.name,
+      amount: payment.amount,
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Provider payment deleted successfully",
+    data: null,
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all provider payments — for accounting overview
+// GET /api/v1/provider-payment/all
+// ─────────────────────────────────────────────────────────────────────────────
+export const getAllProviderPayments = asyncHandler(async (req, res) => {
+  const { method, fromDate, toDate, page, size } = req.query;
+
+  const query = {};
+  if (method) query.method = method;
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const { limit, skip } = pagination(page, size);
+
+  const [payments, totalCount, totalAmountResult] = await Promise.all([
+    providerPaymentModel
+      .find(query)
+      .populate("provider", "name type")
+      .populate("recordedBy", "userName")
+      .sort({ date: -1 })
+      .limit(limit)
+      .skip(skip),
+    providerPaymentModel.countDocuments(query),
+    providerPaymentModel.aggregate([
+      { $match: query },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      totalAmount: totalAmountResult[0]?.total || 0,
+      payments,
+    },
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/providerPayment/providerPayment.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as providerPaymentController from "./controller/providerPayment.controller.js";
+import * as validators from "./providerPayment.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// Static routes before dynamic ones.
+
+// GET /api/v1/provider-payment/all — all provider payments (accounting overview)
+router.get(
+  "/all",
+  auth(endpoint.accounting_only),
+  providerPaymentController.getAllProviderPayments,
+);
+
+// DELETE /api/v1/provider-payment/:paymentId — remove a specific payment
+router.delete(
+  "/:paymentId",
+  auth(endpoint.AdminOnly),
+  validation(validators.deleteProviderPayment),
+  providerPaymentController.deleteProviderPayment,
+);
+
+// POST /api/v1/provider-payment/:providerId — record a payment to a provider
+router.post(
+  "/:providerId",
+  auth(endpoint.accounting_only),
+  validation(validators.createProviderPayment),
+  providerPaymentController.createProviderPayment,
+);
+
+// GET /api/v1/provider-payment/:providerId — list payments for a provider
+router.get(
+  "/:providerId",
+  auth(endpoint.accounting_only),
+  validation(validators.getProviderPayments),
+  providerPaymentController.getProviderPayments,
+);
+
+export default router;
+</file>
+
+<file path="src/modules/providerPayment/providerPayment.validation.js">
+import Joi from "joi";
+
+export const createProviderPayment = {
+  body: Joi.object({
+    amount: Joi.number().positive().required().messages({
+      "number.positive": "Amount must be greater than 0",
+      "any.required": "Amount is required",
+    }),
+    date: Joi.date()
+      .max("now")
+      .default(() => new Date())
+      .messages({
+        "date.max": "Payment date cannot be in the future",
+      }),
+    method: Joi.string()
+      .valid("cash", "bank_transfer", "check", "other")
+      .default("cash"),
+    notes: Joi.string().trim().max(300).optional().allow(""),
+    reference: Joi.string().trim().max(100).optional().allow(""),
+  }),
+  params: Joi.object({
+    providerId: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid provider ID",
+      "string.length": "Invalid provider ID",
+    }),
+  }),
+};
+
+export const deleteProviderPayment = {
+  params: Joi.object({
+    paymentId: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid payment ID",
+    }),
+  }),
+};
+
+export const getProviderPayments = {
+  params: Joi.object({
+    providerId: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid provider ID",
+    }),
+  }),
+  query: Joi.object({
+    fromDate: Joi.date(),
+    toDate: Joi.date().when("fromDate", {
+      is: Joi.exist(),
+      then: Joi.date().min(Joi.ref("fromDate")).messages({
+        "date.min": "toDate must be after fromDate",
+      }),
+    }),
+    page: Joi.number().integer().min(1).default(1),
+    size: Joi.number().integer().min(1).max(100).default(10),
+  }),
+};
+</file>
+
+<file path="src/modules/report/controller/report.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+import expenseModel from "../../../../DB/model/expense.model.js";
+import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
+
+// ── CSV helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * Converts an array of flat objects to a CSV string.
+ *
+ * @param {string[]} headers - Column headers in output order.
+ * @param {Record<string, any>[]} rows - Data rows.
+ * @returns {string} CSV content.
+ */
+const toCSV = (headers, rows) => {
+  const escape = (value) => {
+    if (value == null) return "";
+    const str = String(value).replace(/"/g, '""');
+    return str.includes(",") || str.includes('"') || str.includes("\n")
+      ? `"${str}"`
+      : str;
+  };
+
+  const lines = [
+    headers.join(","),
+    ...rows.map((row) => headers.map((h) => escape(row[h])).join(",")),
+  ];
+  return lines.join("\n");
+};
+
+/**
+ * Sets response headers for a CSV file download.
+ *
+ * @param {import('express').Response} res
+ * @param {string} filename
+ */
+const sendCSV = (res, filename, csv) => {
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  // UTF-8 BOM so Excel opens Arabic / mixed-language content correctly.
+  res.send("\uFEFF" + csv);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bookings report
+// GET /api/v1/report/bookings?fromDate=&toDate=&status=&paymentStatus=
+// ─────────────────────────────────────────────────────────────────────────────
+export const exportBookings = asyncHandler(async (req, res) => {
+  const { fromDate, toDate, status, paymentStatus } = req.query;
+
+  const query = {};
+  if (status) query.status = status;
+  if (paymentStatus) query.paymentStatus = paymentStatus;
+  if (fromDate || toDate) {
+    query.createdAt = {};
+    if (fromDate) query.createdAt.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.createdAt.$lte = to;
+    }
+  }
+
+  const bookings = await bookingModel
+    .find(query)
+    .populate("provider", "name type")
+    .populate("createdBy", "userName")
+    .sort({ bookingID: 1 })
+    .lean();
+
+  const headers = [
+    "bookingID",
+    "date",
+    "status",
+    "paymentStatus",
+    "provider",
+    "customers",
+    "totalToPay",
+    "totalPaid",
+    "remainingBalance",
+    "totalProfit",
+    "createdBy",
+  ];
+
+  const rows = bookings.map((b) => ({
+    bookingID: b.bookingID,
+    date: b.createdAt ? new Date(b.createdAt).toLocaleDateString() : "",
+    status: b.status,
+    paymentStatus: b.paymentStatus,
+    provider: b.provider?.name || "",
+    customers: b.customers?.map((c) => c.name).join(" | ") || "",
+    totalToPay: b.totalToPay,
+    totalPaid: b.totalPaid,
+    remainingBalance: b.remainingBalance,
+    totalProfit: b.totalProfit,
+    createdBy: b.createdBy?.userName || "",
+  }));
+
+  const dateTag =
+    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  sendCSV(res, `bookings${dateTag}.csv`, toCSV(headers, rows));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payments report
+// GET /api/v1/report/payments?fromDate=&toDate=&method=
+// ─────────────────────────────────────────────────────────────────────────────
+export const exportPayments = asyncHandler(async (req, res) => {
+  const { fromDate, toDate, method } = req.query;
+
+  const query = {};
+  if (method) query.method = method;
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const payments = await paymentModel
+    .find(query)
+    .populate("booking", "bookingID")
+    .populate("recordedBy", "userName")
+    .sort({ date: -1 })
+    .lean();
+
+  const headers = [
+    "bookingID",
+    "date",
+    "amount",
+    "method",
+    "notes",
+    "recordedBy",
+  ];
+
+  const rows = payments.map((p) => ({
+    bookingID: p.booking?.bookingID || p.bookingID || "",
+    date: p.date ? new Date(p.date).toLocaleDateString() : "",
+    amount: p.amount,
+    method: p.method,
+    notes: p.notes || "",
+    recordedBy: p.recordedBy?.userName || "",
+  }));
+
+  const dateTag =
+    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  sendCSV(res, `payments${dateTag}.csv`, toCSV(headers, rows));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Expenses report
+// GET /api/v1/report/expenses?fromDate=&toDate=&category=
+// ─────────────────────────────────────────────────────────────────────────────
+export const exportExpenses = asyncHandler(async (req, res) => {
+  const { fromDate, toDate, category } = req.query;
+
+  const query = {};
+  if (category) query.category = category;
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const expenses = await expenseModel
+    .find(query)
+    .populate("recordedBy", "userName")
+    .sort({ date: -1 })
+    .lean();
+
+  const headers = [
+    "date",
+    "category",
+    "description",
+    "amount",
+    "method",
+    "reference",
+    "recordedBy",
+  ];
+
+  const rows = expenses.map((e) => ({
+    date: e.date ? new Date(e.date).toLocaleDateString() : "",
+    category: e.category,
+    description: e.description,
+    amount: e.amount,
+    method: e.method,
+    reference: e.reference || "",
+    recordedBy: e.recordedBy?.userName || "",
+  }));
+
+  const dateTag =
+    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  sendCSV(res, `expenses${dateTag}.csv`, toCSV(headers, rows));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider payments report
+// GET /api/v1/report/provider-payments?fromDate=&toDate=
+// ─────────────────────────────────────────────────────────────────────────────
+export const exportProviderPayments = asyncHandler(async (req, res) => {
+  const { fromDate, toDate } = req.query;
+
+  const query = {};
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const payments = await providerPaymentModel
+    .find(query)
+    .populate("provider", "name type")
+    .populate("recordedBy", "userName")
+    .sort({ date: -1 })
+    .lean();
+
+  const headers = [
+    "date",
+    "provider",
+    "providerType",
+    "amount",
+    "method",
+    "reference",
+    "notes",
+    "recordedBy",
+  ];
+
+  const rows = payments.map((p) => ({
+    date: p.date ? new Date(p.date).toLocaleDateString() : "",
+    provider: p.provider?.name || "",
+    providerType: p.provider?.type || "",
+    amount: p.amount,
+    method: p.method,
+    reference: p.reference || "",
+    notes: p.notes || "",
+    recordedBy: p.recordedBy?.userName || "",
+  }));
+
+  const dateTag =
+    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  sendCSV(res, `provider-payments${dateTag}.csv`, toCSV(headers, rows));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Profit & Loss summary
+// GET /api/v1/report/pnl?fromDate=&toDate=
+// Returns aggregated totals — useful for a monthly P&L view.
+// ─────────────────────────────────────────────────────────────────────────────
+export const getProfitLoss = asyncHandler(async (req, res) => {
+  const { fromDate, toDate } = req.query;
+
+  const dateFilter = {};
+  if (fromDate) dateFilter.$gte = new Date(fromDate);
+  if (toDate) {
+    const to = new Date(toDate);
+    to.setHours(23, 59, 59, 999);
+    dateFilter.$lte = to;
+  }
+
+  const bookingDateQuery = Object.keys(dateFilter).length
+    ? { createdAt: dateFilter }
+    : {};
+  const txnDateQuery = Object.keys(dateFilter).length
+    ? { date: dateFilter }
+    : {};
+
+  const [
+    bookingTotals,
+    expenseTotals,
+    providerPaymentTotals,
+    customerPaymentTotals,
+  ] = await Promise.all([
+    bookingModel.aggregate([
+      { $match: bookingDateQuery },
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: "$totalToPay" },
+          totalCost: { $sum: "$totalToBuy" },
+          totalProfit: { $sum: "$totalProfit" },
+          totalPaid: { $sum: "$totalPaid" },
+          totalOutstanding: { $sum: "$remainingBalance" },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    expenseModel.aggregate([
+      { $match: txnDateQuery },
+      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+    ]),
+    providerPaymentModel.aggregate([
+      { $match: txnDateQuery },
+      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+    ]),
+    paymentModel.aggregate([
+      { $match: txnDateQuery },
+      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const b = bookingTotals[0] || {
+    totalRevenue: 0,
+    totalCost: 0,
+    totalProfit: 0,
+    totalPaid: 0,
+    totalOutstanding: 0,
+    count: 0,
+  };
+  const expenses = expenseTotals[0]?.total || 0;
+  const providerPaid = providerPaymentTotals[0]?.total || 0;
+  const customerPaid = customerPaymentTotals[0]?.total || 0;
+
+  // Net profit = gross booking profit minus operating expenses.
+  const netProfit = b.totalProfit - expenses;
+
+  return res.status(200).json({
+    success: true,
+    message: "Profit & Loss summary",
+    data: {
+      period: {
+        from: fromDate || "All time",
+        to: toDate || "All time",
+      },
+      bookings: {
+        count: b.count,
+        totalRevenue: b.totalRevenue,
+        totalCost: b.totalCost,
+        grossProfit: b.totalProfit,
+        totalCollectedFromCustomers: customerPaid,
+        totalOutstandingFromCustomers: b.totalOutstanding,
+      },
+      expenses: {
+        total: expenses,
+        count: expenseTotals[0]?.count || 0,
+      },
+      providerPayments: {
+        total: providerPaid,
+        count: providerPaymentTotals[0]?.count || 0,
+      },
+      summary: {
+        grossProfit: b.totalProfit,
+        operatingExpenses: expenses,
+        netProfit,
+        netProfitLabel:
+          netProfit >= 0
+            ? `Net Profit: ${netProfit}`
+            : `Net Loss: ${Math.abs(netProfit)}`,
+      },
+    },
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/report/report.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import * as reportController from "./controller/report.controller.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// All report routes are restricted to accounting staff and admins.
+// They return CSV file downloads except for P&L which returns JSON.
+
+// GET /api/v1/report/bookings?fromDate=&toDate=&status=&paymentStatus=
+router.get(
+  "/bookings",
+  auth(endpoint.accounting_only),
+  reportController.exportBookings,
+);
+
+// GET /api/v1/report/payments?fromDate=&toDate=&method=
+router.get(
+  "/payments",
+  auth(endpoint.accounting_only),
+  reportController.exportPayments,
+);
+
+// GET /api/v1/report/expenses?fromDate=&toDate=&category=
+router.get(
+  "/expenses",
+  auth(endpoint.accounting_only),
+  reportController.exportExpenses,
+);
+
+// GET /api/v1/report/provider-payments?fromDate=&toDate=
+router.get(
+  "/provider-payments",
+  auth(endpoint.accounting_only),
+  reportController.exportProviderPayments,
+);
+
+// GET /api/v1/report/pnl?fromDate=&toDate=
+// Profit & Loss summary JSON — useful for dashboard or further processing.
+router.get(
+  "/pnl",
+  auth(endpoint.accounting_only),
+  reportController.getProfitLoss,
+);
+
+export default router;
+</file>
+
+<file path="src/services/bookingService.js">
+import mongoose from "mongoose";
+
+// Lazy model references to avoid circular-import issues
+// (this module is imported by booking.model.js, which would
+//  create a cycle if we imported the model directly here).
+const getProvider = () => mongoose.model("Provider");
+const getBooking = () => mongoose.model("Booking");
+
+/**
+ * Assigns bookingID and per-service sequence numbers.
+ *
+ * Extracted from booking.model.js pre('save') for testability.
+ *
+ * Fixes applied here:
+ *  [1] serviceNumber == null check instead of falsy !item.serviceNumber
+ *      (0 is a theoretically valid serviceNumber and would have been skipped).
+ *  [2] oldDoc fetched ONCE before the loop, not once per service-type
+ *      (previously caused up to 3 redundant DB reads per save).
+ *
+ * @param {import('mongoose').Document} doc - The booking document being saved.
+ */
+export const assignBookingSequences = async (doc) => {
+  const Provider = getProvider();
+  const Booking = getBooking();
+
+  // ── Main booking sequence (bookingID) ──────────────────────────────────────
+  if (doc.isNew) {
+    const mainProvider = await Provider.findByIdAndUpdate(
+      doc.provider,
+      { $inc: { currentSequence: 1, totalBookings: 1 } },
+      { new: true },
+    );
+    if (!mainProvider) throw new Error("Main Provider not found");
+    doc.bookingID = mainProvider.currentSequence;
+  } else if (doc.isModified("provider")) {
+    const oldDoc = await Booking.findById(doc._id).lean();
+    if (oldDoc && oldDoc.provider.toString() !== doc.provider.toString()) {
+      await Provider.findByIdAndUpdate(oldDoc.provider, {
+        $inc: { currentSequence: -1, totalBookings: -1 },
+      });
+      const newProvider = await Provider.findByIdAndUpdate(
+        doc.provider,
+        { $inc: { currentSequence: 1, totalBookings: 1 } },
+        { new: true },
+      );
+      doc.bookingID = newProvider.currentSequence;
+    }
+  }
+
+  // ── Per-service sequence numbers ──────────────────────────────────────────
+  // FIX [2]: One DB read shared across all three service-type processors.
+  const oldDoc = !doc.isNew ? await Booking.findById(doc._id).lean() : null;
+
+  const processServices = async (fieldName, providerKey) => {
+    const services = doc[fieldName];
+    if (!services || services.length === 0) return;
+
+    for (let i = 0; i < services.length; i++) {
+      const item = services[i];
+      const currentProviderId = item[providerKey]?.toString();
+      if (!currentProviderId) continue;
+
+      const isMainProvider = currentProviderId === doc.provider.toString();
+
+      // FIX [1]: Explicit null/undefined check — 0 would fail a falsy ! check.
+      if (item.serviceNumber == null) {
+        // New service being added — assign sequence now.
+        if (isMainProvider) {
+          doc[fieldName][i].serviceNumber = doc.bookingID;
+        } else {
+          const otherProvider = await Provider.findByIdAndUpdate(
+            currentProviderId,
+            { $inc: { currentSequence: 1 } },
+            { new: true },
+          );
+          doc[fieldName][i].serviceNumber = otherProvider?.currentSequence ?? 0;
+        }
+      } else if (item._id && oldDoc?.[fieldName]) {
+        // Existing service — only re-sequence if its provider changed.
+        const oldItem = oldDoc[fieldName].find(
+          (o) => o._id.toString() === item._id.toString(),
+        );
+        const oldProviderId = oldItem?.[providerKey]?.toString();
+
+        if (oldProviderId && oldProviderId !== currentProviderId) {
+          await Provider.findByIdAndUpdate(oldProviderId, {
+            $inc: { currentSequence: -1 },
+          });
+          if (isMainProvider) {
+            doc[fieldName][i].serviceNumber = doc.bookingID;
+          } else {
+            const otherProvider = await Provider.findByIdAndUpdate(
+              currentProviderId,
+              { $inc: { currentSequence: 1 } },
+              { new: true },
+            );
+            doc[fieldName][i].serviceNumber =
+              otherProvider?.currentSequence ?? 0;
+          }
+        }
+      }
+    }
+  };
+
+  await processServices("accommodations", "hotel");
+  await processServices("carRentals", "provider");
+  await processServices("tripsWithDrivers", "provider");
+
+  doc.markModified("accommodations");
+  doc.markModified("carRentals");
+  doc.markModified("tripsWithDrivers");
+};
+
+/**
+ * Recalculates hotel stay durations and all booking financial totals.
+ *
+ * Pure synchronous — no DB calls. Safe to call multiple times.
+ * Mutates the document directly.
+ *
+ * @param {import('mongoose').Document} doc - The booking document being saved.
+ */
+export const calculateBookingTotals = (doc) => {
+  // Auto-calculate hotel stay durations.
+  doc.accommodations?.forEach((acc) => {
+    if (acc.checkIn && acc.checkOut) {
+      acc.duration = Math.ceil(
+        (new Date(acc.checkOut) - new Date(acc.checkIn)) /
+          (1000 * 60 * 60 * 24),
+      );
+    }
+  });
+
+  // Roll up financials across all service types.
+  let totalSell = 0;
+  let totalBuy = 0;
+
+  const allServices = [
+    ...(doc.accommodations || []),
+    ...(doc.carRentals || []),
+    ...(doc.tripsWithDrivers || []),
+  ];
+
+  allServices.forEach((service) => {
+    service.profit = (Number(service.sell) || 0) - (Number(service.buy) || 0);
+    totalSell += Number(service.sell) || 0;
+    totalBuy += Number(service.buy) || 0;
+  });
+
+  doc.totalToPay = totalSell;
+  doc.totalToBuy = totalBuy;
+  doc.totalProfit = totalSell - totalBuy;
+  doc.remainingBalance = doc.totalToPay - (doc.totalPaid || 0);
+
+  if ((doc.totalPaid || 0) <= 0) {
+    doc.paymentStatus = "unpaid";
+  } else if (doc.totalPaid >= doc.totalToPay) {
+    doc.paymentStatus = "paid";
+  } else {
+    doc.paymentStatus = "partial";
+  }
+};
+</file>
+
+<file path="src/services/cloudinary.js">
+import { v2 as cloudinary } from "cloudinary";
+
+/**
+ * Configures Cloudinary from environment variables.
+ * Called once at module load time.
+ *
+ * Required env vars:
+ *   CLOUDINARY_CLOUD_NAME
+ *   CLOUDINARY_API_KEY
+ *   CLOUDINARY_API_SECRET
+ */
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+/**
+ * Uploads an image buffer to Cloudinary.
+ *
+ * @param {Buffer} buffer - Raw image bytes (from multer memoryStorage).
+ * @param {string} [folder="profiles"] - Cloudinary folder to store in.
+ * @returns {Promise<import('cloudinary').UploadApiResponse>}
+ */
+export const uploadImage = (buffer, folder = "profiles") => {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: "image", quality: "auto", fetch_format: "auto" },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      },
+    );
+    stream.end(buffer);
+  });
+};
+
+/**
+ * Deletes an image from Cloudinary by its public ID.
+ * Extracts the public ID from a full Cloudinary URL if needed.
+ *
+ * @param {string} publicIdOrUrl - Cloudinary public_id or full URL.
+ * @returns {Promise<import('cloudinary').DeleteApiResponse>}
+ */
+export const deleteImage = (publicIdOrUrl) => {
+  // If a full URL was stored, extract the public_id segment.
+  // Cloudinary URLs follow: .../upload/v<version>/<public_id>.<ext>
+  let publicId = publicIdOrUrl;
+  if (publicIdOrUrl.startsWith("http")) {
+    const parts = publicIdOrUrl.split("/upload/");
+    if (parts[1]) {
+      // Strip version prefix (v1234567890/) if present, then remove extension.
+      publicId = parts[1].replace(/^v\d+\//, "").replace(/\.[^.]+$/, "");
+    }
+  }
+  return cloudinary.uploader.destroy(publicId);
+};
+</file>
+
+<file path="src/services/notification.js">
+import sendEmail from "./email.js";
+
+// Email sending is best-effort — a failed notification should never
+// crash a booking or payment transaction. All functions catch and log errors.
+
+const STATUS_LABELS = {
+  pending: "⏳ Pending",
+  confirmed: "✅ Confirmed",
+  cancelled: "❌ Cancelled",
+  completed: "✔️ Completed",
+};
+
+const baseStyle = `
+  font-family: Arial, sans-serif; color: #333;
+  max-width: 600px; margin: auto; padding: 20px;
+`;
+
+const tableStyle = `
+  border-collapse: collapse; width: 100%; margin-top: 12px;
+`;
+
+const cellStyle = `padding: 10px 14px; border: 1px solid #ddd;`;
+
+/**
+ * Notifies the booking creator when a booking's status changes.
+ *
+ * @param {Object} booking - Booking document with createdBy populated ({ _id, userName, email }).
+ * @param {string} oldStatus
+ * @param {string} newStatus
+ */
+export const notifyBookingStatusChanged = async (
+  booking,
+  oldStatus,
+  newStatus,
+) => {
+  try {
+    const creator = booking.createdBy;
+    if (!creator?.email) return;
+
+    const customerName = booking.customers?.[0]?.name || "Unknown Customer";
+
+    await sendEmail(
+      creator.email,
+      `Booking #${booking.bookingID} — Status Changed to ${STATUS_LABELS[newStatus] || newStatus}`,
+      `
+      <div style="${baseStyle}">
+        <h2 style="color:#2c3e50;">Booking Status Update</h2>
+        <p>
+          Booking <strong>#${booking.bookingID}</strong> for
+          <strong>${customerName}</strong> has been updated.
+        </p>
+        <table style="${tableStyle}">
+          <tr>
+            <td style="${cellStyle}"><strong>Previous Status</strong></td>
+            <td style="${cellStyle}">${STATUS_LABELS[oldStatus] || oldStatus}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>New Status</strong></td>
+            <td style="${cellStyle}">${STATUS_LABELS[newStatus] || newStatus}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>Booking ID</strong></td>
+            <td style="${cellStyle}">#${booking.bookingID}</td>
+          </tr>
+        </table>
+        <p style="margin-top:16px;color:#888;font-size:12px;">
+          This is an automated notification from the booking system.
+        </p>
+      </div>
+      `,
+    );
+  } catch (err) {
+    // Never propagate notification failures to the caller.
+    console.error(
+      "❌ Failed to send booking status notification:",
+      err.message,
+    );
+  }
+};
+
+/**
+ * Notifies the booking creator when a payment is recorded on their booking.
+ *
+ * @param {Object} booking - Booking document with createdBy populated.
+ * @param {Object} payment - Newly created payment object.
+ * @param {string} recordedByName - Username of the person who recorded the payment.
+ * @param {Object} summary - { totalPaid, remainingBalance, paymentStatus }
+ */
+export const notifyPaymentRecorded = async (
+  booking,
+  payment,
+  recordedByName,
+  summary,
+) => {
+  try {
+    const creator = booking.createdBy;
+    if (!creator?.email) return;
+
+    const customerName = booking.customers?.[0]?.name || "Unknown Customer";
+    const methodLabels = {
+      cash: "Cash (نقداً)",
+      bank_transfer: "Bank Transfer (حوالة)",
+      check: "Check (شيك)",
+      other: "Other",
+    };
+
+    await sendEmail(
+      creator.email,
+      `Payment Recorded — Booking #${booking.bookingID}`,
+      `
+      <div style="${baseStyle}">
+        <h2 style="color:#2c3e50;">Payment Recorded</h2>
+        <p>
+          A payment has been recorded for booking
+          <strong>#${booking.bookingID}</strong> (${customerName}).
+        </p>
+        <table style="${tableStyle}">
+          <tr>
+            <td style="${cellStyle}"><strong>Amount</strong></td>
+            <td style="${cellStyle}">${payment.amount}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>Method</strong></td>
+            <td style="${cellStyle}">${methodLabels[payment.method] || payment.method}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>Total Paid</strong></td>
+            <td style="${cellStyle}">${summary.totalPaid}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>Remaining Balance</strong></td>
+            <td style="${cellStyle}">${summary.remainingBalance}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>Payment Status</strong></td>
+            <td style="${cellStyle}">${summary.paymentStatus}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>Recorded By</strong></td>
+            <td style="${cellStyle}">${recordedByName}</td>
+          </tr>
+        </table>
+        <p style="margin-top:16px;color:#888;font-size:12px;">
+          This is an automated notification from the booking system.
+        </p>
+      </div>
+      `,
+    );
+  } catch (err) {
+    console.error("❌ Failed to send payment notification:", err.message);
+  }
+};
+
+/**
+ * Notifies the admin/creator when a payment to a provider is recorded.
+ *
+ * @param {Object} provider - Provider document { name }
+ * @param {Object} payment - ProviderPayment document
+ * @param {string} recordedByEmail - Email of the accounting staff
+ * @param {string} recordedByName
+ */
+export const notifyProviderPaymentRecorded = async (
+  provider,
+  payment,
+  recordedByEmail,
+  recordedByName,
+) => {
+  try {
+    if (!recordedByEmail) return;
+
+    await sendEmail(
+      recordedByEmail,
+      `Provider Payment Confirmed — ${provider.name}`,
+      `
+      <div style="${baseStyle}">
+        <h2 style="color:#2c3e50;">Provider Payment Recorded</h2>
+        <p>
+          A payment of <strong>${payment.amount}</strong> has been recorded
+          for provider <strong>${provider.name}</strong>.
+        </p>
+        <table style="${tableStyle}">
+          <tr>
+            <td style="${cellStyle}"><strong>Provider</strong></td>
+            <td style="${cellStyle}">${provider.name}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>Amount</strong></td>
+            <td style="${cellStyle}">${payment.amount}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>Method</strong></td>
+            <td style="${cellStyle}">${payment.method}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>Reference</strong></td>
+            <td style="${cellStyle}">${payment.reference || "—"}</td>
+          </tr>
+          <tr>
+            <td style="${cellStyle}"><strong>Recorded By</strong></td>
+            <td style="${cellStyle}">${recordedByName}</td>
+          </tr>
+        </table>
+        <p style="margin-top:16px;color:#888;font-size:12px;">
+          This is an automated notification from the booking system.
+        </p>
+      </div>
+      `,
+    );
+  } catch (err) {
+    console.error(
+      "❌ Failed to send provider payment notification:",
+      err.message,
+    );
+  }
+};
+</file>
 
 <file path=".gitignore">
 node_modules/
@@ -102,16 +1483,13 @@ export const seedAdmin = async () => {
     if (!adminExists) {
       console.log("🚀 No admin found. Creating initial admin account...");
 
-      const initialPassword = "Admin@123";
-
       const user = await userModel.create({
         userName: "SuperAdmin",
         email: "admin@system.com",
-        password: initialPassword,
+        password: "Admin@123",
         role: "admin",
       });
 
-      // FIX: لا نحفظ كلمة المرور في الـ log
       await logModel.create({
         user: user._id,
         action: "ADMIN_SEED",
@@ -206,6 +1584,16 @@ const logSchema = new mongoose.Schema(
     ip: String,
   },
   { timestamps: true },
+);
+
+// Auto-delete logs after LOG_RETENTION_DAYS (default 90).
+// MongoDB handles this natively — no cron job needed.
+// To keep logs forever, set LOG_RETENTION_DAYS=0 in env (TTL won't apply at 0 seconds
+// but you can remove the index entirely in that case).
+const retentionDays = parseInt(process.env.LOG_RETENTION_DAYS) || 90;
+logSchema.index(
+  { createdAt: 1 },
+  { expireAfterSeconds: retentionDays * 24 * 60 * 60 },
 );
 
 export default mongoose.model("Log", logSchema);
@@ -305,14 +1693,24 @@ const userSchema = new mongoose.Schema(
       enum: ["admin", "booking_staff", "accounting_staff"],
       default: "booking_staff",
     },
-    image: String,
+    image: String, // Cloudinary URL stored here
+    imagePublicId: String, // Cloudinary public_id for deletion
     blocked: {
       type: Boolean,
       default: false,
     },
-    sendCode: {
+    // FIX [12]: Replaced the "dontTrust32" sentinel string with explicit
+    // nullable fields + an expiry date. Benefits:
+    //   - No magic string to leak or misuse.
+    //   - Token auto-expires: the controller checks passwordResetExpiry.
+    //   - Clear intent — null means "no active reset request".
+    passwordResetToken: {
       type: String,
-      default: "dontTrust32",
+      default: null,
+    },
+    passwordResetExpiry: {
+      type: Date,
+      default: null,
     },
   },
   { timestamps: true },
@@ -320,7 +1718,10 @@ const userSchema = new mongoose.Schema(
 
 userSchema.pre("save", async function () {
   if (!this.isModified("password")) return;
-  this.password = await bcrypt.hash(this.password, 10);
+  this.password = await bcrypt.hash(
+    this.password,
+    parseInt(process.env.SALTROUND) || 10,
+  );
 });
 
 userSchema.methods.comparePassword = function (password) {
@@ -333,8 +1734,8 @@ export default mongoose.model("User", userSchema);
 <file path="package.json">
 {
   "name": "booking",
-  "version": "1.0.0",
-  "description": "",
+  "version": "2.0.0",
+  "description": "Tourism booking management system",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
@@ -417,35 +1818,52 @@ import { asyncHandler } from "../../middleware/asyncHandler.js";
 import { validation } from "../../middleware/validation.js";
 import * as validators from "./auth.validation.js";
 import { auth } from "../../middleware/auth.js";
+import { uploadSingle, handleUploadError } from "../../middleware/upload.js";
 import { endpoint } from "../indexEndpoint.js";
 
 const router = Router();
 
-// تسجيل الدخول
+// ── Public routes ──────────────────────────────────────────────────────────
 router.post("/signin", asyncHandler(authController.signIn));
-
-// نسيان كلمة المرور
 router.post("/sendCode", asyncHandler(authController.sendCode));
 router.post("/forgotPassword", asyncHandler(authController.forgotPassword));
 
-// إدارة المستخدمين (Admin فقط)
-//create user
+// Feature [4]: Token refresh and logout endpoints.
+// Refresh uses the long-lived refresh token to issue a new access token.
+// Logout invalidates the refresh token (stored in DB by hash).
+router.post("/refresh", asyncHandler(authController.refreshToken));
+router.post("/logout", auth(endpoint.All), asyncHandler(authController.logout));
+
+// ── Admin: user management ─────────────────────────────────────────────────
 router.post(
   "/createUser",
   auth(endpoint.AdminOnly),
   validation(validators.createUser),
   asyncHandler(authController.createUser),
 );
-//update user
+
+// FIX [3]: Added Joi validation that was previously missing on this route.
 router.patch(
   "/update/:id",
   auth(endpoint.AdminOnly),
+  validation(validators.updateUser),
   asyncHandler(authController.updateUser),
 );
+
 router.get(
   "/",
   auth(endpoint.AdminOnly),
   asyncHandler(authController.getAllUsers),
+);
+
+// Feature [5]: Profile image upload via Cloudinary.
+// Uses multer memoryStorage → streams buffer to Cloudinary.
+router.post(
+  "/:id/upload-image",
+  auth(endpoint.AdminOnly),
+  uploadSingle,
+  handleUploadError,
+  asyncHandler(authController.uploadUserImage),
 );
 
 export default router;
@@ -454,8 +1872,6 @@ export default router;
 <file path="src/modules/auth/auth.validation.js">
 import Joi from "joi";
 
-// الـ password pattern القديم كان خاطئ: ^[A-Z][a-z]{2,6}$ = بس 3-7 حروف مثل "Abc"
-// الـ pattern الجديد: 6+ حروف، حرف كبير، حرف صغير، رقم
 const passwordPattern = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{6,}$/;
 const passwordMessage =
   "Password must be at least 6 characters with uppercase, lowercase, and a number";
@@ -486,6 +1902,53 @@ export const createUser = {
           "any.required": "Role is required",
         }),
     }),
+};
+
+// FIX [3]: updateUser previously had no Joi validation — any field value
+// (including garbage) passed straight through to user[key] = value.
+export const updateUser = {
+  body: Joi.object({
+    userName: Joi.string().min(3).max(25).messages({
+      "string.min": "Username must be at least 3 characters",
+    }),
+    email: Joi.string().email().messages({
+      "string.email": "Must be a valid email address",
+    }),
+    phone: Joi.string()
+      .pattern(/^\+?[\d\s\-().]{7,20}$/)
+      .allow("")
+      .messages({
+        "string.pattern.base": "Invalid phone number format",
+      }),
+    role: Joi.string()
+      .valid("admin", "booking_staff", "accounting_staff")
+      .messages({
+        "any.only": "Role must be admin, booking_staff, or accounting_staff",
+      }),
+    blocked: Joi.boolean(),
+    password: Joi.string().pattern(passwordPattern).messages({
+      "string.pattern.base": passwordMessage,
+    }),
+    cPassword: Joi.string()
+      .valid(Joi.ref("password"))
+      .when("password", {
+        is: Joi.exist(),
+        then: Joi.required(),
+        otherwise: Joi.forbidden(),
+      })
+      .messages({
+        "any.only": "Passwords do not match",
+        "any.required": "Confirm password is required when changing password",
+      }),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    id: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid user ID",
+      "string.length": "Invalid user ID",
+    }),
+  }),
 };
 </file>
 
@@ -641,6 +2104,41 @@ export const removeService = {
 export const bookingIdParam = {
   params: Joi.object({
     id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
+  }),
+};
+
+// Feature [3]: Validates query params for getAllBookings,
+// including the new numeric bookingID filter.
+export const getAllBookingsQuery = {
+  query: Joi.object({
+    bookingID: Joi.number().integer().min(1), // NEW: search by human-readable ID
+    provider: objectId,
+    status: Joi.string().valid(
+      "pending",
+      "confirmed",
+      "cancelled",
+      "completed",
+    ),
+    paymentStatus: Joi.string().valid("unpaid", "partial", "paid"),
+    customerName: Joi.string().trim().min(1).max(100),
+    fromDate: Joi.date(),
+    toDate: Joi.date().when("fromDate", {
+      is: Joi.exist(),
+      then: Joi.date().min(Joi.ref("fromDate")).messages({
+        "date.min": "toDate must be after fromDate",
+      }),
+    }),
+    minAmount: Joi.number().min(0),
+    maxAmount: Joi.number().min(0),
+    sortBy: Joi.string().valid(
+      "createdAt",
+      "bookingID",
+      "totalToPay",
+      "totalProfit",
+    ),
+    sortOrder: Joi.string().valid("asc", "desc"),
+    page: Joi.number().integer().min(1).default(1),
+    size: Joi.number().integer().min(1).max(100).default(10),
   }),
 };
 </file>
@@ -1207,6 +2705,8 @@ import dashboardRouter from "./dashboard/dashboard.router.js";
 import statementRouter from "./statement/statement.router.js";
 import voucherRouter from "./voucher/voucher.router.js";
 import expenseRouter from "./expense/expense.router.js";
+import providerPaymentRouter from "./providerPayment/providerPayment.router.js";
+import reportRouter from "./report/report.router.js";
 
 export {
   authRouter,
@@ -1218,6 +2718,8 @@ export {
   statementRouter,
   voucherRouter,
   expenseRouter,
+  providerPaymentRouter,
+  reportRouter,
 };
 </file>
 
@@ -1379,31 +2881,41 @@ export const deletePayment = {
 <file path="src/modules/provider/provider.router.js">
 import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
 import * as providerController from "./controller/provider.controller.js";
+import * as validators from "./provider.validation.js";
 import { endpoint } from "../indexEndpoint.js";
 
 const router = Router();
 
+// FIX [6]: Added Joi validation middleware to create and update routes.
+// Previously these routes accepted any payload without schema validation.
 router.post(
   "/create",
   auth(endpoint.provider_manage),
+  validation(validators.createProvider),
   providerController.createProvider,
 );
+
 router.get(
   "/getAll",
   auth(endpoint.provider_view),
   providerController.getAllProviders,
 );
+
 router.get(
   "/get/:id",
   auth(endpoint.provider_view),
   providerController.getProviderById,
 );
+
 router.patch(
   "/update/:id",
   auth(endpoint.provider_manage),
+  validation(validators.updateProvider),
   providerController.updateProvider,
 );
+
 router.delete(
   "/delete/:id",
   auth(endpoint.provider_manage),
@@ -1421,7 +2933,6 @@ import { endpoint } from "../indexEndpoint.js";
 
 const router = Router();
 
-// كشف حساب مورد
 // GET /api/v1/statement/provider/:providerId?fromDate=&toDate=
 router.get(
   "/provider/:providerId",
@@ -1429,8 +2940,7 @@ router.get(
   statementController.getProviderStatement,
 );
 
-// كشف حساب زبون
-// GET /api/v1/statement/customer/:customerName?fromDate=&toDate=
+// GET /api/v1/statement/customer/:customerName?fromDate=&toDate=&page=1&size=10
 router.get(
   "/customer/:customerName",
   auth(endpoint.accounting_only),
@@ -1445,15 +2955,13 @@ import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 
-// ─────────────────────────────────────────────
-// Service Voucher — ورقة للمورد (فندق / باص)
-// بدون أسعار البيع، فقط معلومات الخدمة
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Service Voucher — for the provider (hotel / car company / driver)
+// Contains service details only — NO sell prices.
+// ─────────────────────────────────────────────────────────────────────────────
 export const getServiceVoucher = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
   const { serviceType, serviceIndex } = req.query;
-  // serviceType: accommodations | carRentals | tripsWithDrivers
-  // serviceIndex: رقم الخدمة في المصفوفة (اختياري — لو ما موجود يرجع كلهم)
 
   const booking = await bookingModel
     .findById(bookingId)
@@ -1571,14 +3079,20 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
   });
 });
 
-// ─────────────────────────────────────────────
-// Invoice — فاتورة للزبون بكل الخدمات والأسعار
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Invoice — customer-facing invoice with sell prices
+//
+// FIX [9]: When serviceType filter is applied, totals.totalPaid and
+// totals.remainingBalance now reflect ONLY the filtered service amount,
+// not the entire booking balance. This prevents showing a confusing
+// remaining-balance figure that doesn't match the line items on the invoice.
+//
+// Full booking payment status is still included separately as
+// `bookingPaymentStatus` for reference.
+// ─────────────────────────────────────────────────────────────────────────────
 export const getInvoice = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
-  // استلام نوع الخدمة المطلوبة من الـ Query (اختياري)
-  // القيم المتوقعة: 'accommodations', 'carRentals', 'tripsWithDrivers'
-  const { serviceType } = req.query; 
+  const { serviceType } = req.query;
 
   const booking = await bookingModel
     .findById(bookingId)
@@ -1599,7 +3113,6 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
   const lineItems = [];
   let filteredTotal = 0;
 
-  // 1. فندق (Accommodations)
   if (!serviceType || serviceType === "accommodations") {
     booking.accommodations?.forEach((acc) => {
       lineItems.push({
@@ -1614,7 +3127,6 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // 2. سيارات (Car Rentals)
   if (!serviceType || serviceType === "carRentals") {
     booking.carRentals?.forEach((car) => {
       lineItems.push({
@@ -1629,7 +3141,6 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // 3. رحلات (Trips with Drivers)
   if (!serviceType || serviceType === "tripsWithDrivers") {
     booking.tripsWithDrivers?.forEach((trip) => {
       lineItems.push({
@@ -1642,47 +3153,68 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // بناء الفاتورة بناءً على الفلترة
+  const totalPaidForAll = payments.reduce((s, p) => s + p.amount, 0);
+
+  // FIX [9]: For a filtered invoice we cannot attribute specific payments
+  // to specific services (payments cover the booking, not a service).
+  // So we show the filtered subtotal with a note, rather than showing
+  // the full booking's paid/remaining which would be misleading.
+  const filteredTotals = serviceType
+    ? {
+        subtotal: filteredTotal,
+        note: "Payment totals below reflect the full booking — individual service payments are not tracked separately.",
+        fullBooking: {
+          totalToPay: booking.totalToPay,
+          totalPaid: booking.totalPaid,
+          remainingBalance: booking.remainingBalance,
+          paymentStatus: booking.paymentStatus,
+        },
+      }
+    : {
+        subtotal: booking.totalToPay,
+        totalToPay: booking.totalToPay,
+        totalPaid: booking.totalPaid,
+        remainingBalance: booking.remainingBalance,
+        paymentStatus: booking.paymentStatus,
+      };
+
   const invoice = {
-    invoiceType: serviceType ? `INVOICE - ${serviceType.toUpperCase()}` : "FULL INVOICE",
+    invoiceType: serviceType
+      ? `PARTIAL INVOICE - ${serviceType.toUpperCase()}`
+      : "FULL INVOICE",
     invoiceNumber: `INV-${booking.bookingID}-${Date.now().toString().slice(-4)}`,
     issueDate: new Date().toISOString(),
-    booking: {
-      id: booking._id,
-      bookingID: booking.bookingID,
-    },
+    booking: { id: booking._id, bookingID: booking.bookingID },
     billTo: {
       names: booking.customers?.map((c) => c.name) || [],
       pax: booking.totalPax,
     },
     issuedBy: booking.createdBy?.userName || "N/A",
     lineItems,
-    totals: {
-      // إذا كانت فاتورة مخصصة، السعر الإجمالي هو سعر الخدمة فقط
-      // إذا كانت فاتورة كاملة، السعر الإجمالي هو السعر الكلي للحجز
-      subtotal: serviceType ? filteredTotal : booking.totalToPay,
-      totalToPay: serviceType ? filteredTotal : booking.totalToPay,
-      totalPaid: booking.totalPaid,
-      remainingBalance: booking.remainingBalance,
-    },
-    // إظهار الدفعات فقط في الفاتورة الكاملة (أو حسب رغبتك)
-    payments: !serviceType ? payments.map((p) => ({
-      date: p.date,
-      amount: p.amount,
-      method: p.method,
-    })) : [],
+    totals: filteredTotals,
+    // Payments are shown only on full invoices.
+    payments: !serviceType
+      ? payments.map((p) => ({
+          date: p.date,
+          amount: p.amount,
+          method: p.method,
+        }))
+      : [],
   };
 
   return res.status(200).json({
     success: true,
-    message: serviceType ? `Invoice for ${serviceType} generated` : "Full invoice generated",
+    message: serviceType
+      ? `Partial invoice for ${serviceType} generated`
+      : "Full invoice generated",
     data: invoice,
+    errors: null,
   });
 });
 
-// ─────────────────────────────────────────────
-// Receipt — سند قبض لدفعة معينة
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Receipt — payment receipt for a single payment
+// ─────────────────────────────────────────────────────────────────────────────
 export const getReceipt = asyncHandler(async (req, res, next) => {
   const { paymentId } = req.params;
 
@@ -1710,10 +3242,10 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
     method: payment.method,
     methodLabel:
       {
-        cash: "نقداً",
-        bank_transfer: "حوالة بنكية",
-        check: "شيك",
-        other: "أخرى",
+        cash: "Cash (نقداً)",
+        bank_transfer: "Bank Transfer (حوالة بنكية)",
+        check: "Check (شيك)",
+        other: "Other (أخرى)",
       }[payment.method] || payment.method,
     notes: payment.notes,
     forBooking: {
@@ -1870,17 +3402,18 @@ import * as indexRouter from "./src/modules/indexRouter.js";
 
 dotenv.config({ path: "./config/.env" });
 
-// ── Fail fast if any critical env var is absent ──────────────────────────────
-// This prevents the app from starting in a broken state and producing cryptic
-// runtime errors deep inside request handlers.
+// ── Fail fast: abort startup if any critical env var is absent ───────────────
 const REQUIRED_ENV = [
   "DBURI",
   "SIGNINTOKEN",
   "FORGOTPASSWORDTOKEN",
-  "BEARERKEY",
   "SALTROUND",
   "SENDEREMAIL",
   "SENDEREMAILPASSWORD",
+  // Cloudinary — required for image uploads (Feature 5)
+  "CLOUDINARY_CLOUD_NAME",
+  "CLOUDINARY_API_KEY",
+  "CLOUDINARY_API_SECRET",
 ];
 
 const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
@@ -1897,6 +3430,10 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(helmet());
+
+// Trust the first proxy hop (e.g. Nginx, Railway, Render).
+// Required for accurate req.ip in logs and rate limiters behind a reverse proxy.
+app.set("trust proxy", 1);
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",")
@@ -1915,6 +3452,7 @@ app.use(
 
 app.use(express.json({ limit: "10kb" }));
 
+// Rate limiter for auth endpoints — brute force protection.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -1930,6 +3468,7 @@ connectDB();
 
 const baseUrl = process.env.BASEURL || "/api/v1";
 
+// ── Route registration ────────────────────────────────────────────────────────
 app.use(`${baseUrl}/auth`, authLimiter, indexRouter.authRouter);
 app.use(`${baseUrl}/booking`, indexRouter.bookingRouter);
 app.use(`${baseUrl}/booking`, indexRouter.paymentRouter);
@@ -1939,18 +3478,23 @@ app.use(`${baseUrl}/dashboard`, indexRouter.dashboardRouter);
 app.use(`${baseUrl}/statement`, indexRouter.statementRouter);
 app.use(`${baseUrl}/voucher`, indexRouter.voucherRouter);
 app.use(`${baseUrl}/expense`, indexRouter.expenseRouter);
+// Feature [1]: Provider payments — money paid OUT to providers.
+app.use(`${baseUrl}/provider-payment`, indexRouter.providerPaymentRouter);
+// Feature [2]: CSV/Excel export + P&L report.
+app.use(`${baseUrl}/report`, indexRouter.reportRouter);
 
-// Global Error Handler
+// ── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   const status = err.cause || 500;
   return res.status(status).json({
     success: false,
     message: err.message || "Server Error",
+    errors: null,
     stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
   });
 });
 
-// 404
+// ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
@@ -1960,6 +3504,10 @@ app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
 
 <file path="DB/model/booking.model.js">
 import mongoose from "mongoose";
+import {
+  assignBookingSequences,
+  calculateBookingTotals,
+} from "../../src/services/bookingService.js";
 
 const bookingSchema = new mongoose.Schema(
   {
@@ -2037,143 +3585,15 @@ const bookingSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// FIX: Unique compound index prevents two simultaneous inserts from
-// getting the same bookingID for the same provider (race condition).
-// The DB will reject the duplicate and the caller will receive an error
-// rather than silently producing ambiguous IDs.
+// Unique compound index prevents race-condition duplicate bookingIDs
+// for the same provider on concurrent inserts.
 bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
 
+// Pre-save hook is now thin: sequence and financial logic live in
+// src/services/bookingService.js for testability.
 bookingSchema.pre("save", async function () {
-  try {
-    const Provider = mongoose.model("Provider");
-    const Booking = mongoose.model("Booking");
-
-    // ── Sequence / counter logic ─────────────────────────────────────────
-    if (!this.isNew && this.isModified("provider")) {
-      const oldDoc = await Booking.findById(this._id).lean();
-      if (oldDoc && oldDoc.provider.toString() !== this.provider.toString()) {
-        await Provider.findByIdAndUpdate(oldDoc.provider, {
-          $inc: { currentSequence: -1, totalBookings: -1 },
-        });
-        const newP = await Provider.findByIdAndUpdate(
-          this.provider,
-          { $inc: { currentSequence: 1, totalBookings: 1 } },
-          { new: true },
-        );
-        this.bookingID = newP.currentSequence;
-      }
-    }
-
-    if (this.isNew) {
-      const mainP = await Provider.findByIdAndUpdate(
-        this.provider,
-        { $inc: { currentSequence: 1, totalBookings: 1 } },
-        { new: true },
-      );
-      if (!mainP) throw new Error("Main Provider not found");
-      this.bookingID = mainP.currentSequence;
-    }
-
-    // ── Per-service sequence numbers ─────────────────────────────────────
-    const processServices = async (fieldName, providerKey) => {
-      if (!this[fieldName] || this[fieldName].length === 0) return;
-      const oldDoc = !this.isNew
-        ? await Booking.findById(this._id).lean()
-        : null;
-
-      for (let i = 0; i < this[fieldName].length; i++) {
-        const item = this[fieldName][i];
-        const currentPid = item[providerKey]?.toString();
-        if (!currentPid) continue;
-
-        if (!item.serviceNumber) {
-          if (currentPid === this.provider.toString()) {
-            this[fieldName][i].serviceNumber = this.bookingID;
-          } else {
-            const otherP = await Provider.findByIdAndUpdate(
-              currentPid,
-              { $inc: { currentSequence: 1 } },
-              { new: true },
-            );
-            this[fieldName][i].serviceNumber = otherP
-              ? otherP.currentSequence
-              : 0;
-          }
-        } else if (item._id && oldDoc?.[fieldName]) {
-          const oldItem = oldDoc[fieldName].find(
-            (o) => o._id.toString() === item._id.toString(),
-          );
-          const oldPid = oldItem?.[providerKey]?.toString();
-          if (oldPid && oldPid !== currentPid) {
-            await Provider.findByIdAndUpdate(oldPid, {
-              $inc: { currentSequence: -1 },
-            });
-            if (currentPid === this.provider.toString()) {
-              this[fieldName][i].serviceNumber = this.bookingID;
-            } else {
-              const otherP = await Provider.findByIdAndUpdate(
-                currentPid,
-                { $inc: { currentSequence: 1 } },
-                { new: true },
-              );
-              this[fieldName][i].serviceNumber = otherP
-                ? otherP.currentSequence
-                : 0;
-            }
-          }
-        }
-      }
-    };
-
-    await processServices("accommodations", "hotel");
-    await processServices("carRentals", "provider");
-    await processServices("tripsWithDrivers", "provider");
-
-    this.markModified("accommodations");
-    this.markModified("carRentals");
-    this.markModified("tripsWithDrivers");
-
-    // ── Auto-calculate hotel durations ───────────────────────────────────
-    if (this.accommodations) {
-      this.accommodations.forEach((acc) => {
-        if (acc.checkIn && acc.checkOut) {
-          acc.duration = Math.ceil(
-            (new Date(acc.checkOut) - new Date(acc.checkIn)) /
-              (1000 * 60 * 60 * 24),
-          );
-        }
-      });
-    }
-
-    // ── Financial roll-up ────────────────────────────────────────────────
-    let totalSell = 0;
-    let totalBuy = 0;
-    let totalProf = 0;
-
-    const allServices = [
-      ...(this.accommodations || []),
-      ...(this.carRentals || []),
-      ...(this.tripsWithDrivers || []),
-    ];
-
-    allServices.forEach((s) => {
-      s.profit = (Number(s.sell) || 0) - (Number(s.buy) || 0);
-      totalSell += Number(s.sell) || 0;
-      totalBuy += Number(s.buy) || 0;
-      totalProf += s.profit;
-    });
-
-    this.totalToPay = totalSell;
-    this.totalToBuy = totalBuy;
-    this.totalProfit = totalProf;
-    this.remainingBalance = this.totalToPay - this.totalPaid;
-
-    if (this.totalPaid <= 0) this.paymentStatus = "unpaid";
-    else if (this.totalPaid >= this.totalToPay) this.paymentStatus = "paid";
-    else this.paymentStatus = "partial";
-  } catch (error) {
-    throw error;
-  }
+  await assignBookingSequences(this);
+  calculateBookingTotals(this);
 });
 
 export default mongoose.model("Booking", bookingSchema);
@@ -2183,112 +3603,227 @@ export default mongoose.model("Booking", bookingSchema);
 import jwt from "jsonwebtoken";
 import userModel from "../../DB/model/user.model.js";
 
+/**
+ * Authentication middleware factory.
+ *
+ * FIX [10]: Migrated from a custom `token` header with a `BEARERKEY` prefix
+ * to the industry-standard `Authorization: Bearer <jwt>` header.
+ * This is compatible with all HTTP clients, Swagger UIs, and browser
+ * fetch/axios defaults without extra configuration.
+ *
+ * @param {string[]} accessRoles - Roles allowed to access the route.
+ */
 export const auth = (accessRoles = []) => {
   return async (req, res, next) => {
     try {
-      const { token } = req.headers;
+      const authHeader = req.headers.authorization;
 
-      if (!token) {
-        return res.status(401).json({ message: "Token is required" });
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({
+          success: false,
+          message: "Authorization header is required (Bearer token)",
+        });
       }
 
-      const bearerKey = process.env.BEARERKEY;
-
-      if (!token.startsWith(bearerKey)) {
-        return res.status(401).json({ message: "Invalid token format" });
-      }
-
-      // slice() safely strips the prefix regardless of whether the prefix
-      // string happens to appear again inside the token itself.
-      // split(bearerKey)[1] would break in that (admittedly unlikely) case.
-      const rawToken = token.slice(bearerKey.length);
+      // Slice off "Bearer " (7 chars) — safe even if the JWT itself
+      // contains the string "Bearer".
+      const rawToken = authHeader.slice(7).trim();
 
       if (!rawToken) {
-        return res.status(401).json({ message: "Token is empty" });
+        return res
+          .status(401)
+          .json({ success: false, message: "Token is empty" });
       }
 
       const decoded = jwt.verify(rawToken, process.env.SIGNINTOKEN);
 
       if (!decoded?.id) {
-        return res.status(401).json({ message: "Invalid token payload" });
+        return res
+          .status(401)
+          .json({ success: false, message: "Invalid token payload" });
       }
 
       const user = await userModel
         .findById(decoded.id)
-        .select("_id role blocked");
+        .select("_id role blocked email userName");
 
       if (!user) {
-        return res.status(401).json({ message: "User not found" });
+        return res
+          .status(401)
+          .json({ success: false, message: "User not found" });
       }
 
       if (user.blocked) {
-        return res.status(403).json({ message: "Account is blocked" });
+        return res
+          .status(403)
+          .json({ success: false, message: "Account is blocked" });
       }
 
       if (!accessRoles.includes(user.role)) {
-        return res.status(403).json({ message: "Unauthorized" });
+        return res
+          .status(403)
+          .json({ success: false, message: "Unauthorized" });
       }
 
       req.user = user;
       next();
     } catch (error) {
       if (error.name === "TokenExpiredError") {
-        return res.status(401).json({ message: "Token expired" });
+        return res
+          .status(401)
+          .json({ success: false, message: "Token expired" });
       }
       if (error.name === "JsonWebTokenError") {
-        return res.status(401).json({ message: "Invalid token" });
+        return res
+          .status(401)
+          .json({ success: false, message: "Invalid token" });
       }
-      return res.status(500).json({ message: "Server error" });
+      return res.status(500).json({ success: false, message: "Server error" });
     }
   };
 };
 </file>
 
 <file path="src/modules/auth/controller/auth.controller.js">
+import crypto from "crypto";
 import sendEmail from "../../../services/email.js";
+import { uploadImage, deleteImage } from "../../../services/cloudinary.js";
 import jwt from "jsonwebtoken";
 import userModel from "../../../../DB/model/user.model.js";
 import logModel from "../../../../DB/model/log.model.js";
+import refreshTokenModel from "../../../../DB/model/refreshToken.model.js";
 import { nanoid } from "nanoid";
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+const ACCESS_TOKEN_EXPIRY = process.env.ACCESS_TOKEN_EXPIRY || "1h";
+const REFRESH_TOKEN_EXPIRY_DAYS = 7;
+
+/** Creates a signed JWT access token. */
+const signAccessToken = (userId) =>
+  jwt.sign({ id: userId }, process.env.SIGNINTOKEN, {
+    expiresIn: ACCESS_TOKEN_EXPIRY,
+  });
+
+/**
+ * Creates a raw refresh token, stores its SHA-256 hash in the DB,
+ * and returns the raw token (sent to the client once, never stored raw).
+ */
+const createRefreshToken = async (userId, req) => {
+  const raw = crypto.randomBytes(40).toString("hex");
+  const hash = crypto.createHash("sha256").update(raw).digest("hex");
+
+  await refreshTokenModel.create({
+    user: userId,
+    tokenHash: hash,
+    expiresAt: new Date(
+      Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
+    ),
+    userAgent: req.headers["user-agent"],
+    ip: req.ip,
+  });
+
+  return raw;
+};
+
+// ── Controllers ───────────────────────────────────────────────────────────────
 
 export const signIn = asyncHandler(async (req, res, next) => {
   const { email, password } = req.body;
 
   const user = await userModel.findOne({ email });
-  if (!user) {
+  if (!user)
     return next(new Error("Invalid login credentials", { cause: 400 }));
-  }
 
   const isMatch = await user.comparePassword(password);
-  if (!isMatch) {
+  if (!isMatch)
     return next(new Error("Invalid login credentials", { cause: 400 }));
-  }
 
   if (user.blocked) {
-    return res.status(403).json({ message: "This account is blocked" });
+    return res
+      .status(403)
+      .json({ success: false, message: "Account is blocked" });
   }
 
-  const token = jwt.sign({ id: user._id }, process.env.SIGNINTOKEN, {
-    expiresIn: "8h",
-  });
+  const accessToken = signAccessToken(user._id);
+  const refreshToken = await createRefreshToken(user._id, req);
 
   return res.status(200).json({
     success: true,
     message: "Login successfully",
     data: {
-      token,
+      accessToken,
+      refreshToken,
+      expiresIn: ACCESS_TOKEN_EXPIRY,
       user: {
         id: user._id,
         userName: user.userName,
         email: user.email,
         role: user.role,
+        image: user.image || null,
       },
     },
     errors: null,
   });
 });
 
+// Feature [4]: Issue a new access token using a valid refresh token.
+export const refreshToken = asyncHandler(async (req, res, next) => {
+  const { refreshToken: rawToken } = req.body;
+  if (!rawToken)
+    return next(new Error("Refresh token is required", { cause: 400 }));
+
+  const hash = crypto.createHash("sha256").update(rawToken).digest("hex");
+  const storedToken = await refreshTokenModel.findOne({ tokenHash: hash });
+
+  if (!storedToken) {
+    return next(new Error("Invalid or expired refresh token", { cause: 401 }));
+  }
+
+  if (storedToken.expiresAt < new Date()) {
+    await storedToken.deleteOne();
+    return next(
+      new Error("Refresh token expired. Please log in again.", { cause: 401 }),
+    );
+  }
+
+  const user = await userModel
+    .findById(storedToken.user)
+    .select("_id role blocked");
+  if (!user || user.blocked) {
+    await storedToken.deleteOne();
+    return next(new Error("User unavailable", { cause: 401 }));
+  }
+
+  const accessToken = signAccessToken(user._id);
+
+  return res.status(200).json({
+    success: true,
+    message: "Access token refreshed",
+    data: { accessToken, expiresIn: ACCESS_TOKEN_EXPIRY },
+    errors: null,
+  });
+});
+
+// Feature [4]: Invalidate a refresh token on logout.
+export const logout = asyncHandler(async (req, res, next) => {
+  const { refreshToken: rawToken } = req.body;
+  if (rawToken) {
+    const hash = crypto.createHash("sha256").update(rawToken).digest("hex");
+    await refreshTokenModel.deleteOne({ tokenHash: hash });
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: "Logged out successfully",
+    data: null,
+    errors: null,
+  });
+});
+
+// FIX [12] + FIX [10]: Uses passwordResetToken/passwordResetExpiry instead of
+// the "dontTrust32" sentinel. Authorization uses Bearer header.
 export const sendCode = asyncHandler(async (req, res, next) => {
   const { email } = req.body;
 
@@ -2297,54 +3832,61 @@ export const sendCode = asyncHandler(async (req, res, next) => {
     // Do not reveal whether the email exists (security best practice).
     return res.status(200).json({
       success: true,
-      message: "If this email exists, a code has been sent.",
+      message: "If this email exists, a reset code has been sent.",
       data: null,
       errors: null,
     });
   }
 
-  const code = nanoid();
+  const code = nanoid(8);
+  const expiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
   await sendEmail(
     email,
-    "Forgot Password",
-    `Your verification code: <b>${code}</b>`,
+    "Password Reset Code",
+    `<p>Your password reset code: <b>${code}</b></p>
+     <p>This code expires in <strong>1 hour</strong>.</p>`,
   );
-  await userModel.updateOne({ _id: user._id }, { sendCode: code });
 
+  await userModel.updateOne(
+    { _id: user._id },
+    { passwordResetToken: code, passwordResetExpiry: expiry },
+  );
+
+  // The JWT here is just to identify which user the OTP belongs to.
+  // It does NOT grant any access — only the OTP + this JWT together work.
   const token = jwt.sign({ id: user._id }, process.env.FORGOTPASSWORDTOKEN, {
     expiresIn: "1h",
   });
 
   return res.status(200).json({
     success: true,
-    message: "If this email exists, a code has been sent.",
+    message: "If this email exists, a reset code has been sent.",
     data: { token },
     errors: null,
   });
 });
 
+// FIX [12] + FIX [10]: Reads standard Authorization header; validates
+// OTP against passwordResetToken and checks passwordResetExpiry.
 export const forgotPassword = asyncHandler(async (req, res, next) => {
   const { otp, email, newPassword } = req.body;
-  let { token } = req.headers;
 
-  if (!token || !token.startsWith(process.env.BEARERKEY)) {
-    return next(new Error("Invalid token", { cause: 400 }));
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return next(new Error("Authorization header required", { cause: 400 }));
   }
 
-  token = token.slice(process.env.BEARERKEY.length);
-  const decoded = jwt.verify(token, process.env.FORGOTPASSWORDTOKEN);
+  const rawToken = authHeader.slice(7).trim();
+  const decoded = jwt.verify(rawToken, process.env.FORGOTPASSWORDTOKEN);
 
   if (!otp || !decoded) {
     return next(new Error("Invalid request", { cause: 400 }));
   }
 
-  // FIX: Use find() + save() instead of findOneAndUpdate() so the
-  // userSchema.pre('save') hook handles hashing consistently.
-  // Previously this path manually called bcrypt.hash(), creating a third
-  // hashing path that ignored SALTROUND.
   const user = await userModel.findOne({
     email,
-    sendCode: otp,
+    passwordResetToken: otp,
     _id: decoded.id,
   });
 
@@ -2352,8 +3894,16 @@ export const forgotPassword = asyncHandler(async (req, res, next) => {
     return next(new Error("Invalid OTP or email", { cause: 400 }));
   }
 
-  user.password = newPassword; // pre('save') will hash this
-  user.sendCode = "dontTrust32";
+  if (user.passwordResetExpiry < new Date()) {
+    return next(
+      new Error("OTP has expired. Request a new one.", { cause: 400 }),
+    );
+  }
+
+  // pre('save') hashes the password — no manual bcrypt.hash() needed.
+  user.password = newPassword;
+  user.passwordResetToken = null;
+  user.passwordResetExpiry = null;
   await user.save();
 
   return res.status(200).json({
@@ -2374,7 +3924,6 @@ export const createUser = asyncHandler(async (req, res, next) => {
       .json({ success: false, message: "Email already exists" });
   }
 
-  // userModel.create() triggers pre('save'), so password is hashed correctly.
   const savedUser = await userModel.create({ userName, email, password, role });
 
   await logModel.create({
@@ -2399,20 +3948,26 @@ export const createUser = asyncHandler(async (req, res, next) => {
 export const updateUser = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
-  // Fields that must never be modified through this endpoint.
-  const protectedFields = ["_id", "sendCode"];
+  // These fields must never be set through this endpoint.
+  const protectedFields = [
+    "_id",
+    "passwordResetToken",
+    "passwordResetExpiry",
+    "image",
+    "imagePublicId",
+  ];
 
   const user = await userModel.findById(id);
   if (!user) return next(new Error("User not found", { cause: 404 }));
 
   const passwordChanged = Boolean(req.body.password);
 
-  // Apply every permitted field directly onto the document.
-  // Because we use user.save() below, the pre('save') hook will hash the
-  // password if it was modified — no manual bcrypt.hash() needed, and
-  // SALTROUND from env is always respected.
   for (const [key, value] of Object.entries(req.body)) {
-    if (!protectedFields.includes(key) && value != null) {
+    if (
+      !protectedFields.includes(key) &&
+      key !== "cPassword" &&
+      value != null
+    ) {
       user[key] = value;
     }
   }
@@ -2425,16 +3980,17 @@ export const updateUser = asyncHandler(async (req, res, next) => {
     details: {
       userId: id,
       updatedFields: Object.keys(req.body).filter(
-        (k) => !protectedFields.includes(k) && k !== "password",
+        (k) =>
+          !protectedFields.includes(k) && k !== "password" && k !== "cPassword",
       ),
       passwordChanged,
     },
   });
 
-  // Return the document without sensitive fields.
   const safeUser = user.toObject();
   delete safeUser.password;
-  delete safeUser.sendCode;
+  delete safeUser.passwordResetToken;
+  delete safeUser.passwordResetExpiry;
 
   return res.status(200).json({
     success: true,
@@ -2452,13 +4008,52 @@ export const getAllUsers = asyncHandler(async (req, res, next) => {
 
   const users = await userModel
     .find(query)
-    .select("-password -sendCode")
+    .select("-password -passwordResetToken -passwordResetExpiry")
     .sort({ createdAt: -1 });
 
   return res.status(200).json({
     success: true,
     message: "Data retrieved successfully",
     data: { count: users.length, users },
+    errors: null,
+  });
+});
+
+// Feature [5]: Upload a user's profile image to Cloudinary.
+export const uploadUserImage = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+
+  if (!req.file) {
+    return next(new Error("No image file provided", { cause: 400 }));
+  }
+
+  // Verify the target user exists before uploading.
+  const user = await userModel.findById(id);
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  // Delete the old Cloudinary image if one exists.
+  if (user.imagePublicId) {
+    await deleteImage(user.imagePublicId).catch((e) =>
+      console.warn("⚠️  Could not delete old Cloudinary image:", e.message),
+    );
+  }
+
+  const result = await uploadImage(req.file.buffer, "profiles");
+
+  user.image = result.secure_url;
+  user.imagePublicId = result.public_id;
+  await user.save();
+
+  await logModel.create({
+    user: req.user._id,
+    action: "UPLOAD_USER_IMAGE",
+    details: { targetUserId: id, cloudinaryPublicId: result.public_id },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Profile image uploaded successfully",
+    data: { imageUrl: result.secure_url },
     errors: null,
   });
 });
@@ -2474,7 +4069,6 @@ import { endpoint } from "../indexEndpoint.js";
 
 const router = Router();
 
-// Create booking
 router.post(
   "/create",
   auth(endpoint.booking_manage),
@@ -2482,14 +4076,15 @@ router.post(
   bookingController.createBooking,
 );
 
-// Get all bookings
+// Feature [3] + Fix [5]: Added query validation (catches invalid ObjectIds
+// before they reach MongoDB and cause a CastError 500).
 router.get(
   "/getAll",
   auth(endpoint.booking_view),
+  validation(validators.getAllBookingsQuery),
   bookingController.getAllBookings,
 );
 
-// Get a booking by ID
 router.get(
   "/get/:id",
   auth(endpoint.booking_view),
@@ -2497,7 +4092,6 @@ router.get(
   bookingController.getBookingById,
 );
 
-// Update booking
 router.patch(
   "/edit/:id",
   auth(endpoint.booking_manage),
@@ -2505,7 +4099,6 @@ router.patch(
   bookingController.updateBooking,
 );
 
-// Add a service to an existing booking
 router.patch(
   "/:id/addService",
   auth(endpoint.booking_manage),
@@ -2513,7 +4106,6 @@ router.patch(
   bookingController.addServiceToBooking,
 );
 
-// Remove a service from an existing booking
 router.patch(
   "/:id/remove",
   auth(endpoint.booking_manage),
@@ -2521,7 +4113,6 @@ router.patch(
   bookingController.removeServiceFromBooking,
 );
 
-// Delete booking
 router.delete(
   "/delete/:id",
   auth(endpoint.booking_delete),
@@ -2529,376 +4120,7 @@ router.delete(
   bookingController.deleteBooking,
 );
 
-// NOTE: Provider statement was previously duplicated here under
-// GET /booking/statement/:providerId. It has been removed.
-// Use GET /api/v1/statement/provider/:providerId instead.
-
 export default router;
-</file>
-
-<file path="src/modules/booking/controller/booking.controller.js">
-import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import bookingModel from "../../../../DB/model/booking.model.js";
-import providerModel from "../../../../DB/model/provider.model.js";
-import paymentModel from "../../../../DB/model/payment.model.js";
-import logModel from "../../../../DB/model/log.model.js";
-import { pagination } from "../../../services/pagination.js";
-import mongoose from "mongoose";
-
-// Fields that must never be overwritten via updateBooking.
-// These are computed values managed by the pre-save hook and payment logic.
-const PROTECTED_BOOKING_FIELDS = [
-  "bookingID",
-  "createdBy",
-  "totalPaid",
-  "remainingBalance",
-  "paymentStatus",
-  "totalToPay",
-  "totalProfit",
-];
-
-export const createBooking = asyncHandler(async (req, res, next) => {
-  const data = req.body;
-
-  const providerExists = await providerModel.findById(data.provider);
-  if (!providerExists)
-    return next(new Error("Main Provider not found", { cause: 404 }));
-
-  if (data.accommodations) {
-    data.accommodations.forEach((acc) => {
-      if (acc.checkIn && acc.checkOut) {
-        acc.duration = Math.ceil(
-          (new Date(acc.checkOut) - new Date(acc.checkIn)) /
-            (1000 * 60 * 60 * 24),
-        );
-      }
-    });
-  }
-
-  if (data.totalPax) {
-    data.totalPax.total =
-      (Number(data.totalPax.adults) || 0) + (Number(data.totalPax.kids) || 0);
-  }
-
-  data.createdBy = req.user._id;
-
-  const booking = await bookingModel.create(data);
-
-  await logModel.create({
-    user: req.user._id,
-    action: "CREATE_BOOKING",
-    details: {
-      bookingID: booking.bookingID,
-      mongoId: booking._id,
-      customerNames: booking.customers
-        .filter((c) => c?.name)
-        .map((c) => c.name),
-    },
-  });
-
-  return res.status(201).json({
-    success: true,
-    message: "Booking created successfully",
-    data: { bookingID: booking.bookingID, booking },
-    errors: null,
-  });
-});
-
-export const getAllBookings = asyncHandler(async (req, res) => {
-  const {
-    provider,
-    status,
-    paymentStatus,
-    customerName,
-    fromDate,
-    toDate,
-    minAmount,
-    maxAmount,
-    sortBy = "createdAt",
-    sortOrder = "desc",
-    page,
-    size,
-  } = req.query;
-
-  const query = {};
-  if (provider) query.provider = provider;
-  if (status) query.status = status;
-  if (paymentStatus) query.paymentStatus = paymentStatus;
-  if (customerName)
-    query["customers.name"] = { $regex: customerName, $options: "i" };
-
-  if (fromDate || toDate) {
-    query.createdAt = {};
-    if (fromDate) query.createdAt.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      query.createdAt.$lte = to;
-    }
-  }
-
-  if (minAmount || maxAmount) {
-    query.totalToPay = {};
-    if (minAmount) query.totalToPay.$gte = Number(minAmount);
-    if (maxAmount) query.totalToPay.$lte = Number(maxAmount);
-  }
-
-  const allowedSortFields = [
-    "createdAt",
-    "bookingID",
-    "totalToPay",
-    "totalProfit",
-  ];
-  const sortField = allowedSortFields.includes(sortBy) ? sortBy : "createdAt";
-  const sort = { [sortField]: sortOrder === "asc" ? 1 : -1 };
-
-  const { limit, skip } = pagination(page, size);
-
-  const [bookings, totalCount] = await Promise.all([
-    bookingModel
-      .find(query)
-      .populate("provider", "name type")
-      .populate("createdBy", "userName")
-      .limit(limit)
-      .skip(skip)
-      .sort(sort),
-    bookingModel.countDocuments(query),
-  ]);
-
-  return res.status(200).json({
-    success: true,
-    message: "Data retrieved successfully",
-    data: {
-      totalCount,
-      page: parseInt(page) || 1,
-      totalPages: Math.ceil(totalCount / limit),
-      results: bookings.length,
-      bookings,
-    },
-    errors: null,
-  });
-});
-
-export const getBookingById = asyncHandler(async (req, res, next) => {
-  const booking = await bookingModel
-    .findById(req.params.id)
-    .populate(
-      "provider accommodations.hotel carRentals.provider tripsWithDrivers.provider createdBy",
-    );
-
-  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
-
-  const payments = await paymentModel
-    .find({ booking: booking._id })
-    .populate("recordedBy", "userName")
-    .sort({ date: -1 });
-
-  return res.status(200).json({
-    success: true,
-    message: "Booking retrieved successfully",
-    data: { booking, payments },
-    errors: null,
-  });
-});
-
-export const updateBooking = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
-  const data = req.body;
-
-  const booking = await bookingModel.findById(id);
-  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
-
-  const serviceArrays = ["accommodations", "carRentals", "tripsWithDrivers"];
-
-  Object.keys(data).forEach((key) => {
-    if (PROTECTED_BOOKING_FIELDS.includes(key)) return;
-
-    if (serviceArrays.includes(key) && Array.isArray(data[key])) {
-      booking[key] = data[key].map((newItem, index) => {
-        const oldItem = booking[key][index];
-        if (oldItem) {
-          return {
-            ...oldItem.toObject(),
-            ...newItem,
-            _id: oldItem._id,
-            serviceNumber: newItem.serviceNumber || oldItem.serviceNumber,
-          };
-        }
-        return newItem;
-      });
-    } else if (key === "totalPax") {
-      booking.totalPax = { ...booking.totalPax.toObject(), ...data[key] };
-    } else {
-      booking[key] = data[key];
-    }
-  });
-
-  if (booking.totalPax) {
-    booking.totalPax.total =
-      (Number(booking.totalPax.adults) || 0) +
-      (Number(booking.totalPax.kids) || 0);
-  }
-
-  await booking.save();
-
-  await logModel.create({
-    user: req.user._id,
-    action: "UPDATE_BOOKING",
-    details: {
-      bookingID: booking.bookingID,
-      updatedFields: Object.keys(data).filter(
-        (k) => !PROTECTED_BOOKING_FIELDS.includes(k),
-      ),
-    },
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: "Booking updated successfully",
-    data: { booking },
-    errors: null,
-  });
-});
-
-export const addServiceToBooking = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
-  const { serviceType, serviceData } = req.body;
-
-  const validServiceTypes = [
-    "accommodations",
-    "carRentals",
-    "tripsWithDrivers",
-  ];
-  if (!validServiceTypes.includes(serviceType)) {
-    return next(new Error("Invalid service type", { cause: 400 }));
-  }
-
-  const booking = await bookingModel.findById(id);
-  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
-
-  booking[serviceType].push(serviceData);
-  booking.markModified(serviceType);
-  await booking.save();
-
-  const addedService = booking[serviceType][booking[serviceType].length - 1];
-
-  await logModel.create({
-    user: req.user._id,
-    action: "ADD_SERVICE",
-    details: {
-      bookingID: booking.bookingID,
-      serviceType,
-      serviceNumber: addedService.serviceNumber,
-    },
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: "Service added successfully",
-    data: { serviceNumber: addedService.serviceNumber, booking },
-    errors: null,
-  });
-});
-
-export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
-  const { serviceType, serviceId } = req.body;
-
-  const booking = await bookingModel.findById(id);
-  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
-
-  const serviceItem = booking[serviceType].find(
-    (item) => item._id.toString() === serviceId,
-  );
-  if (!serviceItem) return next(new Error("Service not found", { cause: 404 }));
-
-  const pKey = serviceType === "accommodations" ? "hotel" : "provider";
-  const providerId = serviceItem[pKey]?.toString();
-
-  // FIX: Only decrement the sub-provider's sequence if this service belongs
-  // to a *different* provider than the booking's main provider.
-  // Previously this always decremented, causing a double-decrement when the
-  // service's provider was the same as the booking's main provider (since
-  // deleteBooking also decrements the main provider's sequence).
-  if (providerId && providerId !== booking.provider.toString()) {
-    await mongoose.model("Provider").findByIdAndUpdate(providerId, {
-      $inc: { currentSequence: -1 },
-    });
-  }
-
-  await logModel.create({
-    user: req.user._id,
-    action: "REMOVE_SERVICE",
-    details: {
-      bookingID: booking.bookingID,
-      serviceType,
-      serviceNumber: serviceItem.serviceNumber,
-      providerId,
-    },
-  });
-
-  booking[serviceType] = booking[serviceType].filter(
-    (item) => item._id.toString() !== serviceId,
-  );
-  await booking.save();
-
-  return res.status(200).json({
-    success: true,
-    message: "Service removed successfully",
-    data: { booking },
-    errors: null,
-  });
-});
-
-export const deleteBooking = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
-  const booking = await bookingModel.findById(id);
-  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
-
-  const Provider = mongoose.model("Provider");
-
-  await Provider.findByIdAndUpdate(booking.provider, {
-    $inc: { currentSequence: -1, totalBookings: -1 },
-  });
-
-  const services = [
-    { items: booking.accommodations, pKey: "hotel" },
-    { items: booking.carRentals, pKey: "provider" },
-    { items: booking.tripsWithDrivers, pKey: "provider" },
-  ];
-
-  for (const service of services) {
-    for (const item of service.items) {
-      const pId = item[service.pKey]?.toString();
-      // Only decrement sub-providers that differ from the main provider.
-      if (pId && pId !== booking.provider.toString()) {
-        await Provider.findByIdAndUpdate(pId, {
-          $inc: { currentSequence: -1 },
-        });
-      }
-    }
-  }
-
-  await paymentModel.deleteMany({ booking: id });
-
-  await logModel.create({
-    user: req.user._id,
-    action: "DELETE_BOOKING",
-    details: {
-      bookingID: booking.bookingID,
-      customer: booking.customers[0]?.name,
-    },
-  });
-
-  await booking.deleteOne();
-
-  return res.status(200).json({
-    success: true,
-    message: "Booking deleted successfully",
-    data: null,
-    errors: null,
-  });
-});
 </file>
 
 <file path="src/modules/payment/controller/payment.controller.js">
@@ -2909,15 +4131,13 @@ import bookingModel from "../../../../DB/model/booking.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
 import { withTransaction } from "../../../services/transaction.js";
+import { notifyPaymentRecorded } from "../../../services/notification.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: recalculate totalPaid from all payments and sync the booking.
-// Accepts an optional session for transactional execution.
-// Passing session=null runs the same operations outside a transaction (fallback).
 // ─────────────────────────────────────────────────────────────────────────────
 const syncBookingPayments = async (bookingId, session = null) => {
   const aggregateOptions = session ? { session } : {};
-  const queryOptions = session ? { session } : {};
 
   const result = await paymentModel.aggregate(
     [
@@ -2931,7 +4151,6 @@ const syncBookingPayments = async (bookingId, session = null) => {
   const booking = await bookingModel
     .findById(bookingId)
     .session(session || null);
-
   if (!booking) return null;
 
   let paymentStatus = "unpaid";
@@ -2950,7 +4169,7 @@ const syncBookingPayments = async (bookingId, session = null) => {
         paymentStatus,
       },
     },
-    queryOptions,
+    session ? { session } : {},
   );
 
   return {
@@ -2968,9 +4187,11 @@ export const addPayment = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const { amount, date, method, notes } = req.body;
 
+  // Populate createdBy to get the email for notification.
   const booking = await bookingModel
     .findById(id)
-    .select("bookingID customers totalToPay totalPaid paymentStatus");
+    .populate("createdBy", "userName email")
+    .select("bookingID customers totalToPay totalPaid paymentStatus createdBy");
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
@@ -2980,8 +4201,6 @@ export const addPayment = asyncHandler(async (req, res, next) => {
 
   const numAmount = Number(amount);
 
-  // withTransaction handles the replica set check and falls back gracefully.
-  // See src/services/transaction.js for details.
   const result = await withTransaction(async (session) => {
     const payment = await paymentModel.create(
       [
@@ -3021,6 +4240,14 @@ export const addPayment = asyncHandler(async (req, res, next) => {
 
     return { payment: payment[0], bookingSummary: updated };
   });
+
+  // Feature [6]: Send email notification — best-effort, outside transaction.
+  await notifyPaymentRecorded(
+    booking,
+    result.payment,
+    req.user.userName,
+    result.bookingSummary,
+  );
 
   return res.status(201).json({
     success: true,
@@ -3198,15 +4425,25 @@ export const createProvider = asyncHandler(async (req, res, next) => {
 export const deleteProvider = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
+  // FIX [4]: The original check only covered provider (main) and
+  // accommodations.hotel, silently allowing deletion of providers that
+  // were only used in carRentals or tripsWithDrivers.
   const hasBookings = await mongoose.model("Booking").findOne({
-    $or: [{ provider: id }, { "accommodations.hotel": id }],
+    $or: [
+      { provider: id },
+      { "accommodations.hotel": id },
+      { "carRentals.provider": id },
+      { "tripsWithDrivers.provider": id },
+    ],
   });
 
   if (hasBookings) {
     return next(
-      new Error("Cannot delete provider linked to active bookings", {
-        cause: 400,
-      }),
+      new Error(
+        "Cannot delete provider with active bookings. " +
+          "Remove all linked bookings first.",
+        { cause: 400 },
+      ),
     );
   }
 
@@ -3233,9 +4470,6 @@ export const getAllProviders = asyncHandler(async (req, res, next) => {
   const query = {};
   if (type) query.type = type;
 
-  // Providers are a relatively small dataset, so we default to 50 per page
-  // rather than the standard 10, but still enforce the global MAX_PAGE_SIZE cap
-  // to prevent unbounded queries.
   const { limit, skip } = pagination(page, size || 50);
 
   const [providers, totalCount] = await Promise.all([
@@ -3312,15 +4546,14 @@ import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 import providerModel from "../../../../DB/model/provider.model.js";
+import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
+import { pagination } from "../../../services/pagination.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider statement
 //
-// Shows every service line where this provider was involved, with its buy
-// price (i.e. what you owe the provider). The "amount paid to provider" field
-// is intentionally omitted — that requires a separate ProviderPayment
-// collection which does not yet exist. Shipping a hardcoded 0 would mislead
-// any frontend or accountant reading the report.
+// Feature [1]: Now also returns totalPaidToProvider from the
+// ProviderPayment collection, completing both sides of the ledger.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getProviderStatement = asyncHandler(async (req, res, next) => {
   const { providerId } = req.params;
@@ -3347,12 +4580,22 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
   };
   if (Object.keys(dateFilter).length) bookingQuery.createdAt = dateFilter;
 
-  const bookings = await bookingModel
-    .find(bookingQuery)
-    .populate(
-      "accommodations.hotel carRentals.provider tripsWithDrivers.provider",
-    )
-    .lean();
+  // Run bookings and provider payments queries in parallel.
+  const providerPaymentQuery = { provider: providerId };
+  if (Object.keys(dateFilter).length) providerPaymentQuery.date = dateFilter;
+
+  const [bookings, providerPaymentsResult] = await Promise.all([
+    bookingModel
+      .find(bookingQuery)
+      .populate(
+        "accommodations.hotel carRentals.provider tripsWithDrivers.provider",
+      )
+      .lean(),
+    providerPaymentModel.aggregate([
+      { $match: providerPaymentQuery },
+      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+    ]),
+  ]);
 
   const serviceLines = [];
   let totalCostFromProvider = 0;
@@ -3401,6 +4644,9 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
     );
   });
 
+  const totalPaidToProvider = providerPaymentsResult[0]?.total || 0;
+  const outstandingBalance = totalCostFromProvider - totalPaidToProvider;
+
   return res.status(200).json({
     success: true,
     message: "Provider statement generated successfully",
@@ -3417,10 +4663,18 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
       },
       summary: {
         totalTransactions: serviceLines.length,
-        // Total amount owed to this provider across all service lines.
+        // What you OWE the provider across all service lines.
         totalCostFromProvider,
-        // NOTE: "Amount actually paid to provider" is not tracked yet.
-        // Add a ProviderPayment collection to implement that feature.
+        // What you have already PAID the provider.
+        totalPaidToProvider,
+        // Positive = still owe provider; negative = overpaid.
+        outstandingBalance,
+        balanceLabel:
+          outstandingBalance > 0
+            ? `Outstanding: ${outstandingBalance}`
+            : outstandingBalance < 0
+              ? `Overpaid by: ${Math.abs(outstandingBalance)}`
+              : "Account settled",
       },
       lines: serviceLines.sort((a, b) => new Date(a.date) - new Date(b.date)),
     },
@@ -3431,12 +4685,12 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Customer statement
 //
-// Searches all bookings containing a customer with a matching name, then
-// aggregates their totals and payment history.
+// Fix [8]: Added pagination — previously returned all matching bookings
+// in one unbounded query.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getCustomerStatement = asyncHandler(async (req, res, next) => {
   const { customerName } = req.params;
-  const { fromDate, toDate } = req.query;
+  const { fromDate, toDate, page, size } = req.query;
 
   if (!customerName || customerName.trim().length < 2) {
     return next(
@@ -3458,12 +4712,33 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     }
   }
 
-  const bookings = await bookingModel
-    .find(bookingQuery)
-    .populate("provider", "name type")
-    .lean();
+  const { limit, skip } = pagination(page, size);
 
-  if (!bookings.length) {
+  // Aggregate totals (all pages) and paginated bookings in parallel.
+  const [bookings, totalCount, aggregateTotals] = await Promise.all([
+    bookingModel
+      .find(bookingQuery)
+      .populate("provider", "name type")
+      .sort({ createdAt: 1 })
+      .limit(limit)
+      .skip(skip)
+      .lean(),
+    bookingModel.countDocuments(bookingQuery),
+    // Get grand totals across ALL pages (not just the current page).
+    bookingModel.aggregate([
+      { $match: bookingQuery },
+      {
+        $group: {
+          _id: null,
+          totalToPay: { $sum: "$totalToPay" },
+          totalPaid: { $sum: "$totalPaid" },
+          remainingBalance: { $sum: "$remainingBalance" },
+        },
+      },
+    ]),
+  ]);
+
+  if (totalCount === 0) {
     return res.status(200).json({
       success: true,
       message: "No bookings found for this customer",
@@ -3481,13 +4756,12 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // Fetch all payments for these bookings in a single query.
+  // Fetch payments only for the bookings on this page.
   const bookingIds = bookings.map((b) => b._id);
   const payments = await paymentModel
     .find({ booking: { $in: bookingIds } })
     .lean();
 
-  // Group payments by booking ID for O(n) lookup.
   const paymentsByBooking = {};
   payments.forEach((p) => {
     const key = p.booking.toString();
@@ -3495,15 +4769,9 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     paymentsByBooking[key].push(p);
   });
 
-  let totalToPay = 0;
-  let totalPaid = 0;
-
   const bookingLines = bookings.map((b) => {
     const bPayments = paymentsByBooking[b._id.toString()] || [];
     const paidForThis = bPayments.reduce((s, p) => s + p.amount, 0);
-
-    totalToPay += b.totalToPay || 0;
-    totalPaid += paidForThis;
 
     const matchedCustomer = b.customers?.find((c) =>
       c.name?.toLowerCase().includes(customerName.toLowerCase()),
@@ -3529,7 +4797,11 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     };
   });
 
-  const remainingBalance = totalToPay - totalPaid;
+  const grand = aggregateTotals[0] || {
+    totalToPay: 0,
+    totalPaid: 0,
+    remainingBalance: 0,
+  };
 
   return res.status(200).json({
     success: true,
@@ -3540,19 +4812,24 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
         from: fromDate || "All time",
         to: toDate || "All time",
       },
+      // Grand totals are always across ALL bookings, regardless of page.
       summary: {
-        totalBookings: bookings.length,
-        totalToPay,
-        totalPaid,
-        remainingBalance,
+        totalBookings: totalCount,
+        totalToPay: grand.totalToPay,
+        totalPaid: grand.totalPaid,
+        remainingBalance: grand.remainingBalance,
         balanceLabel:
-          remainingBalance > 0
-            ? `الزبون مدين بـ ${remainingBalance}`
-            : "الحساب صافي",
+          grand.remainingBalance > 0
+            ? `Customer owes: ${grand.remainingBalance}`
+            : "Account settled",
       },
-      bookings: bookingLines.sort(
-        (a, b) => new Date(a.date) - new Date(b.date),
-      ),
+      // Pagination metadata
+      pagination: {
+        page: parseInt(page) || 1,
+        totalPages: Math.ceil(totalCount / limit),
+        totalCount,
+      },
+      bookings: bookingLines,
     },
     errors: null,
   });
@@ -3578,6 +4855,384 @@ export function pagination(page, size) {
     skip: (safePage - 1) * safeSize,
   };
 }
+</file>
+
+<file path="src/modules/booking/controller/booking.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+import logModel from "../../../../DB/model/log.model.js";
+import { notifyBookingStatusChanged } from "../../../services/notification.js";
+import { pagination } from "../../../services/pagination.js";
+import mongoose from "mongoose";
+
+const PROTECTED_BOOKING_FIELDS = [
+  "bookingID",
+  "createdBy",
+  "totalPaid",
+  "remainingBalance",
+  "paymentStatus",
+  "totalToPay",
+  "totalProfit",
+];
+
+export const createBooking = asyncHandler(async (req, res, next) => {
+  const data = req.body;
+
+  const providerExists = await providerModel.findById(data.provider);
+  if (!providerExists)
+    return next(new Error("Main Provider not found", { cause: 404 }));
+
+  if (data.accommodations) {
+    data.accommodations.forEach((acc) => {
+      if (acc.checkIn && acc.checkOut) {
+        acc.duration = Math.ceil(
+          (new Date(acc.checkOut) - new Date(acc.checkIn)) /
+            (1000 * 60 * 60 * 24),
+        );
+      }
+    });
+  }
+
+  if (data.totalPax) {
+    data.totalPax.total =
+      (Number(data.totalPax.adults) || 0) + (Number(data.totalPax.kids) || 0);
+  }
+
+  data.createdBy = req.user._id;
+
+  const booking = await bookingModel.create(data);
+
+  await logModel.create({
+    user: req.user._id,
+    action: "CREATE_BOOKING",
+    details: {
+      bookingID: booking.bookingID,
+      mongoId: booking._id,
+      customerNames: booking.customers
+        .filter((c) => c?.name)
+        .map((c) => c.name),
+    },
+  });
+
+  return res.status(201).json({
+    success: true,
+    message: "Booking created successfully",
+    data: { bookingID: booking.bookingID, booking },
+    errors: null,
+  });
+});
+
+export const getAllBookings = asyncHandler(async (req, res) => {
+  const {
+    bookingID, // Feature [3]: numeric human-readable ID search
+    provider,
+    status,
+    paymentStatus,
+    customerName,
+    fromDate,
+    toDate,
+    minAmount,
+    maxAmount,
+    sortBy = "createdAt",
+    sortOrder = "desc",
+    page,
+    size,
+  } = req.query;
+
+  const query = {};
+
+  // Feature [3]: exact match on the numeric bookingID field.
+  if (bookingID) query.bookingID = parseInt(bookingID);
+
+  // FIX [5]: The Joi validation schema (getAllBookingsQuery) already rejects
+  // non-ObjectId strings before this code runs, preventing Mongoose CastErrors.
+  if (provider) query.provider = provider;
+  if (status) query.status = status;
+  if (paymentStatus) query.paymentStatus = paymentStatus;
+  if (customerName)
+    query["customers.name"] = { $regex: customerName, $options: "i" };
+
+  if (fromDate || toDate) {
+    query.createdAt = {};
+    if (fromDate) query.createdAt.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.createdAt.$lte = to;
+    }
+  }
+
+  if (minAmount || maxAmount) {
+    query.totalToPay = {};
+    if (minAmount) query.totalToPay.$gte = Number(minAmount);
+    if (maxAmount) query.totalToPay.$lte = Number(maxAmount);
+  }
+
+  const allowedSortFields = [
+    "createdAt",
+    "bookingID",
+    "totalToPay",
+    "totalProfit",
+  ];
+  const sortField = allowedSortFields.includes(sortBy) ? sortBy : "createdAt";
+  const sort = { [sortField]: sortOrder === "asc" ? 1 : -1 };
+
+  const { limit, skip } = pagination(page, size);
+
+  const [bookings, totalCount] = await Promise.all([
+    bookingModel
+      .find(query)
+      .populate("provider", "name type")
+      .populate("createdBy", "userName")
+      .limit(limit)
+      .skip(skip)
+      .sort(sort),
+    bookingModel.countDocuments(query),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      totalCount,
+      page: parseInt(page) || 1,
+      totalPages: Math.ceil(totalCount / limit),
+      results: bookings.length,
+      bookings,
+    },
+    errors: null,
+  });
+});
+
+export const getBookingById = asyncHandler(async (req, res, next) => {
+  const booking = await bookingModel
+    .findById(req.params.id)
+    .populate(
+      "provider accommodations.hotel carRentals.provider tripsWithDrivers.provider createdBy",
+    );
+
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const payments = await paymentModel
+    .find({ booking: booking._id })
+    .populate("recordedBy", "userName")
+    .sort({ date: -1 });
+
+  return res.status(200).json({
+    success: true,
+    message: "Booking retrieved successfully",
+    data: { booking, payments },
+    errors: null,
+  });
+});
+
+export const updateBooking = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const data = req.body;
+
+  // Populate createdBy so we have the email for notifications.
+  const booking = await bookingModel
+    .findById(id)
+    .populate("createdBy", "userName email");
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const oldStatus = booking.status;
+  const serviceArrays = ["accommodations", "carRentals", "tripsWithDrivers"];
+
+  Object.keys(data).forEach((key) => {
+    if (PROTECTED_BOOKING_FIELDS.includes(key)) return;
+
+    if (serviceArrays.includes(key) && Array.isArray(data[key])) {
+      booking[key] = data[key].map((newItem, index) => {
+        const oldItem = booking[key][index];
+        if (oldItem) {
+          return {
+            ...oldItem.toObject(),
+            ...newItem,
+            _id: oldItem._id,
+            serviceNumber: newItem.serviceNumber || oldItem.serviceNumber,
+          };
+        }
+        return newItem;
+      });
+    } else if (key === "totalPax") {
+      booking.totalPax = { ...booking.totalPax.toObject(), ...data[key] };
+    } else {
+      booking[key] = data[key];
+    }
+  });
+
+  if (booking.totalPax) {
+    booking.totalPax.total =
+      (Number(booking.totalPax.adults) || 0) +
+      (Number(booking.totalPax.kids) || 0);
+  }
+
+  await booking.save();
+
+  // Feature [6]: Notify the booking creator when status changes.
+  const newStatus = booking.status;
+  if (data.status && data.status !== oldStatus) {
+    await notifyBookingStatusChanged(booking, oldStatus, newStatus);
+  }
+
+  await logModel.create({
+    user: req.user._id,
+    action: "UPDATE_BOOKING",
+    details: {
+      bookingID: booking.bookingID,
+      updatedFields: Object.keys(data).filter(
+        (k) => !PROTECTED_BOOKING_FIELDS.includes(k),
+      ),
+      statusChange: data.status
+        ? { from: oldStatus, to: newStatus }
+        : undefined,
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Booking updated successfully",
+    data: { booking },
+    errors: null,
+  });
+});
+
+export const addServiceToBooking = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const { serviceType, serviceData } = req.body;
+
+  const validServiceTypes = [
+    "accommodations",
+    "carRentals",
+    "tripsWithDrivers",
+  ];
+  if (!validServiceTypes.includes(serviceType)) {
+    return next(new Error("Invalid service type", { cause: 400 }));
+  }
+
+  const booking = await bookingModel.findById(id);
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  booking[serviceType].push(serviceData);
+  booking.markModified(serviceType);
+  await booking.save();
+
+  const addedService = booking[serviceType][booking[serviceType].length - 1];
+
+  await logModel.create({
+    user: req.user._id,
+    action: "ADD_SERVICE",
+    details: {
+      bookingID: booking.bookingID,
+      serviceType,
+      serviceNumber: addedService.serviceNumber,
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Service added successfully",
+    data: { serviceNumber: addedService.serviceNumber, booking },
+    errors: null,
+  });
+});
+
+export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const { serviceType, serviceId } = req.body;
+
+  const booking = await bookingModel.findById(id);
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const serviceItem = booking[serviceType].find(
+    (item) => item._id.toString() === serviceId,
+  );
+  if (!serviceItem) return next(new Error("Service not found", { cause: 404 }));
+
+  const pKey = serviceType === "accommodations" ? "hotel" : "provider";
+  const providerId = serviceItem[pKey]?.toString();
+
+  if (providerId && providerId !== booking.provider.toString()) {
+    await mongoose.model("Provider").findByIdAndUpdate(providerId, {
+      $inc: { currentSequence: -1 },
+    });
+  }
+
+  await logModel.create({
+    user: req.user._id,
+    action: "REMOVE_SERVICE",
+    details: {
+      bookingID: booking.bookingID,
+      serviceType,
+      serviceNumber: serviceItem.serviceNumber,
+      providerId,
+    },
+  });
+
+  booking[serviceType] = booking[serviceType].filter(
+    (item) => item._id.toString() !== serviceId,
+  );
+  await booking.save();
+
+  return res.status(200).json({
+    success: true,
+    message: "Service removed successfully",
+    data: { booking },
+    errors: null,
+  });
+});
+
+export const deleteBooking = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const booking = await bookingModel.findById(id);
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const Provider = mongoose.model("Provider");
+
+  await Provider.findByIdAndUpdate(booking.provider, {
+    $inc: { currentSequence: -1, totalBookings: -1 },
+  });
+
+  const services = [
+    { items: booking.accommodations, pKey: "hotel" },
+    { items: booking.carRentals, pKey: "provider" },
+    { items: booking.tripsWithDrivers, pKey: "provider" },
+  ];
+
+  for (const service of services) {
+    for (const item of service.items) {
+      const pId = item[service.pKey]?.toString();
+      if (pId && pId !== booking.provider.toString()) {
+        await Provider.findByIdAndUpdate(pId, {
+          $inc: { currentSequence: -1 },
+        });
+      }
+    }
+  }
+
+  await paymentModel.deleteMany({ booking: id });
+
+  await logModel.create({
+    user: req.user._id,
+    action: "DELETE_BOOKING",
+    details: {
+      bookingID: booking.bookingID,
+      customer: booking.customers[0]?.name,
+    },
+  });
+
+  await booking.deleteOne();
+
+  return res.status(200).json({
+    success: true,
+    message: "Booking deleted successfully",
+    data: null,
+    errors: null,
+  });
+});
 </file>
 
 </files>

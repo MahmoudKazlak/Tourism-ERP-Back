@@ -7,7 +7,6 @@ import { endpoint } from "../indexEndpoint.js";
 
 const router = Router();
 
-// Create booking
 router.post(
   "/create",
   auth(endpoint.booking_manage),
@@ -15,14 +14,15 @@ router.post(
   bookingController.createBooking,
 );
 
-// Get all bookings
+// Feature [3] + Fix [5]: Added query validation (catches invalid ObjectIds
+// before they reach MongoDB and cause a CastError 500).
 router.get(
   "/getAll",
   auth(endpoint.booking_view),
+  validation(validators.getAllBookingsQuery),
   bookingController.getAllBookings,
 );
 
-// Get a booking by ID
 router.get(
   "/get/:id",
   auth(endpoint.booking_view),
@@ -30,7 +30,6 @@ router.get(
   bookingController.getBookingById,
 );
 
-// Update booking
 router.patch(
   "/edit/:id",
   auth(endpoint.booking_manage),
@@ -38,7 +37,6 @@ router.patch(
   bookingController.updateBooking,
 );
 
-// Add a service to an existing booking
 router.patch(
   "/:id/addService",
   auth(endpoint.booking_manage),
@@ -46,7 +44,6 @@ router.patch(
   bookingController.addServiceToBooking,
 );
 
-// Remove a service from an existing booking
 router.patch(
   "/:id/remove",
   auth(endpoint.booking_manage),
@@ -54,16 +51,11 @@ router.patch(
   bookingController.removeServiceFromBooking,
 );
 
-// Delete booking
 router.delete(
   "/delete/:id",
   auth(endpoint.booking_delete),
   validation(validators.bookingIdParam),
   bookingController.deleteBooking,
 );
-
-// NOTE: Provider statement was previously duplicated here under
-// GET /booking/statement/:providerId. It has been removed.
-// Use GET /api/v1/statement/provider/:providerId instead.
 
 export default router;

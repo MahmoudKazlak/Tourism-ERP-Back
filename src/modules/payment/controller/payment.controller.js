@@ -5,15 +5,13 @@ import bookingModel from "../../../../DB/model/booking.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
 import { withTransaction } from "../../../services/transaction.js";
+import { notifyPaymentRecorded } from "../../../services/notification.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: recalculate totalPaid from all payments and sync the booking.
-// Accepts an optional session for transactional execution.
-// Passing session=null runs the same operations outside a transaction (fallback).
 // ─────────────────────────────────────────────────────────────────────────────
 const syncBookingPayments = async (bookingId, session = null) => {
   const aggregateOptions = session ? { session } : {};
-  const queryOptions = session ? { session } : {};
 
   const result = await paymentModel.aggregate(
     [
@@ -27,7 +25,6 @@ const syncBookingPayments = async (bookingId, session = null) => {
   const booking = await bookingModel
     .findById(bookingId)
     .session(session || null);
-
   if (!booking) return null;
 
   let paymentStatus = "unpaid";
@@ -46,7 +43,7 @@ const syncBookingPayments = async (bookingId, session = null) => {
         paymentStatus,
       },
     },
-    queryOptions,
+    session ? { session } : {},
   );
 
   return {
@@ -64,9 +61,11 @@ export const addPayment = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const { amount, date, method, notes } = req.body;
 
+  // Populate createdBy to get the email for notification.
   const booking = await bookingModel
     .findById(id)
-    .select("bookingID customers totalToPay totalPaid paymentStatus");
+    .populate("createdBy", "userName email")
+    .select("bookingID customers totalToPay totalPaid paymentStatus createdBy");
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
@@ -76,8 +75,6 @@ export const addPayment = asyncHandler(async (req, res, next) => {
 
   const numAmount = Number(amount);
 
-  // withTransaction handles the replica set check and falls back gracefully.
-  // See src/services/transaction.js for details.
   const result = await withTransaction(async (session) => {
     const payment = await paymentModel.create(
       [
@@ -117,6 +114,14 @@ export const addPayment = asyncHandler(async (req, res, next) => {
 
     return { payment: payment[0], bookingSummary: updated };
   });
+
+  // Feature [6]: Send email notification — best-effort, outside transaction.
+  await notifyPaymentRecorded(
+    booking,
+    result.payment,
+    req.user.userName,
+    result.bookingSummary,
+  );
 
   return res.status(201).json({
     success: true,

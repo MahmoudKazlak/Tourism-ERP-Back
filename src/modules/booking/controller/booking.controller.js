@@ -3,11 +3,10 @@ import bookingModel from "../../../../DB/model/booking.model.js";
 import providerModel from "../../../../DB/model/provider.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 import logModel from "../../../../DB/model/log.model.js";
+import { notifyBookingStatusChanged } from "../../../services/notification.js";
 import { pagination } from "../../../services/pagination.js";
 import mongoose from "mongoose";
 
-// Fields that must never be overwritten via updateBooking.
-// These are computed values managed by the pre-save hook and payment logic.
 const PROTECTED_BOOKING_FIELDS = [
   "bookingID",
   "createdBy",
@@ -67,6 +66,7 @@ export const createBooking = asyncHandler(async (req, res, next) => {
 
 export const getAllBookings = asyncHandler(async (req, res) => {
   const {
+    bookingID, // Feature [3]: numeric human-readable ID search
     provider,
     status,
     paymentStatus,
@@ -82,6 +82,12 @@ export const getAllBookings = asyncHandler(async (req, res) => {
   } = req.query;
 
   const query = {};
+
+  // Feature [3]: exact match on the numeric bookingID field.
+  if (bookingID) query.bookingID = parseInt(bookingID);
+
+  // FIX [5]: The Joi validation schema (getAllBookingsQuery) already rejects
+  // non-ObjectId strings before this code runs, preventing Mongoose CastErrors.
   if (provider) query.provider = provider;
   if (status) query.status = status;
   if (paymentStatus) query.paymentStatus = paymentStatus;
@@ -166,9 +172,13 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const data = req.body;
 
-  const booking = await bookingModel.findById(id);
+  // Populate createdBy so we have the email for notifications.
+  const booking = await bookingModel
+    .findById(id)
+    .populate("createdBy", "userName email");
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
+  const oldStatus = booking.status;
   const serviceArrays = ["accommodations", "carRentals", "tripsWithDrivers"];
 
   Object.keys(data).forEach((key) => {
@@ -202,6 +212,12 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
 
   await booking.save();
 
+  // Feature [6]: Notify the booking creator when status changes.
+  const newStatus = booking.status;
+  if (data.status && data.status !== oldStatus) {
+    await notifyBookingStatusChanged(booking, oldStatus, newStatus);
+  }
+
   await logModel.create({
     user: req.user._id,
     action: "UPDATE_BOOKING",
@@ -210,6 +226,9 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
       updatedFields: Object.keys(data).filter(
         (k) => !PROTECTED_BOOKING_FIELDS.includes(k),
       ),
+      statusChange: data.status
+        ? { from: oldStatus, to: newStatus }
+        : undefined,
     },
   });
 
@@ -276,11 +295,6 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   const pKey = serviceType === "accommodations" ? "hotel" : "provider";
   const providerId = serviceItem[pKey]?.toString();
 
-  // FIX: Only decrement the sub-provider's sequence if this service belongs
-  // to a *different* provider than the booking's main provider.
-  // Previously this always decremented, causing a double-decrement when the
-  // service's provider was the same as the booking's main provider (since
-  // deleteBooking also decrements the main provider's sequence).
   if (providerId && providerId !== booking.provider.toString()) {
     await mongoose.model("Provider").findByIdAndUpdate(providerId, {
       $inc: { currentSequence: -1 },
@@ -331,7 +345,6 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
   for (const service of services) {
     for (const item of service.items) {
       const pId = item[service.pKey]?.toString();
-      // Only decrement sub-providers that differ from the main provider.
       if (pId && pId !== booking.provider.toString()) {
         await Provider.findByIdAndUpdate(pId, {
           $inc: { currentSequence: -1 },
@@ -360,5 +373,3 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
-
-//test test 

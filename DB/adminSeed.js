@@ -8,16 +8,13 @@ export const seedAdmin = async () => {
     if (!adminExists) {
       console.log("🚀 No admin found. Creating initial admin account...");
 
-      const initialPassword = "Admin@123";
-
       const user = await userModel.create({
         userName: "SuperAdmin",
         email: "admin@system.com",
-        password: initialPassword,
+        password: "Admin@123",
         role: "admin",
       });
 
-      // FIX: لا نحفظ كلمة المرور في الـ log
       await logModel.create({
         user: user._id,
         action: "ADMIN_SEED",

@@ -36,15 +36,25 @@ export const createProvider = asyncHandler(async (req, res, next) => {
 export const deleteProvider = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
+  // FIX [4]: The original check only covered provider (main) and
+  // accommodations.hotel, silently allowing deletion of providers that
+  // were only used in carRentals or tripsWithDrivers.
   const hasBookings = await mongoose.model("Booking").findOne({
-    $or: [{ provider: id }, { "accommodations.hotel": id }],
+    $or: [
+      { provider: id },
+      { "accommodations.hotel": id },
+      { "carRentals.provider": id },
+      { "tripsWithDrivers.provider": id },
+    ],
   });
 
   if (hasBookings) {
     return next(
-      new Error("Cannot delete provider linked to active bookings", {
-        cause: 400,
-      }),
+      new Error(
+        "Cannot delete provider with active bookings. " +
+          "Remove all linked bookings first.",
+        { cause: 400 },
+      ),
     );
   }
 
@@ -71,9 +81,6 @@ export const getAllProviders = asyncHandler(async (req, res, next) => {
   const query = {};
   if (type) query.type = type;
 
-  // Providers are a relatively small dataset, so we default to 50 per page
-  // rather than the standard 10, but still enforce the global MAX_PAGE_SIZE cap
-  // to prevent unbounded queries.
   const { limit, skip } = pagination(page, size || 50);
 
   const [providers, totalCount] = await Promise.all([

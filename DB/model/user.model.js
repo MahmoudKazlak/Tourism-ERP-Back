@@ -28,14 +28,24 @@ const userSchema = new mongoose.Schema(
       enum: ["admin", "booking_staff", "accounting_staff"],
       default: "booking_staff",
     },
-    image: String,
+    image: String, // Cloudinary URL stored here
+    imagePublicId: String, // Cloudinary public_id for deletion
     blocked: {
       type: Boolean,
       default: false,
     },
-    sendCode: {
+    // FIX [12]: Replaced the "dontTrust32" sentinel string with explicit
+    // nullable fields + an expiry date. Benefits:
+    //   - No magic string to leak or misuse.
+    //   - Token auto-expires: the controller checks passwordResetExpiry.
+    //   - Clear intent — null means "no active reset request".
+    passwordResetToken: {
       type: String,
-      default: "dontTrust32",
+      default: null,
+    },
+    passwordResetExpiry: {
+      type: Date,
+      default: null,
     },
   },
   { timestamps: true },
@@ -43,7 +53,10 @@ const userSchema = new mongoose.Schema(
 
 userSchema.pre("save", async function () {
   if (!this.isModified("password")) return;
-  this.password = await bcrypt.hash(this.password, 10);
+  this.password = await bcrypt.hash(
+    this.password,
+    parseInt(process.env.SALTROUND) || 10,
+  );
 });
 
 userSchema.methods.comparePassword = function (password) {
