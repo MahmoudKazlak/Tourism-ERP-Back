@@ -58,4 +58,10 @@ router.delete(
   bookingController.deleteBooking,
 );
 
+router.patch(
+  "/:id/status",
+  auth(endpoint.booking_manage),
+  bookingController.editStatus,
+);
+
 export default router;
