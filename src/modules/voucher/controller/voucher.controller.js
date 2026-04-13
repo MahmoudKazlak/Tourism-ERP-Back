@@ -15,7 +15,7 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
     .populate("provider", "name phone address")
     .populate("accommodations.hotel", "name phone address")
     .populate("carRentals.provider", "name phone")
-    .populate("tripsWithDrivers.provider", "name phone")
+    .populate("carWithDriver.provider", "name phone") // renamed
     .lean();
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
@@ -65,11 +65,13 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
       totalPax: booking.totalPax,
     })) || [];
 
-  const generateTripVouchers = () =>
-    booking.tripsWithDrivers?.map((trip, i) => ({
+  // Renamed: generateTripVouchers → generateCarWithDriverVouchers
+  const generateCarWithDriverVouchers = () =>
+    booking.carWithDriver?.map((trip, i) => ({
+      // renamed field
       voucherType: "SERVICE_VOUCHER",
-      voucherFor: "trip_driver",
-      voucherNumber: `VCH-${booking.bookingID}-TRIP-${trip.serviceNumber || i + 1}`,
+      voucherFor: "car_with_driver", // renamed value
+      voucherNumber: `VCH-${booking.bookingID}-CWD-${trip.serviceNumber || i + 1}`, // renamed prefix
       issueDate: new Date().toISOString(),
       provider: {
         name: trip.provider?.name || "N/A",
@@ -98,8 +100,9 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
       ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
     );
   }
-  if (!serviceType || serviceType === "tripsWithDrivers") {
-    const v = generateTripVouchers();
+  if (!serviceType || serviceType === "carWithDriver") {
+    // renamed
+    const v = generateCarWithDriverVouchers(); // renamed
     vouchers.push(
       ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
     );
@@ -129,13 +132,10 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Invoice — customer-facing invoice with sell prices
 //
-// FIX [9]: When serviceType filter is applied, totals.totalPaid and
-// totals.remainingBalance now reflect ONLY the filtered service amount,
-// not the entire booking balance. This prevents showing a confusing
-// remaining-balance figure that doesn't match the line items on the invoice.
-//
-// Full booking payment status is still included separately as
-// `bookingPaymentStatus` for reference.
+// When serviceType filter is applied, totals reflect ONLY the filtered service
+// amount to avoid showing a confusing remaining-balance figure that doesn't
+// match the line items on the invoice.
+// Full booking payment status is included separately as fullBooking for reference.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getInvoice = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
@@ -146,7 +146,7 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     .populate("provider", "name phone address")
     .populate("accommodations.hotel", "name")
     .populate("carRentals.provider", "name")
-    .populate("tripsWithDrivers.provider", "name")
+    .populate("carWithDriver.provider", "name") // renamed
     .populate("createdBy", "userName")
     .lean();
 
@@ -154,6 +154,7 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
 
   const payments = await paymentModel
     .find({ booking: booking._id })
+    .populate("providerRecipient", "name") // surface direct-payment recipient
     .sort({ date: 1 })
     .lean();
 
@@ -188,11 +189,13 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     });
   }
 
-  if (!serviceType || serviceType === "tripsWithDrivers") {
-    booking.tripsWithDrivers?.forEach((trip) => {
+  if (!serviceType || serviceType === "carWithDriver") {
+    // renamed
+    booking.carWithDriver?.forEach((trip) => {
+      // renamed field
       lineItems.push({
         serviceNumber: trip.serviceNumber,
-        type: "Trip with Driver",
+        type: "Car with Driver", // renamed label
         description: `${trip.provider?.name || "Provider"} — ${trip.brand || ""} / ${trip.driverName || ""}`,
         amount: trip.sell,
       });
@@ -200,12 +203,9 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     });
   }
 
-  const totalPaidForAll = payments.reduce((s, p) => s + p.amount, 0);
-
-  // FIX [9]: For a filtered invoice we cannot attribute specific payments
-  // to specific services (payments cover the booking, not a service).
-  // So we show the filtered subtotal with a note, rather than showing
-  // the full booking's paid/remaining which would be misleading.
+  // For a filtered invoice, payments cover the booking as a whole — not
+  // individual services — so we show the filtered subtotal with a note
+  // rather than the full paid/remaining, which would be misleading.
   const filteredTotals = serviceType
     ? {
         subtotal: filteredTotal,
@@ -239,12 +239,13 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     issuedBy: booking.createdBy?.userName || "N/A",
     lineItems,
     totals: filteredTotals,
-    // Payments are shown only on full invoices.
+    // Payments shown only on full invoices; surface who received each payment.
     payments: !serviceType
       ? payments.map((p) => ({
           date: p.date,
           amount: p.amount,
           method: p.method,
+          paidTo: p.providerRecipient?.name || "Office",
         }))
       : [],
   };
@@ -268,6 +269,7 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
   const payment = await paymentModel
     .findById(paymentId)
     .populate("recordedBy", "userName")
+    .populate("providerRecipient", "name") // surface direct-payment recipient
     .lean();
 
   if (!payment) return next(new Error("Payment not found", { cause: 404 }));
@@ -285,6 +287,9 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
     issueDate: new Date().toISOString(),
     paymentDate: payment.date,
     receivedFrom: booking.customers?.[0]?.name || "Unknown",
+    // When providerRecipient is set, the customer paid a provider directly.
+    // The receipt should reflect who actually received the money.
+    receivedBy: payment.providerRecipient?.name || "Office",
     amount: payment.amount,
     method: payment.method,
     methodLabel:

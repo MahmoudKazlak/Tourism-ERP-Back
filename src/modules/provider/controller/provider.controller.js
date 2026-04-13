@@ -44,7 +44,7 @@ export const deleteProvider = asyncHandler(async (req, res, next) => {
       { provider: id },
       { "accommodations.hotel": id },
       { "carRentals.provider": id },
-      { "tripsWithDrivers.provider": id },
+      { "carWithDriver.provider": id },
     ],
   });
 

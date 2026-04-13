@@ -1,6 +1,5 @@
 import Joi from "joi";
 
-// Reusable ObjectId validator
 const objectId = Joi.string().hex().length(24);
 
 const customerSchema = Joi.object({
@@ -49,7 +48,8 @@ const carRentalSchema = Joi.object({
   sell: Joi.number().min(0).default(0),
 });
 
-const tripSchema = Joi.object({
+// Renamed from tripSchema / tripsWithDrivers
+const carWithDriverSchema = Joi.object({
   provider: objectId.required().messages({
     "any.required": "Provider ID is required",
     "string.hex": "Invalid provider ID format",
@@ -84,7 +84,7 @@ export const createBooking = {
     }),
     accommodations: Joi.array().items(accommodationSchema).default([]),
     carRentals: Joi.array().items(carRentalSchema).default([]),
-    tripsWithDrivers: Joi.array().items(tripSchema).default([]),
+    carWithDriver: Joi.array().items(carWithDriverSchema).default([]), // renamed
     totalPax: totalPaxSchema.optional(),
   }),
 };
@@ -100,7 +100,7 @@ export const updateBooking = {
     customers: Joi.array().items(customerSchema).min(1),
     accommodations: Joi.array().items(accommodationSchema),
     carRentals: Joi.array().items(carRentalSchema),
-    tripsWithDrivers: Joi.array().items(tripSchema),
+    carWithDriver: Joi.array().items(carWithDriverSchema), // renamed
     totalPax: totalPaxSchema,
   })
     .min(1)
@@ -116,12 +116,12 @@ export const updateBooking = {
 export const addService = {
   body: Joi.object({
     serviceType: Joi.string()
-      .valid("accommodations", "carRentals", "tripsWithDrivers")
+      .valid("accommodations", "carRentals", "carWithDriver") // renamed
       .required()
       .messages({
         "any.required": "serviceType is required",
         "any.only":
-          "serviceType must be accommodations, carRentals, or tripsWithDrivers",
+          "serviceType must be accommodations, carRentals, or carWithDriver",
       }),
     serviceData: Joi.object().required().messages({
       "any.required": "serviceData is required",
@@ -135,7 +135,7 @@ export const addService = {
 export const removeService = {
   body: Joi.object({
     serviceType: Joi.string()
-      .valid("accommodations", "carRentals", "tripsWithDrivers")
+      .valid("accommodations", "carRentals", "carWithDriver") // renamed
       .required(),
     serviceId: objectId.required().messages({
       "string.hex": "Invalid service ID",
@@ -152,11 +152,9 @@ export const bookingIdParam = {
   }),
 };
 
-// Feature [3]: Validates query params for getAllBookings,
-// including the new numeric bookingID filter.
 export const getAllBookingsQuery = {
   query: Joi.object({
-    bookingID: Joi.number().integer().min(1), // NEW: search by human-readable ID
+    bookingID: Joi.number().integer().min(1),
     provider: objectId,
     status: Joi.string().valid(
       "pending",

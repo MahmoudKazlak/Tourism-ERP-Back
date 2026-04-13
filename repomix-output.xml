@@ -215,6 +215,25 @@ const paymentSchema = new mongoose.Schema(
       default: "cash",
     },
     notes: String,
+
+    /**
+     * When set, the customer paid this provider directly — not our office.
+     *
+     * Accounting effects:
+     *   1. booking.totalPaid increases by `amount` → customer's debt is cleared.
+     *   2. In the provider current-account ledger, `amount` (the sell price)
+     *      is treated as a credit: it retires the buy-price debt AND transfers
+     *      our profit to the provider as a receivable they hold for us.
+     *
+     * Must reference a provider that is actually linked to the booking
+     * (enforced at the controller level).
+     */
+    providerRecipient: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Provider",
+      default: null,
+    },
+
     recordedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -223,6 +242,9 @@ const paymentSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+// Supports provider current-account statement queries with date ranges.
+paymentSchema.index({ providerRecipient: 1, date: -1 });
 
 export default mongoose.model("Payment", paymentSchema);
 </file>
@@ -238,6 +260,7 @@ const providerSchema = new mongoose.Schema(
       required: true,
     },
     currentSequence: { type: Number, default: 0 },
+    currentBalance: { type: Number, default: 0 },
     totalBookings: { type: Number, default: 0 },
     phone: String,
     address: String,
@@ -1167,6 +1190,15 @@ export const addPayment = {
       .valid("cash", "bank_transfer", "check", "other")
       .default("cash"),
     notes: Joi.string().trim().max(300).optional().allow(""),
+    /**
+     * Optional. When provided, indicates the customer paid this provider
+     * directly. The booking is still credited (customer settled), but the
+     * provider current-account balance is also reduced by this amount.
+     */
+    providerRecipient: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid provider ID",
+      "string.length": "Invalid provider ID",
+    }),
   }),
   params: Joi.object({
     id: Joi.string().hex().length(24).required().messages({
@@ -1988,213 +2020,6 @@ router.get(
 );
 
 export default router;
-</file>
-
-<file path="src/services/bookingService.js">
-import mongoose from "mongoose";
-
-// Lazy model references to avoid circular-import issues
-// (this module is imported by booking.model.js, which would
-//  create a cycle if we imported the model directly here).
-const getProvider = () => mongoose.model("Provider");
-const getBooking = () => mongoose.model("Booking");
-
-/**
- * Assigns bookingID and per-service sequence numbers.
- *
- * ── Key invariant (bookingID bug fix) ────────────────────────────────────────
- * `provider.currentSequence` is a HIGH-WATER MARK — it records the highest
- * bookingID ever issued for that provider.  It must NEVER be decremented.
- *
- * Previously, deleting a booking called `$inc: { currentSequence: -1 }`.
- * This caused the following sequence:
- *
- *   Create B1 → sequence=1, Create B2 → sequence=2, Create B3 → sequence=3
- *   Delete B2  → sequence decremented to 2          ← BUG
- *   Create B4  → sequence incremented to 3          ← DUPLICATE KEY ERROR
- *                because booking with bookingID=3 still exists!
- *
- * Fix: `currentSequence` increments on every new booking and NEVER decrements.
- * `totalBookings` is a separate statistics counter that CAN go up and down.
- *
- * ── Other fixes applied ───────────────────────────────────────────────────────
- * [FIX-1] serviceNumber == null check (not falsy `!item.serviceNumber`)
- *         so serviceNumber=0 is correctly preserved.
- * [FIX-2] oldDoc fetched ONCE, shared across all three processServices calls
- *         (was previously fetched up to 3× per save).
- * [FIX-3] Throw instead of silently falling back to serviceNumber=0 when a
- *         sub-provider ID does not exist in the database. Orphaned references
- *         now surface as errors rather than silent data corruption.
- *
- * @param {import('mongoose').Document} doc - The booking document being saved.
- */
-export const assignBookingSequences = async (doc) => {
-  const Provider = getProvider();
-  const Booking = getBooking();
-
-  // ── Main booking sequence (bookingID) ──────────────────────────────────────
-
-  if (doc.isNew) {
-    // Increment the high-water mark and capture the new value as this booking's ID.
-    const mainProvider = await Provider.findByIdAndUpdate(
-      doc.provider,
-      { $inc: { currentSequence: 1, totalBookings: 1 } },
-      { new: true },
-    );
-    if (!mainProvider) throw new Error("Main Provider not found");
-    doc.bookingID = mainProvider.currentSequence;
-  } else if (doc.isModified("provider")) {
-    // The booking's main provider has been reassigned.
-    // BUG FIX: do NOT decrement the old provider's currentSequence — the old
-    // bookingID has already been permanently issued and the old booking document
-    // still references it. Decrementing would cause the next booking on that
-    // provider to collide with an existing ID.
-    // We only decrement totalBookings (a stats counter, not an ID generator).
-    const oldDoc = await Booking.findById(doc._id).lean();
-    if (oldDoc && oldDoc.provider.toString() !== doc.provider.toString()) {
-      await Provider.findByIdAndUpdate(oldDoc.provider, {
-        $inc: { totalBookings: -1 }, // ← stats only; currentSequence untouched
-      });
-      const newProvider = await Provider.findByIdAndUpdate(
-        doc.provider,
-        { $inc: { currentSequence: 1, totalBookings: 1 } },
-        { new: true },
-      );
-      if (!newProvider) throw new Error("New Provider not found");
-      doc.bookingID = newProvider.currentSequence;
-    }
-  }
-
-  // ── Per-service sequence numbers ──────────────────────────────────────────
-  // FIX-2: One DB read shared across all three service-type processors.
-  const oldDoc = !doc.isNew ? await Booking.findById(doc._id).lean() : null;
-
-  const processServices = async (fieldName, providerKey) => {
-    const services = doc[fieldName];
-    if (!services || services.length === 0) return;
-
-    for (let i = 0; i < services.length; i++) {
-      const item = services[i];
-      const currentProviderId = item[providerKey]?.toString();
-      if (!currentProviderId) continue;
-
-      const isMainProvider = currentProviderId === doc.provider.toString();
-
-      // FIX-1: Explicit null/undefined check — 0 is falsy but a valid serviceNumber.
-      if (item.serviceNumber == null) {
-        // New service — assign a sequence number.
-        if (isMainProvider) {
-          doc[fieldName][i].serviceNumber = doc.bookingID;
-        } else {
-          const otherProvider = await Provider.findByIdAndUpdate(
-            currentProviderId,
-            { $inc: { currentSequence: 1 } },
-            { new: true },
-          );
-          // FIX-3: Throw instead of silently storing serviceNumber=0.
-          // An unresolvable provider reference means we have a referential
-          // integrity violation — surface it as an error immediately.
-          if (!otherProvider) {
-            throw new Error(
-              `Service provider ${currentProviderId} not found ` +
-                `while assigning sequence for ${fieldName}[${i}]. ` +
-                `Ensure all referenced providers exist before saving.`,
-            );
-          }
-          doc[fieldName][i].serviceNumber = otherProvider.currentSequence;
-        }
-      } else if (item._id && oldDoc?.[fieldName]) {
-        // Existing service — only re-sequence if its provider changed.
-        const oldItem = oldDoc[fieldName].find(
-          (o) => o._id.toString() === item._id.toString(),
-        );
-        const oldProviderId = oldItem?.[providerKey]?.toString();
-
-        if (oldProviderId && oldProviderId !== currentProviderId) {
-          // BUG FIX: Do NOT decrement the old sub-provider's currentSequence.
-          // The serviceNumber that was already issued to the old provider is
-          // permanent — decrementing causes the same duplicate-key risk.
-          // (No action needed for the old provider.)
-
-          if (isMainProvider) {
-            doc[fieldName][i].serviceNumber = doc.bookingID;
-          } else {
-            const otherProvider = await Provider.findByIdAndUpdate(
-              currentProviderId,
-              { $inc: { currentSequence: 1 } },
-              { new: true },
-            );
-            // FIX-3: Same as above — throw on missing provider.
-            if (!otherProvider) {
-              throw new Error(
-                `Service provider ${currentProviderId} not found ` +
-                  `while re-sequencing ${fieldName}[${i}].`,
-              );
-            }
-            doc[fieldName][i].serviceNumber = otherProvider.currentSequence;
-          }
-        }
-      }
-    }
-  };
-
-  await processServices("accommodations", "hotel");
-  await processServices("carRentals", "provider");
-  await processServices("tripsWithDrivers", "provider");
-
-  doc.markModified("accommodations");
-  doc.markModified("carRentals");
-  doc.markModified("tripsWithDrivers");
-};
-
-/**
- * Recalculates hotel stay durations and all booking financial totals.
- *
- * Pure synchronous — no DB calls. Safe to call multiple times.
- * Mutates the document directly.
- *
- * @param {import('mongoose').Document} doc - The booking document being saved.
- */
-export const calculateBookingTotals = (doc) => {
-  // Auto-calculate hotel stay durations.
-  doc.accommodations?.forEach((acc) => {
-    if (acc.checkIn && acc.checkOut) {
-      acc.duration = Math.ceil(
-        (new Date(acc.checkOut) - new Date(acc.checkIn)) /
-          (1000 * 60 * 60 * 24),
-      );
-    }
-  });
-
-  // Roll up financials across all service types.
-  let totalSell = 0;
-  let totalBuy = 0;
-
-  const allServices = [
-    ...(doc.accommodations || []),
-    ...(doc.carRentals || []),
-    ...(doc.tripsWithDrivers || []),
-  ];
-
-  allServices.forEach((service) => {
-    service.profit = (Number(service.sell) || 0) - (Number(service.buy) || 0);
-    totalSell += Number(service.sell) || 0;
-    totalBuy += Number(service.buy) || 0;
-  });
-
-  doc.totalToPay = totalSell;
-  doc.totalToBuy = totalBuy;
-  doc.totalProfit = totalSell - totalBuy;
-  doc.remainingBalance = doc.totalToPay - (doc.totalPaid || 0);
-
-  if ((doc.totalPaid || 0) <= 0) {
-    doc.paymentStatus = "unpaid";
-  } else if (doc.totalPaid >= doc.totalToPay) {
-    doc.paymentStatus = "paid";
-  } else {
-    doc.paymentStatus = "partial";
-  }
-};
 </file>
 
 <file path="src/services/cloudinary.js">
@@ -5141,7 +4966,7 @@ const {
   createBookingStaffWithToken,
   buildAccommodation,
   buildCarRental,
-  buildTrip,
+  buildCarWithDriver,
 } = await import("../setup/factories.js");
 const { default: providerModel } =
   await import("../../DB/model/provider.model.js");
@@ -5616,7 +5441,7 @@ describe("Financial roll-up on booking creation", () => {
           buildAccommodation(hotel._id, { buy: 400, sell: 600 }),
         ],
         carRentals: [buildCarRental(carCo._id, { buy: 200, sell: 320 })],
-        tripsWithDrivers: [buildTrip(driverCo._id, { buy: 100, sell: 150 })],
+        carWithDriver: [buildCarWithDriver(driverCo._id, { buy: 100, sell: 150 })],
       });
 
     expect(res.status).toBe(201);
@@ -5715,7 +5540,7 @@ describe("Booking deletion", () => {
       .set("Authorization", adminHeader);
 
     const afterDelete = await providerModel.findById(provider._id);
-    expect(afterDelete.currentSequence).toBe(0);
+    expect(afterDelete.currentSequence).toBe(1);  //kazkaz
     expect(afterDelete.totalBookings).toBe(0);
   });
 
@@ -5747,7 +5572,7 @@ describe("Booking deletion", () => {
       .set("Authorization", adminHeader);
 
     const hotelAfterDelete = await providerModel.findById(hotel._id);
-    expect(hotelAfterDelete.currentSequence).toBe(0);
+    expect(hotelAfterDelete.currentSequence).toBe(1); //kazkaz
   });
 
   it("also deletes associated payments when booking is deleted", async () => {
@@ -6075,7 +5900,7 @@ describe("Service management on existing bookings", () => {
     expect(res.status).toBe(200);
 
     const hotelAfter = await providerModel.findById(hotel._id);
-    expect(hotelAfter.currentSequence).toBe(0);
+    expect(hotelAfter.currentSequence).toBe(1); //kazkaz
   });
 
   it("does NOT decrement main provider sequence when service with same provider is removed", async () => {
@@ -7191,7 +7016,7 @@ const {
   createProvider,
   buildAccommodation,
   buildCarRental,
-  buildTrip,
+  buildCarWithDriver,
 } = await import("../setup/factories.js");
 const { default: providerModel } =
   await import("../../DB/model/provider.model.js");
@@ -7251,7 +7076,7 @@ const createBookingLinkingProvider = async (
       type: "tourism",
     });
     body.provider = mainProvider._id.toString();
-    body.tripsWithDrivers = [buildTrip(providerId)];
+    body.carWithDriver = [buildCarWithDriver(providerId)];
   }
 
   return request(app)
@@ -7589,7 +7414,7 @@ describe("Provider — DELETE /delete/:id", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 400 when provider is linked as tripsWithDrivers.provider", async () => {
+  it("returns 400 when provider is linked as carWithDriver.provider", async () => {
     const driverCo = await createProvider({
       name: "Driver Co Linked",
       type: "driver_company",
@@ -7787,7 +7612,7 @@ export const buildCarRental = (providerId, overrides = {}) => ({
   ...overrides,
 });
 
-export const buildTrip = (providerId, overrides = {}) => ({
+export const buildCarWithDriver = (providerId, overrides = {}) => ({
   provider: providerId.toString(),
   driverName: "Ahmad",
   brand: "Mercedes",
@@ -7998,7 +7823,7 @@ const makeDoc = (overrides = {}) => ({
   isNew: true,
   accommodations: [],
   carRentals: [],
-  tripsWithDrivers: [],
+  carWithDriver: [],
   totalPaid: 0,
   totalToPay: 0,
   totalToBuy: 0,
@@ -8046,11 +7871,11 @@ describe("calculateBookingTotals()", () => {
       expect(doc.totalProfit).toBe(200);
     });
 
-    it("combines accommodations + carRentals + tripsWithDrivers totals", () => {
+    it("combines accommodations + carRentals + carWithDriver totals", () => {
       const doc = makeDoc({
         accommodations: [{ sell: 600, buy: 400, profit: 0 }],
         carRentals: [{ sell: 320, buy: 200, profit: 0 }],
-        tripsWithDrivers: [{ sell: 150, buy: 100, profit: 0 }],
+        carWithDriver: [{ sell: 150, buy: 100, profit: 0 }],
       });
       calculateBookingTotals(doc);
       expect(doc.totalToPay).toBe(1070);
@@ -8084,18 +7909,18 @@ describe("calculateBookingTotals()", () => {
       const doc = makeDoc({
         accommodations: [acc],
         carRentals: [car],
-        tripsWithDrivers: [trip],
+        carWithDriver: [trip],
       });
       calculateBookingTotals(doc);
       expect(doc.accommodations[0].profit).toBe(200);
       expect(doc.carRentals[0].profit).toBe(120);
-      expect(doc.tripsWithDrivers[0].profit).toBe(70);
+      expect(doc.carWithDriver[0].profit).toBe(70);
     });
 
     it("handles missing service arrays gracefully — no crash when carRentals is undefined", () => {
       const doc = makeDoc();
       delete doc.carRentals;
-      delete doc.tripsWithDrivers;
+      delete doc.carWithDriver;
       expect(() => calculateBookingTotals(doc)).not.toThrow();
       expect(doc.totalToPay).toBe(0);
     });
@@ -8235,7 +8060,7 @@ describe("assignBookingSequences()", () => {
     provider: providerId,
     accommodations: [],
     carRentals: [],
-    tripsWithDrivers: [],
+    carWithDriver: [],
     _id: new mongoose.Types.ObjectId(),
     isModified: (field) =>
       field === "provider" && !!overrides._providerModified,
@@ -8349,7 +8174,7 @@ describe("assignBookingSequences()", () => {
     await assignBookingSequences(doc);
     expect(doc.markModified).toHaveBeenCalledWith("accommodations");
     expect(doc.markModified).toHaveBeenCalledWith("carRentals");
-    expect(doc.markModified).toHaveBeenCalledWith("tripsWithDrivers");
+    expect(doc.markModified).toHaveBeenCalledWith("carWithDriver");
   });
 });
 </file>
@@ -8626,7 +8451,6 @@ export const updateUser = {
 <file path="src/modules/booking/booking.validation.js">
 import Joi from "joi";
 
-// Reusable ObjectId validator
 const objectId = Joi.string().hex().length(24);
 
 const customerSchema = Joi.object({
@@ -8675,7 +8499,8 @@ const carRentalSchema = Joi.object({
   sell: Joi.number().min(0).default(0),
 });
 
-const tripSchema = Joi.object({
+// Renamed from tripSchema / tripsWithDrivers
+const carWithDriverSchema = Joi.object({
   provider: objectId.required().messages({
     "any.required": "Provider ID is required",
     "string.hex": "Invalid provider ID format",
@@ -8710,7 +8535,7 @@ export const createBooking = {
     }),
     accommodations: Joi.array().items(accommodationSchema).default([]),
     carRentals: Joi.array().items(carRentalSchema).default([]),
-    tripsWithDrivers: Joi.array().items(tripSchema).default([]),
+    carWithDriver: Joi.array().items(carWithDriverSchema).default([]), // renamed
     totalPax: totalPaxSchema.optional(),
   }),
 };
@@ -8726,7 +8551,7 @@ export const updateBooking = {
     customers: Joi.array().items(customerSchema).min(1),
     accommodations: Joi.array().items(accommodationSchema),
     carRentals: Joi.array().items(carRentalSchema),
-    tripsWithDrivers: Joi.array().items(tripSchema),
+    carWithDriver: Joi.array().items(carWithDriverSchema), // renamed
     totalPax: totalPaxSchema,
   })
     .min(1)
@@ -8742,12 +8567,12 @@ export const updateBooking = {
 export const addService = {
   body: Joi.object({
     serviceType: Joi.string()
-      .valid("accommodations", "carRentals", "tripsWithDrivers")
+      .valid("accommodations", "carRentals", "carWithDriver") // renamed
       .required()
       .messages({
         "any.required": "serviceType is required",
         "any.only":
-          "serviceType must be accommodations, carRentals, or tripsWithDrivers",
+          "serviceType must be accommodations, carRentals, or carWithDriver",
       }),
     serviceData: Joi.object().required().messages({
       "any.required": "serviceData is required",
@@ -8761,7 +8586,7 @@ export const addService = {
 export const removeService = {
   body: Joi.object({
     serviceType: Joi.string()
-      .valid("accommodations", "carRentals", "tripsWithDrivers")
+      .valid("accommodations", "carRentals", "carWithDriver") // renamed
       .required(),
     serviceId: objectId.required().messages({
       "string.hex": "Invalid service ID",
@@ -8778,11 +8603,9 @@ export const bookingIdParam = {
   }),
 };
 
-// Feature [3]: Validates query params for getAllBookings,
-// including the new numeric bookingID filter.
 export const getAllBookingsQuery = {
   query: Joi.object({
-    bookingID: Joi.number().integer().min(1), // NEW: search by human-readable ID
+    bookingID: Joi.number().integer().min(1),
     provider: objectId,
     status: Joi.string().valid(
       "pending",
@@ -8932,7 +8755,7 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
     .populate("provider", "name phone address")
     .populate("accommodations.hotel", "name phone address")
     .populate("carRentals.provider", "name phone")
-    .populate("tripsWithDrivers.provider", "name phone")
+    .populate("carWithDriver.provider", "name phone") // renamed
     .lean();
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
@@ -8982,11 +8805,13 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
       totalPax: booking.totalPax,
     })) || [];
 
-  const generateTripVouchers = () =>
-    booking.tripsWithDrivers?.map((trip, i) => ({
+  // Renamed: generateTripVouchers → generateCarWithDriverVouchers
+  const generateCarWithDriverVouchers = () =>
+    booking.carWithDriver?.map((trip, i) => ({
+      // renamed field
       voucherType: "SERVICE_VOUCHER",
-      voucherFor: "trip_driver",
-      voucherNumber: `VCH-${booking.bookingID}-TRIP-${trip.serviceNumber || i + 1}`,
+      voucherFor: "car_with_driver", // renamed value
+      voucherNumber: `VCH-${booking.bookingID}-CWD-${trip.serviceNumber || i + 1}`, // renamed prefix
       issueDate: new Date().toISOString(),
       provider: {
         name: trip.provider?.name || "N/A",
@@ -9015,8 +8840,9 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
       ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
     );
   }
-  if (!serviceType || serviceType === "tripsWithDrivers") {
-    const v = generateTripVouchers();
+  if (!serviceType || serviceType === "carWithDriver") {
+    // renamed
+    const v = generateCarWithDriverVouchers(); // renamed
     vouchers.push(
       ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
     );
@@ -9046,13 +8872,10 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Invoice — customer-facing invoice with sell prices
 //
-// FIX [9]: When serviceType filter is applied, totals.totalPaid and
-// totals.remainingBalance now reflect ONLY the filtered service amount,
-// not the entire booking balance. This prevents showing a confusing
-// remaining-balance figure that doesn't match the line items on the invoice.
-//
-// Full booking payment status is still included separately as
-// `bookingPaymentStatus` for reference.
+// When serviceType filter is applied, totals reflect ONLY the filtered service
+// amount to avoid showing a confusing remaining-balance figure that doesn't
+// match the line items on the invoice.
+// Full booking payment status is included separately as fullBooking for reference.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getInvoice = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
@@ -9063,7 +8886,7 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     .populate("provider", "name phone address")
     .populate("accommodations.hotel", "name")
     .populate("carRentals.provider", "name")
-    .populate("tripsWithDrivers.provider", "name")
+    .populate("carWithDriver.provider", "name") // renamed
     .populate("createdBy", "userName")
     .lean();
 
@@ -9071,6 +8894,7 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
 
   const payments = await paymentModel
     .find({ booking: booking._id })
+    .populate("providerRecipient", "name") // surface direct-payment recipient
     .sort({ date: 1 })
     .lean();
 
@@ -9105,11 +8929,13 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     });
   }
 
-  if (!serviceType || serviceType === "tripsWithDrivers") {
-    booking.tripsWithDrivers?.forEach((trip) => {
+  if (!serviceType || serviceType === "carWithDriver") {
+    // renamed
+    booking.carWithDriver?.forEach((trip) => {
+      // renamed field
       lineItems.push({
         serviceNumber: trip.serviceNumber,
-        type: "Trip with Driver",
+        type: "Car with Driver", // renamed label
         description: `${trip.provider?.name || "Provider"} — ${trip.brand || ""} / ${trip.driverName || ""}`,
         amount: trip.sell,
       });
@@ -9117,12 +8943,9 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     });
   }
 
-  const totalPaidForAll = payments.reduce((s, p) => s + p.amount, 0);
-
-  // FIX [9]: For a filtered invoice we cannot attribute specific payments
-  // to specific services (payments cover the booking, not a service).
-  // So we show the filtered subtotal with a note, rather than showing
-  // the full booking's paid/remaining which would be misleading.
+  // For a filtered invoice, payments cover the booking as a whole — not
+  // individual services — so we show the filtered subtotal with a note
+  // rather than the full paid/remaining, which would be misleading.
   const filteredTotals = serviceType
     ? {
         subtotal: filteredTotal,
@@ -9156,12 +8979,13 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     issuedBy: booking.createdBy?.userName || "N/A",
     lineItems,
     totals: filteredTotals,
-    // Payments are shown only on full invoices.
+    // Payments shown only on full invoices; surface who received each payment.
     payments: !serviceType
       ? payments.map((p) => ({
           date: p.date,
           amount: p.amount,
           method: p.method,
+          paidTo: p.providerRecipient?.name || "Office",
         }))
       : [],
   };
@@ -9185,6 +9009,7 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
   const payment = await paymentModel
     .findById(paymentId)
     .populate("recordedBy", "userName")
+    .populate("providerRecipient", "name") // surface direct-payment recipient
     .lean();
 
   if (!payment) return next(new Error("Payment not found", { cause: 404 }));
@@ -9202,6 +9027,9 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
     issueDate: new Date().toISOString(),
     paymentDate: payment.date,
     receivedFrom: booking.customers?.[0]?.name || "Unknown",
+    // When providerRecipient is set, the customer paid a provider directly.
+    // The receipt should reflect who actually received the money.
+    receivedBy: payment.providerRecipient?.name || "Office",
     amount: payment.amount,
     method: payment.method,
     methodLabel:
@@ -9232,6 +9060,160 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
+</file>
+
+<file path="src/services/bookingService.js">
+import mongoose from "mongoose";
+
+const getProvider = () => mongoose.model("Provider");
+const getBooking = () => mongoose.model("Booking");
+
+/**
+ * Assigns bookingID and per-service sequence numbers.
+ * See inline comments for the high-water-mark invariant.
+ *
+ * Field renamed: tripsWithDrivers → carWithDriver
+ */
+export const assignBookingSequences = async (doc) => {
+  const Provider = getProvider();
+  const Booking = getBooking();
+
+  // ── Main booking sequence (bookingID) ──────────────────────────────────────
+
+  if (doc.isNew) {
+    const mainProvider = await Provider.findByIdAndUpdate(
+      doc.provider,
+      { $inc: { currentSequence: 1, totalBookings: 1 } },
+      { new: true },
+    );
+    if (!mainProvider) throw new Error("Main Provider not found");
+    doc.bookingID = mainProvider.currentSequence;
+  } else if (doc.isModified("provider")) {
+    const oldDoc = await Booking.findById(doc._id).lean();
+    if (oldDoc && oldDoc.provider.toString() !== doc.provider.toString()) {
+      await Provider.findByIdAndUpdate(oldDoc.provider, {
+        $inc: { totalBookings: -1 },
+      });
+      const newProvider = await Provider.findByIdAndUpdate(
+        doc.provider,
+        { $inc: { currentSequence: 1, totalBookings: 1 } },
+        { new: true },
+      );
+      if (!newProvider) throw new Error("New Provider not found");
+      doc.bookingID = newProvider.currentSequence;
+    }
+  }
+
+  // ── Per-service sequence numbers ──────────────────────────────────────────
+  const oldDoc = !doc.isNew ? await Booking.findById(doc._id).lean() : null;
+
+  const processServices = async (fieldName, providerKey) => {
+    const services = doc[fieldName];
+    if (!services || services.length === 0) return;
+
+    for (let i = 0; i < services.length; i++) {
+      const item = services[i];
+      const currentProviderId = item[providerKey]?.toString();
+      if (!currentProviderId) continue;
+
+      const isMainProvider = currentProviderId === doc.provider.toString();
+
+      if (item.serviceNumber == null) {
+        if (isMainProvider) {
+          doc[fieldName][i].serviceNumber = doc.bookingID;
+        } else {
+          const otherProvider = await Provider.findByIdAndUpdate(
+            currentProviderId,
+            { $inc: { currentSequence: 1 } },
+            { new: true },
+          );
+          if (!otherProvider) {
+            throw new Error(
+              `Service provider ${currentProviderId} not found ` +
+                `while assigning sequence for ${fieldName}[${i}].`,
+            );
+          }
+          doc[fieldName][i].serviceNumber = otherProvider.currentSequence;
+        }
+      } else if (item._id && oldDoc?.[fieldName]) {
+        const oldItem = oldDoc[fieldName].find(
+          (o) => o._id.toString() === item._id.toString(),
+        );
+        const oldProviderId = oldItem?.[providerKey]?.toString();
+
+        if (oldProviderId && oldProviderId !== currentProviderId) {
+          if (isMainProvider) {
+            doc[fieldName][i].serviceNumber = doc.bookingID;
+          } else {
+            const otherProvider = await Provider.findByIdAndUpdate(
+              currentProviderId,
+              { $inc: { currentSequence: 1 } },
+              { new: true },
+            );
+            if (!otherProvider) {
+              throw new Error(
+                `Service provider ${currentProviderId} not found ` +
+                  `while re-sequencing ${fieldName}[${i}].`,
+              );
+            }
+            doc[fieldName][i].serviceNumber = otherProvider.currentSequence;
+          }
+        }
+      }
+    }
+  };
+
+  await processServices("accommodations", "hotel");
+  await processServices("carRentals", "provider");
+  await processServices("carWithDriver", "provider"); // renamed
+
+  doc.markModified("accommodations");
+  doc.markModified("carRentals");
+  doc.markModified("carWithDriver"); // renamed
+};
+
+/**
+ * Recalculates hotel stay durations and all booking financial totals.
+ * Pure synchronous — no DB calls.
+ */
+export const calculateBookingTotals = (doc) => {
+  doc.accommodations?.forEach((acc) => {
+    if (acc.checkIn && acc.checkOut) {
+      acc.duration = Math.ceil(
+        (new Date(acc.checkOut) - new Date(acc.checkIn)) /
+          (1000 * 60 * 60 * 24),
+      );
+    }
+  });
+
+  let totalSell = 0;
+  let totalBuy = 0;
+
+  const allServices = [
+    ...(doc.accommodations || []),
+    ...(doc.carRentals || []),
+    ...(doc.carWithDriver || []), // renamed
+  ];
+
+  allServices.forEach((service) => {
+    service.profit = (Number(service.sell) || 0) - (Number(service.buy) || 0);
+    totalSell += Number(service.sell) || 0;
+    totalBuy += Number(service.buy) || 0;
+  });
+
+  doc.totalToPay = totalSell;
+  doc.totalToBuy = totalBuy;
+  doc.totalProfit = totalSell - totalBuy;
+  doc.remainingBalance = doc.totalToPay - (doc.totalPaid || 0);
+
+  if ((doc.totalPaid || 0) <= 0) {
+    doc.paymentStatus = "unpaid";
+  } else if (doc.totalPaid >= doc.totalToPay) {
+    doc.paymentStatus = "paid";
+  } else {
+    doc.paymentStatus = "partial";
+  }
+};
 </file>
 
 <file path="src/services/pagination.js">
@@ -9433,7 +9415,8 @@ const bookingSchema = new mongoose.Schema(
         profit: { type: Number, default: 0 },
       },
     ],
-    tripsWithDrivers: [
+    // Renamed from tripsWithDrivers for domain consistency.
+    carWithDriver: [
       {
         serviceNumber: Number,
         provider: { type: mongoose.Schema.Types.ObjectId, ref: "Provider" },
@@ -9449,60 +9432,14 @@ const bookingSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// Unique compound index prevents race-condition duplicate bookingIDs
-// for the same provider on concurrent inserts.
 bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
 
-// Pre-save hook is now thin: sequence and financial logic live in
-// src/services/bookingService.js for testability.
 bookingSchema.pre("save", async function () {
   await assignBookingSequences(this);
   calculateBookingTotals(this);
 });
 
 export default mongoose.model("Booking", bookingSchema);
-</file>
-
-<file path="package.json">
-{
-  "name": "booking",
-  "version": "2.0.0",
-  "description": "Tourism booking management system",
-  "main": "app.js",
-  "scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
-    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/unit",
-    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/integration",
-    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --watch",
-    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage"
-  },
-  "type": "module",
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "bcrypt": "^6.0.0",
-    "cloudinary": "^2.8.0",
-    "cors": "^2.8.6",
-    "dotenv": "^17.2.3",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.3.2",
-    "helmet": "^8.1.0",
-    "joi": "^18.0.2",
-    "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.1.2",
-    "multer": "^2.0.2",
-    "nanoid": "^5.1.6",
-    "nodemailer": "^7.0.12"
-  },
-  "devDependencies": {
-    "jest": "^29.7.0",
-    "mongodb-memory-server": "^10.0.0",
-    "supertest": "^7.0.0"
-  }
-}
 </file>
 
 <file path="src/middleware/auth.js">
@@ -9965,81 +9902,12 @@ export const uploadUserImage = asyncHandler(async (req, res, next) => {
 });
 </file>
 
-<file path="src/modules/booking/booking.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import { validation } from "../../middleware/validation.js";
-import * as bookingController from "./controller/booking.controller.js";
-import * as validators from "./booking.validation.js";
-import { endpoint } from "../indexEndpoint.js";
-
-const router = Router();
-
-router.post(
-  "/create",
-  auth(endpoint.booking_manage),
-  validation(validators.createBooking),
-  bookingController.createBooking,
-);
-
-// Feature [3] + Fix [5]: Added query validation (catches invalid ObjectIds
-// before they reach MongoDB and cause a CastError 500).
-router.get(
-  "/getAll",
-  auth(endpoint.booking_view),
-  validation(validators.getAllBookingsQuery),
-  bookingController.getAllBookings,
-);
-
-router.get(
-  "/get/:id",
-  auth(endpoint.booking_view),
-  validation(validators.bookingIdParam),
-  bookingController.getBookingById,
-);
-
-router.patch(
-  "/edit/:id",
-  auth(endpoint.booking_manage),
-  validation(validators.updateBooking),
-  bookingController.updateBooking,
-);
-
-router.patch(
-  "/:id/addService",
-  auth(endpoint.booking_manage),
-  validation(validators.addService),
-  bookingController.addServiceToBooking,
-);
-
-router.patch(
-  "/:id/remove",
-  auth(endpoint.booking_manage),
-  validation(validators.removeService),
-  bookingController.removeServiceFromBooking,
-);
-
-router.delete(
-  "/delete/:id",
-  auth(endpoint.booking_delete),
-  validation(validators.bookingIdParam),
-  bookingController.deleteBooking,
-);
-
-router.patch(
-  "/:id/status",
-  auth(endpoint.booking_manage),
-  bookingController.editStatus,
-);
-
-export default router;
-</file>
-
 <file path="src/modules/payment/controller/payment.controller.js">
 import mongoose from "mongoose";
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
 import { withTransaction } from "../../../services/transaction.js";
@@ -10047,6 +9915,8 @@ import { notifyPaymentRecorded } from "../../../services/notification.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: recalculate totalPaid from all payments and sync the booking.
+// Counts both office payments and direct-to-provider payments —
+// both clear the customer's obligation.
 // ─────────────────────────────────────────────────────────────────────────────
 const syncBookingPayments = async (bookingId, session = null) => {
   const aggregateOptions = session ? { session } : {};
@@ -10092,23 +9962,63 @@ const syncBookingPayments = async (bookingId, session = null) => {
   };
 };
 
+/**
+ * Returns the set of provider IDs directly referenced by a booking
+ * (main provider + all service providers). Used to validate direct payments.
+ */
+const getLinkedProviderIds = (booking) => {
+  return new Set([
+    booking.provider.toString(),
+    ...(booking.accommodations || [])
+      .map((a) => a.hotel?.toString())
+      .filter(Boolean),
+    ...(booking.carRentals || [])
+      .map((c) => c.provider?.toString())
+      .filter(Boolean),
+    ...(booking.carWithDriver || []) // renamed
+      .map((t) => t.provider?.toString())
+      .filter(Boolean),
+  ]);
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Add payment
 // ─────────────────────────────────────────────────────────────────────────────
 export const addPayment = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
-  const { amount, date, method, notes } = req.body;
+  const { amount, date, method, notes, providerRecipient } = req.body;
 
-  // Populate createdBy to get the email for notification.
   const booking = await bookingModel
     .findById(id)
-    .populate("createdBy", "userName email")
-    .select("bookingID customers totalToPay totalPaid paymentStatus createdBy");
+    .populate("createdBy", "userName email");
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
   if (booking.paymentStatus === "paid") {
     return next(new Error("Booking is already fully paid", { cause: 400 }));
+  }
+
+  // ── Validate direct-payment recipient ────────────────────────────────────
+  if (providerRecipient) {
+    const providerExists = await providerModel
+      .findById(providerRecipient)
+      .select("_id name");
+    if (!providerExists) {
+      return next(new Error("Provider not found", { cause: 404 }));
+    }
+
+    // The recipient must be a provider already referenced in this booking.
+    // This prevents phantom ledger entries on unrelated providers.
+    const linkedIds = getLinkedProviderIds(booking);
+    if (!linkedIds.has(providerRecipient.toString())) {
+      return next(
+        new Error(
+          "The specified provider is not linked to this booking. " +
+            "Direct payments can only be recorded for providers referenced in the booking's services.",
+          { cause: 400 },
+        ),
+      );
+    }
   }
 
   const numAmount = Number(amount);
@@ -10123,6 +10033,7 @@ export const addPayment = asyncHandler(async (req, res, next) => {
           date: date || new Date(),
           method: method || "cash",
           notes,
+          providerRecipient: providerRecipient || null,
           recordedBy: req.user._id,
         },
       ],
@@ -10135,12 +10046,15 @@ export const addPayment = asyncHandler(async (req, res, next) => {
       [
         {
           user: req.user._id,
-          action: "ADD_PAYMENT",
+          action: providerRecipient
+            ? "ADD_DIRECT_PROVIDER_PAYMENT"
+            : "ADD_PAYMENT",
           details: {
             bookingID: booking.bookingID,
             paymentId: payment[0]._id,
             amount: numAmount,
             method,
+            providerRecipient: providerRecipient || null,
             newTotalPaid: updated.totalPaid,
             newRemainingBalance: updated.remainingBalance,
             newPaymentStatus: updated.paymentStatus,
@@ -10153,7 +10067,6 @@ export const addPayment = asyncHandler(async (req, res, next) => {
     return { payment: payment[0], bookingSummary: updated };
   });
 
-  // Feature [6]: Send email notification — best-effort, outside transaction.
   await notifyPaymentRecorded(
     booking,
     result.payment,
@@ -10163,7 +10076,9 @@ export const addPayment = asyncHandler(async (req, res, next) => {
 
   return res.status(201).json({
     success: true,
-    message: "Payment added successfully",
+    message: providerRecipient
+      ? "Direct provider payment recorded successfully"
+      : "Payment added successfully",
     data: result,
     errors: null,
   });
@@ -10186,6 +10101,7 @@ export const getPaymentsByBooking = asyncHandler(async (req, res, next) => {
   const payments = await paymentModel
     .find({ booking: id })
     .populate("recordedBy", "userName")
+    .populate("providerRecipient", "name type")
     .sort({ date: -1 });
 
   return res.status(200).json({
@@ -10206,7 +10122,7 @@ export const getPaymentsByBooking = asyncHandler(async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Get all payments (with filtering — for accounting)
+// Get all payments (accounting overview)
 // ─────────────────────────────────────────────────────────────────────────────
 export const getAllPayments = asyncHandler(async (req, res) => {
   const { method, fromDate, toDate, page, size } = req.query;
@@ -10230,6 +10146,7 @@ export const getAllPayments = asyncHandler(async (req, res) => {
       .find(query)
       .populate("booking", "bookingID customers status")
       .populate("recordedBy", "userName")
+      .populate("providerRecipient", "name type")
       .sort({ date: -1 })
       .limit(limit)
       .skip(skip),
@@ -10273,11 +10190,14 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
       [
         {
           user: req.user._id,
-          action: "DELETE_PAYMENT",
+          action: payment.providerRecipient
+            ? "DELETE_DIRECT_PROVIDER_PAYMENT"
+            : "DELETE_PAYMENT",
           details: {
             paymentId,
             bookingID: payment.bookingID,
             deletedAmount,
+            providerRecipient: payment.providerRecipient || null,
             newTotalPaid: updated.totalPaid,
             newPaymentStatus: updated.paymentStatus,
           },
@@ -10345,7 +10265,7 @@ export const deleteProvider = asyncHandler(async (req, res, next) => {
       { provider: id },
       { "accommodations.hotel": id },
       { "carRentals.provider": id },
-      { "tripsWithDrivers.provider": id },
+      { "carWithDriver.provider": id },
     ],
   });
 
@@ -10454,6 +10374,7 @@ export const updateProvider = asyncHandler(async (req, res, next) => {
 </file>
 
 <file path="src/modules/statement/controller/statement.controller.js">
+import mongoose from "mongoose";
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
@@ -10462,10 +10383,16 @@ import providerPaymentModel from "../../../../DB/model/providerPayment.model.js"
 import { pagination } from "../../../services/pagination.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Provider statement
+// Provider Current-Account Statement
 //
-// Feature [1]: Now also returns totalPaidToProvider from the
-// ProviderPayment collection, completing both sides of the ledger.
+// Ledger formula:
+//   Balance = Σ(buy prices of all services)         ← our total obligation
+//           − Σ(ProviderPayment.amount)              ← we paid them directly
+//           − Σ(Payment.amount where providerRecipient = X)
+//                                                   ← customer paid them on our behalf
+//
+// A positive balance means we still owe them.
+// A negative balance means they are holding our profit as a receivable.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getProviderStatement = asyncHandler(async (req, res, next) => {
   const { providerId } = req.params;
@@ -10474,6 +10401,7 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
   const provider = await providerModel.findById(providerId);
   if (!provider) return next(new Error("Provider not found", { cause: 404 }));
 
+  // Build date filter (shared shape, applied to different fields per collection)
   const dateFilter = {};
   if (fromDate) dateFilter.$gte = new Date(fromDate);
   if (toDate) {
@@ -10481,83 +10409,189 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
     to.setHours(23, 59, 59, 999);
     dateFilter.$lte = to;
   }
+  const hasDateFilter = Object.keys(dateFilter).length > 0;
 
+  // Booking query: any booking that references this provider in any role
   const bookingQuery = {
     $or: [
       { provider: providerId },
       { "accommodations.hotel": providerId },
       { "carRentals.provider": providerId },
-      { "tripsWithDrivers.provider": providerId },
+      { "carWithDriver.provider": providerId }, // renamed
     ],
   };
-  if (Object.keys(dateFilter).length) bookingQuery.createdAt = dateFilter;
+  if (hasDateFilter) bookingQuery.createdAt = dateFilter;
 
-  // Run bookings and provider payments queries in parallel.
+  // ProviderPayment query: money we paid out to this provider
   const providerPaymentQuery = { provider: providerId };
-  if (Object.keys(dateFilter).length) providerPaymentQuery.date = dateFilter;
+  if (hasDateFilter) providerPaymentQuery.date = dateFilter;
 
-  const [bookings, providerPaymentsResult] = await Promise.all([
-    bookingModel
-      .find(bookingQuery)
-      .populate(
-        "accommodations.hotel carRentals.provider tripsWithDrivers.provider",
-      )
-      .lean(),
+  // Direct customer payment query: customer paid this provider on our behalf
+  const directPaymentQuery = {
+    providerRecipient: new mongoose.Types.ObjectId(providerId),
+  };
+  if (hasDateFilter) directPaymentQuery.date = dateFilter;
+
+  const [
+    bookings,
+    providerPaymentsAgg,
+    providerPaymentsList,
+    directPaymentsAgg,
+    directPaymentsList,
+  ] = await Promise.all([
+    bookingModel.find(bookingQuery).lean(),
+
+    // Aggregate: total we have paid to provider
     providerPaymentModel.aggregate([
       { $match: providerPaymentQuery },
-      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+        },
+      },
     ]),
+
+    // List of our payments to provider (for the transaction ledger)
+    providerPaymentModel
+      .find(providerPaymentQuery)
+      .populate("recordedBy", "userName")
+      .sort({ date: 1 })
+      .lean(),
+
+    // Aggregate: total customer paid directly to this provider
+    paymentModel.aggregate([
+      { $match: directPaymentQuery },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+
+    // List of direct customer payments (for the transaction ledger)
+    paymentModel
+      .find(directPaymentQuery)
+      .populate("booking", "bookingID customers")
+      .populate("recordedBy", "userName")
+      .sort({ date: 1 })
+      .lean(),
   ]);
 
+  // ── Build service debit lines (what we owe for each service) ───────────────
   const serviceLines = [];
-  let totalCostFromProvider = 0;
+
+  const addLines = (items, serviceType, providerKey, labelFn) => {
+    items?.forEach((item) => {
+      const pid =
+        item[providerKey]?._id?.toString() || item[providerKey]?.toString();
+      if (pid !== providerId) return;
+
+      const buy = Number(item.buy) || 0;
+      serviceLines.push({
+        type: "SERVICE_DEBIT",
+        serviceType,
+        debit: buy,
+        credit: 0,
+      });
+    });
+  };
 
   bookings.forEach((booking) => {
-    const addLines = (items, serviceType, providerKey, getLabel) => {
-      items?.forEach((item) => {
-        const pid =
-          item[providerKey]?._id?.toString() || item[providerKey]?.toString();
-        if (pid !== providerId) return;
-
-        const buy = Number(item.buy) || 0;
-        totalCostFromProvider += buy;
-
-        serviceLines.push({
-          bookingID: booking.bookingID,
-          bookingMongoId: booking._id,
-          customer: booking.customers?.[0]?.name || "Unknown",
-          date: booking.createdAt,
-          serviceType,
-          label: getLabel(item),
-          costToPay: buy,
-        });
-      });
+    const meta = {
+      bookingID: booking.bookingID,
+      bookingMongoId: booking._id,
+      customer: booking.customers?.[0]?.name || "Unknown",
+      date: booking.createdAt,
     };
 
-    addLines(
-      booking.accommodations,
-      "Hotel",
-      "hotel",
-      (a) =>
-        `${a.roomType || ""} - ${a.board || ""} - ${a.duration || 0} Nights`,
-    );
-    addLines(
-      booking.carRentals,
-      "Car Rental",
-      "provider",
-      (c) =>
-        `${c.brand || ""} - ${c.pickUp ? new Date(c.pickUp).toLocaleDateString("ar") : "N/A"}`,
-    );
-    addLines(
-      booking.tripsWithDrivers,
-      "Trip",
-      "provider",
-      (t) => `${t.brand || ""} - Driver: ${t.driverName || ""}`,
-    );
+    (booking.accommodations || []).forEach((item) => {
+      const pid = item.hotel?._id?.toString() || item.hotel?.toString();
+      if (pid !== providerId) return;
+      serviceLines.push({
+        ...meta,
+        type: "SERVICE_DEBIT",
+        serviceType: "Hotel Accommodation",
+        description: `${item.roomType || ""} / ${item.board || ""} / ${item.duration || 0} Nights`,
+        debit: Number(item.buy) || 0,
+        credit: 0,
+      });
+    });
+
+    (booking.carRentals || []).forEach((item) => {
+      const pid = item.provider?._id?.toString() || item.provider?.toString();
+      if (pid !== providerId) return;
+      serviceLines.push({
+        ...meta,
+        type: "SERVICE_DEBIT",
+        serviceType: "Car Rental",
+        description: `${item.brand || ""} — ${
+          item.pickUp ? new Date(item.pickUp).toLocaleDateString() : "N/A"
+        }`,
+        debit: Number(item.buy) || 0,
+        credit: 0,
+      });
+    });
+
+    // renamed: carWithDriver
+    (booking.carWithDriver || []).forEach((item) => {
+      const pid = item.provider?._id?.toString() || item.provider?.toString();
+      if (pid !== providerId) return;
+      serviceLines.push({
+        ...meta,
+        type: "SERVICE_DEBIT",
+        serviceType: "Car with Driver",
+        description: `${item.brand || ""} — Driver: ${item.driverName || ""}`,
+        debit: Number(item.buy) || 0,
+        credit: 0,
+      });
+    });
   });
 
-  const totalPaidToProvider = providerPaymentsResult[0]?.total || 0;
-  const outstandingBalance = totalCostFromProvider - totalPaidToProvider;
+  // ── Build credit lines (reductions to our liability) ──────────────────────
+
+  // Credits: payments we made directly to the provider
+  const ourPaymentLines = providerPaymentsList.map((p) => ({
+    date: p.date,
+    type: "OUR_PAYMENT",
+    description: `Payment by ${p.recordedBy?.userName || "office"}${p.reference ? ` — Ref: ${p.reference}` : ""}`,
+    debit: 0,
+    credit: Number(p.amount),
+    method: p.method,
+    reference: p.reference || null,
+  }));
+
+  // Credits: customer paid provider directly on our behalf
+  const directPaymentLines = directPaymentsList.map((p) => {
+    const bookingID = p.booking?.bookingID;
+    const customer = p.booking?.customers?.[0]?.name || "Unknown";
+    return {
+      date: p.date,
+      type: "CUSTOMER_DIRECT_PAYMENT",
+      description: `Customer "${customer}" paid provider directly (Booking #${bookingID})`,
+      debit: 0,
+      credit: Number(p.amount),
+      method: p.method,
+      bookingID,
+    };
+  });
+
+  // ── Totals ─────────────────────────────────────────────────────────────────
+  const totalCostFromProvider = serviceLines.reduce((s, l) => s + l.debit, 0);
+  const totalWeHavePaid = providerPaymentsAgg[0]?.total || 0;
+  const totalCustomersPaidDirect = directPaymentsAgg[0]?.total || 0;
+  const totalCredits = totalWeHavePaid + totalCustomersPaidDirect;
+  const outstandingBalance = totalCostFromProvider - totalCredits;
+
+  // ── Unified chronological ledger ───────────────────────────────────────────
+  const ledger = [
+    ...serviceLines,
+    ...ourPaymentLines,
+    ...directPaymentLines,
+  ].sort((a, b) => new Date(a.date) - new Date(b.date));
 
   return res.status(200).json({
     success: true,
@@ -10574,31 +10608,32 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
         to: toDate || "All time",
       },
       summary: {
-        totalTransactions: serviceLines.length,
-        // What you OWE the provider across all service lines.
+        // Debits
         totalCostFromProvider,
-        // What you have already PAID the provider.
-        totalPaidToProvider,
-        // Positive = still owe provider; negative = overpaid.
+
+        // Credits
+        totalWeHavePaid,
+        totalCustomersPaidDirect,
+        totalCredits,
+
+        // Net
         outstandingBalance,
         balanceLabel:
           outstandingBalance > 0
-            ? `Outstanding: ${outstandingBalance}`
+            ? `We owe provider: ${outstandingBalance}`
             : outstandingBalance < 0
-              ? `Overpaid by: ${Math.abs(outstandingBalance)}`
+              ? `Provider holds our profit: ${Math.abs(outstandingBalance)}`
               : "Account settled",
       },
-      lines: serviceLines.sort((a, b) => new Date(a.date) - new Date(b.date)),
+      // Full double-entry ledger for display / export
+      ledger,
     },
     errors: null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Customer statement
-//
-// Fix [8]: Added pagination — previously returned all matching bookings
-// in one unbounded query.
+// Customer Statement
 // ─────────────────────────────────────────────────────────────────────────────
 export const getCustomerStatement = asyncHandler(async (req, res, next) => {
   const { customerName } = req.params;
@@ -10626,7 +10661,6 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
 
   const { limit, skip } = pagination(page, size);
 
-  // Aggregate totals (all pages) and paginated bookings in parallel.
   const [bookings, totalCount, aggregateTotals] = await Promise.all([
     bookingModel
       .find(bookingQuery)
@@ -10636,7 +10670,6 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
       .skip(skip)
       .lean(),
     bookingModel.countDocuments(bookingQuery),
-    // Get grand totals across ALL pages (not just the current page).
     bookingModel.aggregate([
       { $match: bookingQuery },
       {
@@ -10668,10 +10701,10 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // Fetch payments only for the bookings on this page.
   const bookingIds = bookings.map((b) => b._id);
   const payments = await paymentModel
     .find({ booking: { $in: bookingIds } })
+    .populate("providerRecipient", "name")
     .lean();
 
   const paymentsByBooking = {};
@@ -10705,6 +10738,7 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
         amount: p.amount,
         method: p.method,
         date: p.date,
+        paidTo: p.providerRecipient?.name || "Office",
       })),
     };
   });
@@ -10724,7 +10758,6 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
         from: fromDate || "All time",
         to: toDate || "All time",
       },
-      // Grand totals are always across ALL bookings, regardless of page.
       summary: {
         totalBookings: totalCount,
         totalToPay: grand.totalToPay,
@@ -10735,7 +10768,6 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
             ? `Customer owes: ${grand.remainingBalance}`
             : "Account settled",
       },
-      // Pagination metadata
       pagination: {
         page: parseInt(page) || 1,
         totalPages: Math.ceil(totalCount / limit),
@@ -10748,6 +10780,118 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
 });
 </file>
 
+<file path="package.json">
+{
+  "name": "booking",
+  "version": "2.0.0",
+  "description": "Tourism booking management system",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
+    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/unit",
+    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/integration",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage"
+  },
+  "type": "module",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cloudinary": "^2.8.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.3.2",
+    "helmet": "^8.1.0",
+    "joi": "^18.0.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.1.2",
+    "multer": "^2.0.2",
+    "nanoid": "^5.1.6",
+    "nodemailer": "^7.0.12"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^10.0.0",
+    "supertest": "^7.0.0"
+  }
+}
+</file>
+
+<file path="src/modules/booking/booking.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as bookingController from "./controller/booking.controller.js";
+import * as validators from "./booking.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+router.post(
+  "/create",
+  auth(endpoint.booking_manage),
+  validation(validators.createBooking),
+  bookingController.createBooking,
+);
+
+// Feature [3] + Fix [5]: Added query validation (catches invalid ObjectIds
+// before they reach MongoDB and cause a CastError 500).
+router.get(
+  "/getAll",
+  auth(endpoint.booking_view),
+  validation(validators.getAllBookingsQuery),
+  bookingController.getAllBookings,
+);
+
+router.get(
+  "/get/:id",
+  auth(endpoint.booking_view),
+  validation(validators.bookingIdParam),
+  bookingController.getBookingById,
+);
+
+router.patch(
+  "/edit/:id",
+  auth(endpoint.booking_manage),
+  validation(validators.updateBooking),
+  bookingController.updateBooking,
+);
+
+router.patch(
+  "/:id/addService",
+  auth(endpoint.booking_manage),
+  validation(validators.addService),
+  bookingController.addServiceToBooking,
+);
+
+router.patch(
+  "/:id/remove",
+  auth(endpoint.booking_manage),
+  validation(validators.removeService),
+  bookingController.removeServiceFromBooking,
+);
+
+router.delete(
+  "/delete/:id",
+  auth(endpoint.booking_delete),
+  validation(validators.bookingIdParam),
+  bookingController.deleteBooking,
+);
+
+router.patch(
+  "/:id/status",
+  auth(endpoint.booking_manage),
+  bookingController.editStatus,
+);
+
+export default router;
+</file>
+
 <file path="src/modules/booking/controller/booking.controller.js">
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
@@ -10758,8 +10902,6 @@ import { notifyBookingStatusChanged } from "../../../services/notification.js";
 import { pagination } from "../../../services/pagination.js";
 import mongoose from "mongoose";
 
-// Fields that must never be overwritten via updateBooking.
-// These are computed values managed by the pre-save hook and payment logic.
 const PROTECTED_BOOKING_FIELDS = [
   "bookingID",
   "createdBy",
@@ -10770,32 +10912,17 @@ const PROTECTED_BOOKING_FIELDS = [
   "totalProfit",
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Validates that every sub-service provider ID referenced in the booking body
- * actually exists in the Provider collection.
- *
- * Returns null when all IDs are valid; returns an Error when any are missing.
- * Designed to be called with `next(validateSubProviders(...))` so it short-
- * circuits the controller immediately.
- *
- * FIX: Previously the controller only checked the main `provider` field.
- * Hotel, car rental, and trip driver providers were never validated against the
- * database — an invalid ObjectId that passed Joi format checks (valid 24-hex
- * string but non-existent document) would silently persist as an orphaned
- * reference inside the booking sub-document.
- *
- * @param {object} data - Parsed request body (post-Joi-validation).
- * @returns {Error|null}
+ * Confirms every sub-service provider ID exists in the DB.
+ * Returns an Error (to pass to next()) or null when all are valid.
  */
 const validateSubProviders = async (data) => {
   const subProviderIds = [
     ...(data.accommodations || []).map((a) => a.hotel),
     ...(data.carRentals || []).map((c) => c.provider),
-    ...(data.tripsWithDrivers || []).map((t) => t.provider),
+    ...(data.carWithDriver || []).map((t) => t.provider), // renamed
   ].filter(Boolean);
 
   if (subProviderIds.length === 0) return null;
@@ -10807,7 +10934,7 @@ const validateSubProviders = async (data) => {
 
   if (foundCount !== uniqueIds.length) {
     const err = new Error(
-      "One or more service providers (hotel, car rental, or driver company) " +
+      "One or more service providers (hotel, car rental, or car-with-driver company) " +
         "do not exist. Verify all provider IDs before submitting.",
     );
     err.cause = 404;
@@ -10823,12 +10950,10 @@ const validateSubProviders = async (data) => {
 export const createBooking = asyncHandler(async (req, res, next) => {
   const data = req.body;
 
-  // Validate main provider.
   const providerExists = await providerModel.findById(data.provider);
   if (!providerExists)
     return next(new Error("Main Provider not found", { cause: 404 }));
 
-  // FIX: Validate all sub-service provider references before touching the DB.
   const subProviderError = await validateSubProviders(data);
   if (subProviderError) return next(subProviderError);
 
@@ -10894,11 +11019,7 @@ export const getAllBookings = asyncHandler(async (req, res) => {
 
   const query = {};
 
-  // Numeric bookingID filter (exact match on the human-readable sequence number).
   if (bookingID) query.bookingID = parseInt(bookingID);
-
-  // provider is already validated as a valid ObjectId by Joi (getAllBookingsQuery
-  // schema) so no CastError can reach MongoDB.
   if (provider) query.provider = provider;
   if (status) query.status = status;
   if (paymentStatus) query.paymentStatus = paymentStatus;
@@ -10961,17 +11082,17 @@ export const getAllBookings = asyncHandler(async (req, res) => {
 // Get booking by ID
 // ─────────────────────────────────────────────────────────────────────────────
 export const getBookingById = asyncHandler(async (req, res, next) => {
-  const booking = await bookingModel
-    .findById(req.params.id)
-    .populate(
-      "provider accommodations.hotel carRentals.provider tripsWithDrivers.provider createdBy",
-    );
+  const booking = await bookingModel.findById(req.params.id).populate(
+    // renamed: carWithDriver.provider
+    "provider accommodations.hotel carRentals.provider carWithDriver.provider createdBy",
+  );
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
   const payments = await paymentModel
     .find({ booking: booking._id })
     .populate("recordedBy", "userName")
+    .populate("providerRecipient", "name") // surface direct-payment recipient
     .sort({ date: -1 });
 
   return res.status(200).json({
@@ -10989,14 +11110,13 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const data = req.body;
 
-  // Populate createdBy so we have the email for notifications.
   const booking = await bookingModel
     .findById(id)
     .populate("createdBy", "userName email");
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
   const oldStatus = booking.status;
-  const serviceArrays = ["accommodations", "carRentals", "tripsWithDrivers"];
+  const serviceArrays = ["accommodations", "carRentals", "carWithDriver"]; // renamed
 
   Object.keys(data).forEach((key) => {
     if (PROTECTED_BOOKING_FIELDS.includes(key)) return;
@@ -11029,7 +11149,6 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
 
   await booking.save();
 
-  // Notify the booking creator when status changes.
   const newStatus = booking.status;
   if (data.status && data.status !== oldStatus) {
     await notifyBookingStatusChanged(booking, oldStatus, newStatus);
@@ -11064,11 +11183,7 @@ export const addServiceToBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const { serviceType, serviceData } = req.body;
 
-  const validServiceTypes = [
-    "accommodations",
-    "carRentals",
-    "tripsWithDrivers",
-  ];
+  const validServiceTypes = ["accommodations", "carRentals", "carWithDriver"]; // renamed
   if (!validServiceTypes.includes(serviceType)) {
     return next(new Error("Invalid service type", { cause: 400 }));
   }
@@ -11076,9 +11191,6 @@ export const addServiceToBooking = asyncHandler(async (req, res, next) => {
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  // FIX: Validate the service provider reference before touching the booking.
-  // Previously this was not checked at all, allowing orphaned references to be
-  // pushed into the sub-document array.
   const providerKey = serviceType === "accommodations" ? "hotel" : "provider";
   const serviceProviderId = serviceData[providerKey];
 
@@ -11088,11 +11200,9 @@ export const addServiceToBooking = asyncHandler(async (req, res, next) => {
       .select("_id");
     if (!exists) {
       return next(
-        new Error(
-          `Service provider ${serviceProviderId} does not exist. ` +
-            `Cannot add service to booking.`,
-          { cause: 404 },
-        ),
+        new Error(`Service provider ${serviceProviderId} does not exist.`, {
+          cause: 404,
+        }),
       );
     }
   }
@@ -11139,15 +11249,8 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   const pKey = serviceType === "accommodations" ? "hotel" : "provider";
   const providerId = serviceItem[pKey]?.toString();
 
-  // BUG FIX: Do NOT decrement the sub-provider's currentSequence.
-  //
-  // currentSequence is a HIGH-WATER MARK — the highest serviceNumber ever
-  // issued to that provider. Decrementing it causes the next service added for
-  // that provider to receive the same number as an existing service on another
-  // booking, which is a data integrity violation.
-  //
-  // The old code: Provider.findByIdAndUpdate(providerId, { $inc: { currentSequence: -1 } })
-  // is removed entirely. Service numbers are permanent once issued.
+  // currentSequence is a high-water mark — never decrement on remove.
+  // Issued service numbers are permanent to avoid duplicate-key collisions.
 
   await logModel.create({
     user: req.user._id,
@@ -11183,31 +11286,10 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
 
   const Provider = mongoose.model("Provider");
 
-  // BUG FIX: Only decrement `totalBookings` (a stats counter).
-  //
-  // DO NOT decrement `currentSequence`.
-  //
-  // currentSequence is the high-water mark for bookingID generation.
-  // If we decrement it after a deletion, the next booking created for this
-  // provider receives a bookingID that may already exist on another booking
-  // document, triggering an E11000 duplicate key error on the
-  // { provider_1_bookingID_1 } unique index.
-  //
-  // Example of the bug this fixes:
-  //   B1→seq=1, B2→seq=2, B3→seq=3
-  //   Delete B2 → (old buggy code) seq decremented to 2
-  //   Create B4 → seq incremented to 3 → DUPLICATE KEY (B3 still has bookingID=3)
-  //
-  // Correct behaviour: seq stays at 3, B4 gets bookingID=4.
+  // Decrement stats only — currentSequence (the high-water mark) is never touched.
   await Provider.findByIdAndUpdate(booking.provider, {
-    $inc: { totalBookings: -1 }, // ← stats only; currentSequence untouched
+    $inc: { totalBookings: -1 },
   });
-
-  // BUG FIX: Same reasoning applies to sub-providers referenced in services.
-  // Their currentSequence values are also high-water marks and must not be
-  // decremented. We only tracked these for sequence generation purposes, and
-  // issued serviceNumbers are permanent.
-  // (The old loop that decremented sub-provider currentSequence is removed.)
 
   await paymentModel.deleteMany({ booking: id });
 
@@ -11240,18 +11322,19 @@ export const editStatus = asyncHandler(async (req, res, next) => {
 
   const booking = await bookingModel.findByIdAndUpdate(
     req.params.id,
-    {
-      status: newStatus,
-    },
-    {
-      new: true,
-      runValidators: true,
-    },
+    { status: newStatus },
+    { new: true, runValidators: true },
   );
-  if (newStatus == "completed" && booking.paymentStatus !== "paid")
-    return next(new Error("Can't make the booking completed while there is a remaining balance", { cause: 404 }));
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  if (newStatus === "completed" && booking.paymentStatus !== "paid")
+    return next(
+      new Error(
+        "Can't mark booking as completed while there is a remaining balance",
+        { cause: 400 },
+      ),
+    );
 
   return res.status(200).json({
     success: true,

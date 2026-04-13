@@ -39,7 +39,7 @@ const makeDoc = (overrides = {}) => ({
   isNew: true,
   accommodations: [],
   carRentals: [],
-  tripsWithDrivers: [],
+  carWithDriver: [],
   totalPaid: 0,
   totalToPay: 0,
   totalToBuy: 0,
@@ -87,11 +87,11 @@ describe("calculateBookingTotals()", () => {
       expect(doc.totalProfit).toBe(200);
     });
 
-    it("combines accommodations + carRentals + tripsWithDrivers totals", () => {
+    it("combines accommodations + carRentals + carWithDriver totals", () => {
       const doc = makeDoc({
         accommodations: [{ sell: 600, buy: 400, profit: 0 }],
         carRentals: [{ sell: 320, buy: 200, profit: 0 }],
-        tripsWithDrivers: [{ sell: 150, buy: 100, profit: 0 }],
+        carWithDriver: [{ sell: 150, buy: 100, profit: 0 }],
       });
       calculateBookingTotals(doc);
       expect(doc.totalToPay).toBe(1070);
@@ -125,18 +125,18 @@ describe("calculateBookingTotals()", () => {
       const doc = makeDoc({
         accommodations: [acc],
         carRentals: [car],
-        tripsWithDrivers: [trip],
+        carWithDriver: [trip],
       });
       calculateBookingTotals(doc);
       expect(doc.accommodations[0].profit).toBe(200);
       expect(doc.carRentals[0].profit).toBe(120);
-      expect(doc.tripsWithDrivers[0].profit).toBe(70);
+      expect(doc.carWithDriver[0].profit).toBe(70);
     });
 
     it("handles missing service arrays gracefully — no crash when carRentals is undefined", () => {
       const doc = makeDoc();
       delete doc.carRentals;
-      delete doc.tripsWithDrivers;
+      delete doc.carWithDriver;
       expect(() => calculateBookingTotals(doc)).not.toThrow();
       expect(doc.totalToPay).toBe(0);
     });
@@ -276,7 +276,7 @@ describe("assignBookingSequences()", () => {
     provider: providerId,
     accommodations: [],
     carRentals: [],
-    tripsWithDrivers: [],
+    carWithDriver: [],
     _id: new mongoose.Types.ObjectId(),
     isModified: (field) =>
       field === "provider" && !!overrides._providerModified,
@@ -390,6 +390,6 @@ describe("assignBookingSequences()", () => {
     await assignBookingSequences(doc);
     expect(doc.markModified).toHaveBeenCalledWith("accommodations");
     expect(doc.markModified).toHaveBeenCalledWith("carRentals");
-    expect(doc.markModified).toHaveBeenCalledWith("tripsWithDrivers");
+    expect(doc.markModified).toHaveBeenCalledWith("carWithDriver");
   });
 });

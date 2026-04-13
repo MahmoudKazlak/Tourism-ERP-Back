@@ -59,7 +59,7 @@ export const buildCarRental = (providerId, overrides = {}) => ({
   ...overrides,
 });
 
-export const buildTrip = (providerId, overrides = {}) => ({
+export const buildCarWithDriver = (providerId, overrides = {}) => ({
   provider: providerId.toString(),
   driverName: "Ahmad",
   brand: "Mercedes",

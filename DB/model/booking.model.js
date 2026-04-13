@@ -64,7 +64,8 @@ const bookingSchema = new mongoose.Schema(
         profit: { type: Number, default: 0 },
       },
     ],
-    tripsWithDrivers: [
+    // Renamed from tripsWithDrivers for domain consistency.
+    carWithDriver: [
       {
         serviceNumber: Number,
         provider: { type: mongoose.Schema.Types.ObjectId, ref: "Provider" },
@@ -80,12 +81,8 @@ const bookingSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// Unique compound index prevents race-condition duplicate bookingIDs
-// for the same provider on concurrent inserts.
 bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
 
-// Pre-save hook is now thin: sequence and financial logic live in
-// src/services/bookingService.js for testability.
 bookingSchema.pre("save", async function () {
   await assignBookingSequences(this);
   calculateBookingTotals(this);

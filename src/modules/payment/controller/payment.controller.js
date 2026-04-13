@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
 import { withTransaction } from "../../../services/transaction.js";
@@ -9,6 +10,8 @@ import { notifyPaymentRecorded } from "../../../services/notification.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: recalculate totalPaid from all payments and sync the booking.
+// Counts both office payments and direct-to-provider payments —
+// both clear the customer's obligation.
 // ─────────────────────────────────────────────────────────────────────────────
 const syncBookingPayments = async (bookingId, session = null) => {
   const aggregateOptions = session ? { session } : {};
@@ -54,23 +57,63 @@ const syncBookingPayments = async (bookingId, session = null) => {
   };
 };
 
+/**
+ * Returns the set of provider IDs directly referenced by a booking
+ * (main provider + all service providers). Used to validate direct payments.
+ */
+const getLinkedProviderIds = (booking) => {
+  return new Set([
+    booking.provider.toString(),
+    ...(booking.accommodations || [])
+      .map((a) => a.hotel?.toString())
+      .filter(Boolean),
+    ...(booking.carRentals || [])
+      .map((c) => c.provider?.toString())
+      .filter(Boolean),
+    ...(booking.carWithDriver || []) // renamed
+      .map((t) => t.provider?.toString())
+      .filter(Boolean),
+  ]);
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Add payment
 // ─────────────────────────────────────────────────────────────────────────────
 export const addPayment = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
-  const { amount, date, method, notes } = req.body;
+  const { amount, date, method, notes, providerRecipient } = req.body;
 
-  // Populate createdBy to get the email for notification.
   const booking = await bookingModel
     .findById(id)
-    .populate("createdBy", "userName email")
-    .select("bookingID customers totalToPay totalPaid paymentStatus createdBy");
+    .populate("createdBy", "userName email");
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
   if (booking.paymentStatus === "paid") {
     return next(new Error("Booking is already fully paid", { cause: 400 }));
+  }
+
+  // ── Validate direct-payment recipient ────────────────────────────────────
+  if (providerRecipient) {
+    const providerExists = await providerModel
+      .findById(providerRecipient)
+      .select("_id name");
+    if (!providerExists) {
+      return next(new Error("Provider not found", { cause: 404 }));
+    }
+
+    // The recipient must be a provider already referenced in this booking.
+    // This prevents phantom ledger entries on unrelated providers.
+    const linkedIds = getLinkedProviderIds(booking);
+    if (!linkedIds.has(providerRecipient.toString())) {
+      return next(
+        new Error(
+          "The specified provider is not linked to this booking. " +
+            "Direct payments can only be recorded for providers referenced in the booking's services.",
+          { cause: 400 },
+        ),
+      );
+    }
   }
 
   const numAmount = Number(amount);
@@ -85,6 +128,7 @@ export const addPayment = asyncHandler(async (req, res, next) => {
           date: date || new Date(),
           method: method || "cash",
           notes,
+          providerRecipient: providerRecipient || null,
           recordedBy: req.user._id,
         },
       ],
@@ -97,12 +141,15 @@ export const addPayment = asyncHandler(async (req, res, next) => {
       [
         {
           user: req.user._id,
-          action: "ADD_PAYMENT",
+          action: providerRecipient
+            ? "ADD_DIRECT_PROVIDER_PAYMENT"
+            : "ADD_PAYMENT",
           details: {
             bookingID: booking.bookingID,
             paymentId: payment[0]._id,
             amount: numAmount,
             method,
+            providerRecipient: providerRecipient || null,
             newTotalPaid: updated.totalPaid,
             newRemainingBalance: updated.remainingBalance,
             newPaymentStatus: updated.paymentStatus,
@@ -115,7 +162,6 @@ export const addPayment = asyncHandler(async (req, res, next) => {
     return { payment: payment[0], bookingSummary: updated };
   });
 
-  // Feature [6]: Send email notification — best-effort, outside transaction.
   await notifyPaymentRecorded(
     booking,
     result.payment,
@@ -125,7 +171,9 @@ export const addPayment = asyncHandler(async (req, res, next) => {
 
   return res.status(201).json({
     success: true,
-    message: "Payment added successfully",
+    message: providerRecipient
+      ? "Direct provider payment recorded successfully"
+      : "Payment added successfully",
     data: result,
     errors: null,
   });
@@ -148,6 +196,7 @@ export const getPaymentsByBooking = asyncHandler(async (req, res, next) => {
   const payments = await paymentModel
     .find({ booking: id })
     .populate("recordedBy", "userName")
+    .populate("providerRecipient", "name type")
     .sort({ date: -1 });
 
   return res.status(200).json({
@@ -168,7 +217,7 @@ export const getPaymentsByBooking = asyncHandler(async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Get all payments (with filtering — for accounting)
+// Get all payments (accounting overview)
 // ─────────────────────────────────────────────────────────────────────────────
 export const getAllPayments = asyncHandler(async (req, res) => {
   const { method, fromDate, toDate, page, size } = req.query;
@@ -192,6 +241,7 @@ export const getAllPayments = asyncHandler(async (req, res) => {
       .find(query)
       .populate("booking", "bookingID customers status")
       .populate("recordedBy", "userName")
+      .populate("providerRecipient", "name type")
       .sort({ date: -1 })
       .limit(limit)
       .skip(skip),
@@ -235,11 +285,14 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
       [
         {
           user: req.user._id,
-          action: "DELETE_PAYMENT",
+          action: payment.providerRecipient
+            ? "DELETE_DIRECT_PROVIDER_PAYMENT"
+            : "DELETE_PAYMENT",
           details: {
             paymentId,
             bookingID: payment.bookingID,
             deletedAmount,
+            providerRecipient: payment.providerRecipient || null,
             newTotalPaid: updated.totalPaid,
             newPaymentStatus: updated.paymentStatus,
           },

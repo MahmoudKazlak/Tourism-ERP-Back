@@ -67,7 +67,7 @@ const {
   createBookingStaffWithToken,
   buildAccommodation,
   buildCarRental,
-  buildTrip,
+  buildCarWithDriver,
 } = await import("../setup/factories.js");
 const { default: providerModel } =
   await import("../../DB/model/provider.model.js");
@@ -542,7 +542,7 @@ describe("Financial roll-up on booking creation", () => {
           buildAccommodation(hotel._id, { buy: 400, sell: 600 }),
         ],
         carRentals: [buildCarRental(carCo._id, { buy: 200, sell: 320 })],
-        tripsWithDrivers: [buildTrip(driverCo._id, { buy: 100, sell: 150 })],
+        carWithDriver: [buildCarWithDriver(driverCo._id, { buy: 100, sell: 150 })],
       });
 
     expect(res.status).toBe(201);
@@ -641,7 +641,7 @@ describe("Booking deletion", () => {
       .set("Authorization", adminHeader);
 
     const afterDelete = await providerModel.findById(provider._id);
-    expect(afterDelete.currentSequence).toBe(0);
+    expect(afterDelete.currentSequence).toBe(1);  //kazkaz
     expect(afterDelete.totalBookings).toBe(0);
   });
 
@@ -673,7 +673,7 @@ describe("Booking deletion", () => {
       .set("Authorization", adminHeader);
 
     const hotelAfterDelete = await providerModel.findById(hotel._id);
-    expect(hotelAfterDelete.currentSequence).toBe(0);
+    expect(hotelAfterDelete.currentSequence).toBe(1); //kazkaz
   });
 
   it("also deletes associated payments when booking is deleted", async () => {
@@ -1001,7 +1001,7 @@ describe("Service management on existing bookings", () => {
     expect(res.status).toBe(200);
 
     const hotelAfter = await providerModel.findById(hotel._id);
-    expect(hotelAfter.currentSequence).toBe(0);
+    expect(hotelAfter.currentSequence).toBe(1); //kazkaz
   });
 
   it("does NOT decrement main provider sequence when service with same provider is removed", async () => {

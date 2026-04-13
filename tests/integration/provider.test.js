@@ -55,7 +55,7 @@ const {
   createProvider,
   buildAccommodation,
   buildCarRental,
-  buildTrip,
+  buildCarWithDriver,
 } = await import("../setup/factories.js");
 const { default: providerModel } =
   await import("../../DB/model/provider.model.js");
@@ -115,7 +115,7 @@ const createBookingLinkingProvider = async (
       type: "tourism",
     });
     body.provider = mainProvider._id.toString();
-    body.tripsWithDrivers = [buildTrip(providerId)];
+    body.carWithDriver = [buildCarWithDriver(providerId)];
   }
 
   return request(app)
@@ -453,7 +453,7 @@ describe("Provider — DELETE /delete/:id", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 400 when provider is linked as tripsWithDrivers.provider", async () => {
+  it("returns 400 when provider is linked as carWithDriver.provider", async () => {
     const driverCo = await createProvider({
       name: "Driver Co Linked",
       type: "driver_company",

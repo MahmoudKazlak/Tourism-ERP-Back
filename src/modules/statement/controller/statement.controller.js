@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
@@ -6,10 +7,16 @@ import providerPaymentModel from "../../../../DB/model/providerPayment.model.js"
 import { pagination } from "../../../services/pagination.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Provider statement
+// Provider Current-Account Statement
 //
-// Feature [1]: Now also returns totalPaidToProvider from the
-// ProviderPayment collection, completing both sides of the ledger.
+// Ledger formula:
+//   Balance = Σ(buy prices of all services)         ← our total obligation
+//           − Σ(ProviderPayment.amount)              ← we paid them directly
+//           − Σ(Payment.amount where providerRecipient = X)
+//                                                   ← customer paid them on our behalf
+//
+// A positive balance means we still owe them.
+// A negative balance means they are holding our profit as a receivable.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getProviderStatement = asyncHandler(async (req, res, next) => {
   const { providerId } = req.params;
@@ -18,6 +25,7 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
   const provider = await providerModel.findById(providerId);
   if (!provider) return next(new Error("Provider not found", { cause: 404 }));
 
+  // Build date filter (shared shape, applied to different fields per collection)
   const dateFilter = {};
   if (fromDate) dateFilter.$gte = new Date(fromDate);
   if (toDate) {
@@ -25,83 +33,189 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
     to.setHours(23, 59, 59, 999);
     dateFilter.$lte = to;
   }
+  const hasDateFilter = Object.keys(dateFilter).length > 0;
 
+  // Booking query: any booking that references this provider in any role
   const bookingQuery = {
     $or: [
       { provider: providerId },
       { "accommodations.hotel": providerId },
       { "carRentals.provider": providerId },
-      { "tripsWithDrivers.provider": providerId },
+      { "carWithDriver.provider": providerId }, // renamed
     ],
   };
-  if (Object.keys(dateFilter).length) bookingQuery.createdAt = dateFilter;
+  if (hasDateFilter) bookingQuery.createdAt = dateFilter;
 
-  // Run bookings and provider payments queries in parallel.
+  // ProviderPayment query: money we paid out to this provider
   const providerPaymentQuery = { provider: providerId };
-  if (Object.keys(dateFilter).length) providerPaymentQuery.date = dateFilter;
+  if (hasDateFilter) providerPaymentQuery.date = dateFilter;
 
-  const [bookings, providerPaymentsResult] = await Promise.all([
-    bookingModel
-      .find(bookingQuery)
-      .populate(
-        "accommodations.hotel carRentals.provider tripsWithDrivers.provider",
-      )
-      .lean(),
+  // Direct customer payment query: customer paid this provider on our behalf
+  const directPaymentQuery = {
+    providerRecipient: new mongoose.Types.ObjectId(providerId),
+  };
+  if (hasDateFilter) directPaymentQuery.date = dateFilter;
+
+  const [
+    bookings,
+    providerPaymentsAgg,
+    providerPaymentsList,
+    directPaymentsAgg,
+    directPaymentsList,
+  ] = await Promise.all([
+    bookingModel.find(bookingQuery).lean(),
+
+    // Aggregate: total we have paid to provider
     providerPaymentModel.aggregate([
       { $match: providerPaymentQuery },
-      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+        },
+      },
     ]),
+
+    // List of our payments to provider (for the transaction ledger)
+    providerPaymentModel
+      .find(providerPaymentQuery)
+      .populate("recordedBy", "userName")
+      .sort({ date: 1 })
+      .lean(),
+
+    // Aggregate: total customer paid directly to this provider
+    paymentModel.aggregate([
+      { $match: directPaymentQuery },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+
+    // List of direct customer payments (for the transaction ledger)
+    paymentModel
+      .find(directPaymentQuery)
+      .populate("booking", "bookingID customers")
+      .populate("recordedBy", "userName")
+      .sort({ date: 1 })
+      .lean(),
   ]);
 
+  // ── Build service debit lines (what we owe for each service) ───────────────
   const serviceLines = [];
-  let totalCostFromProvider = 0;
+
+  const addLines = (items, serviceType, providerKey, labelFn) => {
+    items?.forEach((item) => {
+      const pid =
+        item[providerKey]?._id?.toString() || item[providerKey]?.toString();
+      if (pid !== providerId) return;
+
+      const buy = Number(item.buy) || 0;
+      serviceLines.push({
+        type: "SERVICE_DEBIT",
+        serviceType,
+        debit: buy,
+        credit: 0,
+      });
+    });
+  };
 
   bookings.forEach((booking) => {
-    const addLines = (items, serviceType, providerKey, getLabel) => {
-      items?.forEach((item) => {
-        const pid =
-          item[providerKey]?._id?.toString() || item[providerKey]?.toString();
-        if (pid !== providerId) return;
-
-        const buy = Number(item.buy) || 0;
-        totalCostFromProvider += buy;
-
-        serviceLines.push({
-          bookingID: booking.bookingID,
-          bookingMongoId: booking._id,
-          customer: booking.customers?.[0]?.name || "Unknown",
-          date: booking.createdAt,
-          serviceType,
-          label: getLabel(item),
-          costToPay: buy,
-        });
-      });
+    const meta = {
+      bookingID: booking.bookingID,
+      bookingMongoId: booking._id,
+      customer: booking.customers?.[0]?.name || "Unknown",
+      date: booking.createdAt,
     };
 
-    addLines(
-      booking.accommodations,
-      "Hotel",
-      "hotel",
-      (a) =>
-        `${a.roomType || ""} - ${a.board || ""} - ${a.duration || 0} Nights`,
-    );
-    addLines(
-      booking.carRentals,
-      "Car Rental",
-      "provider",
-      (c) =>
-        `${c.brand || ""} - ${c.pickUp ? new Date(c.pickUp).toLocaleDateString("ar") : "N/A"}`,
-    );
-    addLines(
-      booking.tripsWithDrivers,
-      "Trip",
-      "provider",
-      (t) => `${t.brand || ""} - Driver: ${t.driverName || ""}`,
-    );
+    (booking.accommodations || []).forEach((item) => {
+      const pid = item.hotel?._id?.toString() || item.hotel?.toString();
+      if (pid !== providerId) return;
+      serviceLines.push({
+        ...meta,
+        type: "SERVICE_DEBIT",
+        serviceType: "Hotel Accommodation",
+        description: `${item.roomType || ""} / ${item.board || ""} / ${item.duration || 0} Nights`,
+        debit: Number(item.buy) || 0,
+        credit: 0,
+      });
+    });
+
+    (booking.carRentals || []).forEach((item) => {
+      const pid = item.provider?._id?.toString() || item.provider?.toString();
+      if (pid !== providerId) return;
+      serviceLines.push({
+        ...meta,
+        type: "SERVICE_DEBIT",
+        serviceType: "Car Rental",
+        description: `${item.brand || ""} — ${
+          item.pickUp ? new Date(item.pickUp).toLocaleDateString() : "N/A"
+        }`,
+        debit: Number(item.buy) || 0,
+        credit: 0,
+      });
+    });
+
+    // renamed: carWithDriver
+    (booking.carWithDriver || []).forEach((item) => {
+      const pid = item.provider?._id?.toString() || item.provider?.toString();
+      if (pid !== providerId) return;
+      serviceLines.push({
+        ...meta,
+        type: "SERVICE_DEBIT",
+        serviceType: "Car with Driver",
+        description: `${item.brand || ""} — Driver: ${item.driverName || ""}`,
+        debit: Number(item.buy) || 0,
+        credit: 0,
+      });
+    });
   });
 
-  const totalPaidToProvider = providerPaymentsResult[0]?.total || 0;
-  const outstandingBalance = totalCostFromProvider - totalPaidToProvider;
+  // ── Build credit lines (reductions to our liability) ──────────────────────
+
+  // Credits: payments we made directly to the provider
+  const ourPaymentLines = providerPaymentsList.map((p) => ({
+    date: p.date,
+    type: "OUR_PAYMENT",
+    description: `Payment by ${p.recordedBy?.userName || "office"}${p.reference ? ` — Ref: ${p.reference}` : ""}`,
+    debit: 0,
+    credit: Number(p.amount),
+    method: p.method,
+    reference: p.reference || null,
+  }));
+
+  // Credits: customer paid provider directly on our behalf
+  const directPaymentLines = directPaymentsList.map((p) => {
+    const bookingID = p.booking?.bookingID;
+    const customer = p.booking?.customers?.[0]?.name || "Unknown";
+    return {
+      date: p.date,
+      type: "CUSTOMER_DIRECT_PAYMENT",
+      description: `Customer "${customer}" paid provider directly (Booking #${bookingID})`,
+      debit: 0,
+      credit: Number(p.amount),
+      method: p.method,
+      bookingID,
+    };
+  });
+
+  // ── Totals ─────────────────────────────────────────────────────────────────
+  const totalCostFromProvider = serviceLines.reduce((s, l) => s + l.debit, 0);
+  const totalWeHavePaid = providerPaymentsAgg[0]?.total || 0;
+  const totalCustomersPaidDirect = directPaymentsAgg[0]?.total || 0;
+  const totalCredits = totalWeHavePaid + totalCustomersPaidDirect;
+  const outstandingBalance = totalCostFromProvider - totalCredits;
+
+  // ── Unified chronological ledger ───────────────────────────────────────────
+  const ledger = [
+    ...serviceLines,
+    ...ourPaymentLines,
+    ...directPaymentLines,
+  ].sort((a, b) => new Date(a.date) - new Date(b.date));
 
   return res.status(200).json({
     success: true,
@@ -118,31 +232,32 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
         to: toDate || "All time",
       },
       summary: {
-        totalTransactions: serviceLines.length,
-        // What you OWE the provider across all service lines.
+        // Debits
         totalCostFromProvider,
-        // What you have already PAID the provider.
-        totalPaidToProvider,
-        // Positive = still owe provider; negative = overpaid.
+
+        // Credits
+        totalWeHavePaid,
+        totalCustomersPaidDirect,
+        totalCredits,
+
+        // Net
         outstandingBalance,
         balanceLabel:
           outstandingBalance > 0
-            ? `Outstanding: ${outstandingBalance}`
+            ? `We owe provider: ${outstandingBalance}`
             : outstandingBalance < 0
-              ? `Overpaid by: ${Math.abs(outstandingBalance)}`
+              ? `Provider holds our profit: ${Math.abs(outstandingBalance)}`
               : "Account settled",
       },
-      lines: serviceLines.sort((a, b) => new Date(a.date) - new Date(b.date)),
+      // Full double-entry ledger for display / export
+      ledger,
     },
     errors: null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Customer statement
-//
-// Fix [8]: Added pagination — previously returned all matching bookings
-// in one unbounded query.
+// Customer Statement
 // ─────────────────────────────────────────────────────────────────────────────
 export const getCustomerStatement = asyncHandler(async (req, res, next) => {
   const { customerName } = req.params;
@@ -170,7 +285,6 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
 
   const { limit, skip } = pagination(page, size);
 
-  // Aggregate totals (all pages) and paginated bookings in parallel.
   const [bookings, totalCount, aggregateTotals] = await Promise.all([
     bookingModel
       .find(bookingQuery)
@@ -180,7 +294,6 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
       .skip(skip)
       .lean(),
     bookingModel.countDocuments(bookingQuery),
-    // Get grand totals across ALL pages (not just the current page).
     bookingModel.aggregate([
       { $match: bookingQuery },
       {
@@ -212,10 +325,10 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // Fetch payments only for the bookings on this page.
   const bookingIds = bookings.map((b) => b._id);
   const payments = await paymentModel
     .find({ booking: { $in: bookingIds } })
+    .populate("providerRecipient", "name")
     .lean();
 
   const paymentsByBooking = {};
@@ -249,6 +362,7 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
         amount: p.amount,
         method: p.method,
         date: p.date,
+        paidTo: p.providerRecipient?.name || "Office",
       })),
     };
   });
@@ -268,7 +382,6 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
         from: fromDate || "All time",
         to: toDate || "All time",
       },
-      // Grand totals are always across ALL bookings, regardless of page.
       summary: {
         totalBookings: totalCount,
         totalToPay: grand.totalToPay,
@@ -279,7 +392,6 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
             ? `Customer owes: ${grand.remainingBalance}`
             : "Account settled",
       },
-      // Pagination metadata
       pagination: {
         page: parseInt(page) || 1,
         totalPages: Math.ceil(totalCount / limit),

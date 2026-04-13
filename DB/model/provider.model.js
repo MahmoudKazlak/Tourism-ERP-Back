@@ -8,6 +8,7 @@ const providerSchema = new mongoose.Schema(
       required: true,
     },
     currentSequence: { type: Number, default: 0 },
+    currentBalance: { type: Number, default: 0 },
     totalBookings: { type: Number, default: 0 },
     phone: String,
     address: String,

@@ -14,6 +14,15 @@ export const addPayment = {
       .valid("cash", "bank_transfer", "check", "other")
       .default("cash"),
     notes: Joi.string().trim().max(300).optional().allow(""),
+    /**
+     * Optional. When provided, indicates the customer paid this provider
+     * directly. The booking is still credited (customer settled), but the
+     * provider current-account balance is also reduced by this amount.
+     */
+    providerRecipient: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid provider ID",
+      "string.length": "Invalid provider ID",
+    }),
   }),
   params: Joi.object({
     id: Joi.string().hex().length(24).required().messages({
