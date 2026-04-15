@@ -7,11 +7,10 @@ import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
 import { withTransaction } from "../../../services/transaction.js";
 import { notifyPaymentRecorded } from "../../../services/notification.js";
+import { applyProviderSummaryDelta } from "../../../services/providerSummaryService.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: recalculate totalPaid from all payments and sync the booking.
-// Counts both office payments and direct-to-provider payments —
-// both clear the customer's obligation.
 // ─────────────────────────────────────────────────────────────────────────────
 const syncBookingPayments = async (bookingId, session = null) => {
   const aggregateOptions = session ? { session } : {};
@@ -58,8 +57,8 @@ const syncBookingPayments = async (bookingId, session = null) => {
 };
 
 /**
- * Returns the set of provider IDs directly referenced by a booking
- * (main provider + all service providers). Used to validate direct payments.
+ * Returns the set of provider IDs directly referenced by a booking.
+ * Used to validate that a direct payment recipient is linked to the booking.
  */
 const getLinkedProviderIds = (booking) => {
   return new Set([
@@ -70,7 +69,7 @@ const getLinkedProviderIds = (booking) => {
     ...(booking.carRentals || [])
       .map((c) => c.provider?.toString())
       .filter(Boolean),
-    ...(booking.carWithDriver || []) // renamed
+    ...(booking.carWithDriver || [])
       .map((t) => t.provider?.toString())
       .filter(Boolean),
   ]);
@@ -78,6 +77,12 @@ const getLinkedProviderIds = (booking) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Add payment
+//
+// Provider summary update strategy for direct payments (providerRecipient set):
+//   We intentionally do NOT use a Mongoose hook on the Payment model because
+//   the payment is created inside a transaction. Hooks would fire before the
+//   transaction commits, risking summary drift if the transaction aborts.
+//   Instead, we apply the delta AFTER withTransaction() resolves (post-commit).
 // ─────────────────────────────────────────────────────────────────────────────
 export const addPayment = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
@@ -93,7 +98,7 @@ export const addPayment = asyncHandler(async (req, res, next) => {
     return next(new Error("Booking is already fully paid", { cause: 400 }));
   }
 
-  // ── Validate direct-payment recipient ────────────────────────────────────
+  // ── Validate direct-payment recipient ─────────────────────────────────────
   if (providerRecipient) {
     const providerExists = await providerModel
       .findById(providerRecipient)
@@ -102,8 +107,6 @@ export const addPayment = asyncHandler(async (req, res, next) => {
       return next(new Error("Provider not found", { cause: 404 }));
     }
 
-    // The recipient must be a provider already referenced in this booking.
-    // This prevents phantom ledger entries on unrelated providers.
     const linkedIds = getLinkedProviderIds(booking);
     if (!linkedIds.has(providerRecipient.toString())) {
       return next(
@@ -118,6 +121,7 @@ export const addPayment = asyncHandler(async (req, res, next) => {
 
   const numAmount = Number(amount);
 
+  // ── Execute within transaction ────────────────────────────────────────────
   const result = await withTransaction(async (session) => {
     const payment = await paymentModel.create(
       [
@@ -161,6 +165,14 @@ export const addPayment = asyncHandler(async (req, res, next) => {
 
     return { payment: payment[0], bookingSummary: updated };
   });
+
+  // ── Post-commit: update provider summary (outside transaction) ────────────
+  // Safe here — transaction has committed; if this fails, resync can fix it.
+  if (providerRecipient) {
+    await applyProviderSummaryDelta(providerRecipient, {
+      totalCustomersPaidDirect: numAmount,
+    });
+  }
 
   await notifyPaymentRecorded(
     booking,
@@ -267,32 +279,42 @@ export const getAllPayments = asyncHandler(async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Delete payment
+//
+// Same post-commit strategy as addPayment: apply the reversal delta AFTER
+// the transaction resolves to avoid hook/transaction ordering issues.
 // ─────────────────────────────────────────────────────────────────────────────
 export const deletePayment = asyncHandler(async (req, res, next) => {
   const { paymentId } = req.params;
 
+  // Fetch before transaction so we have providerRecipient and amount available
+  // for the post-commit summary update.
   const payment = await paymentModel.findById(paymentId);
   if (!payment) return next(new Error("Payment not found", { cause: 404 }));
 
+  // Capture before entering transaction (needed post-commit)
+  const recipientId = payment.providerRecipient;
+  const deletedAmount = payment.amount;
+
   const result = await withTransaction(async (session) => {
     const bookingId = payment.booking;
-    const deletedAmount = payment.amount;
 
-    await paymentModel.findByIdAndDelete(paymentId, { session });
+    // Use model-level deleteOne with session (safe with Mongoose 7+)
+    await paymentModel.deleteOne({ _id: paymentId }, { session });
+
     const updated = await syncBookingPayments(bookingId, session);
 
     await logModel.create(
       [
         {
           user: req.user._id,
-          action: payment.providerRecipient
+          action: recipientId
             ? "DELETE_DIRECT_PROVIDER_PAYMENT"
             : "DELETE_PAYMENT",
           details: {
             paymentId,
             bookingID: payment.bookingID,
             deletedAmount,
-            providerRecipient: payment.providerRecipient || null,
+            providerRecipient: recipientId || null,
             newTotalPaid: updated.totalPaid,
             newPaymentStatus: updated.paymentStatus,
           },
@@ -303,6 +325,13 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
 
     return { bookingSummary: updated };
   });
+
+  // ── Post-commit: reverse the provider summary increment ───────────────────
+  if (recipientId) {
+    await applyProviderSummaryDelta(recipientId, {
+      totalCustomersPaidDirect: -deletedAmount,
+    });
+  }
 
   return res.status(200).json({
     success: true,

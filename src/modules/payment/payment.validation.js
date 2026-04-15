@@ -14,12 +14,21 @@ export const addPayment = {
       .valid("cash", "bank_transfer", "check", "other")
       .default("cash"),
     notes: Joi.string().trim().max(300).optional().allow(""),
+
     /**
      * Optional. When provided, indicates the customer paid this provider
-     * directly. The booking is still credited (customer settled), but the
-     * provider current-account balance is also reduced by this amount.
+     * directly instead of paying our office.
+     *
+     * Accounting effects:
+     *   1. booking.totalPaid increases by `amount` → customer's debt is cleared.
+     *   2. In the provider current-account ledger, `amount` is treated as a
+     *      credit: it retires the buy-price debt AND may transfer profit to
+     *      the provider as a receivable they hold for us.
+     *
+     * Must reference a provider that is actually linked to the booking
+     * (enforced in the controller via getLinkedProviderIds).
      */
-    providerRecipient: Joi.string().hex().length(24).required().messages({
+    providerRecipient: Joi.string().hex().length(24).optional().messages({
       "string.hex": "Invalid provider ID",
       "string.length": "Invalid provider ID",
     }),

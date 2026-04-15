@@ -7,8 +7,17 @@ import { endpoint } from "../indexEndpoint.js";
 
 const router = Router();
 
-// FIX [6]: Added Joi validation middleware to create and update routes.
-// Previously these routes accepted any payload without schema validation.
+// ── Static routes before dynamic ones ────────────────────────────────────────
+
+// POST /api/v1/provider/resync-all — rebuild all provider summaries (migration)
+router.post(
+  "/resync-all",
+  auth(endpoint.AdminOnly),
+  providerController.resyncAllProviders,
+);
+
+// ── Standard CRUD ─────────────────────────────────────────────────────────────
+
 router.post(
   "/create",
   auth(endpoint.provider_manage),
@@ -39,6 +48,15 @@ router.delete(
   "/delete/:id",
   auth(endpoint.provider_manage),
   providerController.deleteProvider,
+);
+
+// ── Per-provider resync (placed after /delete/:id intentionally) ─────────────
+
+// POST /api/v1/provider/:id/resync — rebuild a single provider's summary
+router.post(
+  "/:id/resync",
+  auth(endpoint.AdminOnly),
+  providerController.resyncProvider,
 );
 
 export default router;

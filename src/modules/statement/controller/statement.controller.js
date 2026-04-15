@@ -4,126 +4,60 @@ import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 import providerModel from "../../../../DB/model/provider.model.js";
 import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
+import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
 import { pagination } from "../../../services/pagination.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Provider Current-Account Statement
-//
-// Ledger formula:
-//   Balance = Σ(buy prices of all services)         ← our total obligation
-//           − Σ(ProviderPayment.amount)              ← we paid them directly
-//           − Σ(Payment.amount where providerRecipient = X)
-//                                                   ← customer paid them on our behalf
-//
-// A positive balance means we still owe them.
-// A negative balance means they are holding our profit as a receivable.
+// Internal: build the ledger (chronological transaction list) for a provider.
+// Always executed live regardless of date filtering.
 // ─────────────────────────────────────────────────────────────────────────────
-export const getProviderStatement = asyncHandler(async (req, res, next) => {
-  const { providerId } = req.params;
-  const { fromDate, toDate } = req.query;
-
-  const provider = await providerModel.findById(providerId);
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  // Build date filter (shared shape, applied to different fields per collection)
-  const dateFilter = {};
-  if (fromDate) dateFilter.$gte = new Date(fromDate);
-  if (toDate) {
-    const to = new Date(toDate);
-    to.setHours(23, 59, 59, 999);
-    dateFilter.$lte = to;
-  }
+const buildLedger = async (providerId, dateFilter) => {
   const hasDateFilter = Object.keys(dateFilter).length > 0;
+  const providerObjId = new mongoose.Types.ObjectId(providerId);
 
-  // Booking query: any booking that references this provider in any role
   const bookingQuery = {
     $or: [
       { provider: providerId },
       { "accommodations.hotel": providerId },
       { "carRentals.provider": providerId },
-      { "carWithDriver.provider": providerId }, // renamed
+      { "carWithDriver.provider": providerId },
     ],
   };
   if (hasDateFilter) bookingQuery.createdAt = dateFilter;
 
-  // ProviderPayment query: money we paid out to this provider
   const providerPaymentQuery = { provider: providerId };
   if (hasDateFilter) providerPaymentQuery.date = dateFilter;
 
-  // Direct customer payment query: customer paid this provider on our behalf
-  const directPaymentQuery = {
-    providerRecipient: new mongoose.Types.ObjectId(providerId),
-  };
+  const directPaymentQuery = { providerRecipient: providerObjId };
   if (hasDateFilter) directPaymentQuery.date = dateFilter;
 
-  const [
-    bookings,
-    providerPaymentsAgg,
-    providerPaymentsList,
-    directPaymentsAgg,
-    directPaymentsList,
-  ] = await Promise.all([
-    bookingModel.find(bookingQuery).lean(),
+  const collectionQuery = { provider: providerId };
+  if (hasDateFilter) collectionQuery.date = dateFilter;
 
-    // Aggregate: total we have paid to provider
-    providerPaymentModel.aggregate([
-      { $match: providerPaymentQuery },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: "$amount" },
-          count: { $sum: 1 },
-        },
-      },
-    ]),
+  const [bookings, providerPaymentsList, directPaymentsList, collectionsList] =
+    await Promise.all([
+      bookingModel.find(bookingQuery).lean(),
+      providerPaymentModel
+        .find(providerPaymentQuery)
+        .populate("recordedBy", "userName")
+        .sort({ date: 1 })
+        .lean(),
+      paymentModel
+        .find(directPaymentQuery)
+        .populate("booking", "bookingID customers")
+        .populate("recordedBy", "userName")
+        .sort({ date: 1 })
+        .lean(),
+      providerCollectionModel
+        .find(collectionQuery)
+        .populate("recordedBy", "userName")
+        .populate("booking", "bookingID customers")
+        .sort({ date: 1 })
+        .lean(),
+    ]);
 
-    // List of our payments to provider (for the transaction ledger)
-    providerPaymentModel
-      .find(providerPaymentQuery)
-      .populate("recordedBy", "userName")
-      .sort({ date: 1 })
-      .lean(),
-
-    // Aggregate: total customer paid directly to this provider
-    paymentModel.aggregate([
-      { $match: directPaymentQuery },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: "$amount" },
-          count: { $sum: 1 },
-        },
-      },
-    ]),
-
-    // List of direct customer payments (for the transaction ledger)
-    paymentModel
-      .find(directPaymentQuery)
-      .populate("booking", "bookingID customers")
-      .populate("recordedBy", "userName")
-      .sort({ date: 1 })
-      .lean(),
-  ]);
-
-  // ── Build service debit lines (what we owe for each service) ───────────────
+  // ── Service debit lines ────────────────────────────────────────────────────
   const serviceLines = [];
-
-  const addLines = (items, serviceType, providerKey, labelFn) => {
-    items?.forEach((item) => {
-      const pid =
-        item[providerKey]?._id?.toString() || item[providerKey]?.toString();
-      if (pid !== providerId) return;
-
-      const buy = Number(item.buy) || 0;
-      serviceLines.push({
-        type: "SERVICE_DEBIT",
-        serviceType,
-        debit: buy,
-        credit: 0,
-      });
-    });
-  };
-
   bookings.forEach((booking) => {
     const meta = {
       bookingID: booking.bookingID,
@@ -152,15 +86,12 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
         ...meta,
         type: "SERVICE_DEBIT",
         serviceType: "Car Rental",
-        description: `${item.brand || ""} — ${
-          item.pickUp ? new Date(item.pickUp).toLocaleDateString() : "N/A"
-        }`,
+        description: `${item.brand || ""} — ${item.pickUp ? new Date(item.pickUp).toLocaleDateString() : "N/A"}`,
         debit: Number(item.buy) || 0,
         credit: 0,
       });
     });
 
-    // renamed: carWithDriver
     (booking.carWithDriver || []).forEach((item) => {
       const pid = item.provider?._id?.toString() || item.provider?.toString();
       if (pid !== providerId) return;
@@ -175,20 +106,20 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
     });
   });
 
-  // ── Build credit lines (reductions to our liability) ──────────────────────
-
-  // Credits: payments we made directly to the provider
-  const ourPaymentLines = providerPaymentsList.map((p) => ({
+  // ── Agency payment credit lines ────────────────────────────────────────────
+  const agencyPaymentLines = providerPaymentsList.map((p) => ({
     date: p.date,
-    type: "OUR_PAYMENT",
-    description: `Payment by ${p.recordedBy?.userName || "office"}${p.reference ? ` — Ref: ${p.reference}` : ""}`,
+    type: "AGENCY_PAYMENT",
+    description:
+      `Payment by ${p.recordedBy?.userName || "office"}` +
+      (p.reference ? ` — Ref: ${p.reference}` : ""),
     debit: 0,
     credit: Number(p.amount),
     method: p.method,
     reference: p.reference || null,
   }));
 
-  // Credits: customer paid provider directly on our behalf
+  // ── Customer direct payment credit lines ───────────────────────────────────
   const directPaymentLines = directPaymentsList.map((p) => {
     const bookingID = p.booking?.bookingID;
     const customer = p.booking?.customers?.[0]?.name || "Unknown";
@@ -203,19 +134,179 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
     };
   });
 
-  // ── Totals ─────────────────────────────────────────────────────────────────
-  const totalCostFromProvider = serviceLines.reduce((s, l) => s + l.debit, 0);
-  const totalWeHavePaid = providerPaymentsAgg[0]?.total || 0;
-  const totalCustomersPaidDirect = directPaymentsAgg[0]?.total || 0;
-  const totalCredits = totalWeHavePaid + totalCustomersPaidDirect;
-  const outstandingBalance = totalCostFromProvider - totalCredits;
+  // ── Provider collection debit lines ───────────────────────────────────────
+  const collectionLines = collectionsList.map((c) => ({
+    date: c.date,
+    type: "AGENCY_COLLECTION",
+    description:
+      `Agency collected from provider` +
+      (c.booking?.bookingID ? ` (Booking #${c.booking.bookingID})` : "") +
+      (c.reference ? ` — Ref: ${c.reference}` : ""),
+    debit: Number(c.amount),
+    credit: 0,
+    method: c.method,
+    reference: c.reference || null,
+  }));
 
-  // ── Unified chronological ledger ───────────────────────────────────────────
   const ledger = [
     ...serviceLines,
-    ...ourPaymentLines,
+    ...agencyPaymentLines,
     ...directPaymentLines,
+    ...collectionLines,
   ].sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  return {
+    ledger,
+    // Raw line totals (used only when computing a filtered summary)
+    _rawTotals: {
+      totalServiceCost: serviceLines.reduce((s, l) => s + l.debit, 0),
+      totalWeHavePaid: agencyPaymentLines.reduce((s, l) => s + l.credit, 0),
+      totalCustomersPaidDirect: directPaymentLines.reduce(
+        (s, l) => s + l.credit,
+        0,
+      ),
+      totalCollectedFromProvider: collectionLines.reduce(
+        (s, l) => s + l.debit,
+        0,
+      ),
+    },
+  };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: build the summary section from raw totals
+// ─────────────────────────────────────────────────────────────────────────────
+const buildSummaryFromRaw = ({
+  totalServiceCost,
+  totalWeHavePaid,
+  totalCustomersPaidDirect,
+  totalCollectedFromProvider,
+}) => {
+  const totalCredits = totalWeHavePaid + totalCustomersPaidDirect;
+  const outstandingBalance =
+    totalServiceCost - totalCredits + totalCollectedFromProvider;
+
+  let balanceType;
+  let balanceLabel;
+
+  if (Math.abs(outstandingBalance) < 0.01) {
+    balanceLabel = "Account settled — no outstanding balance";
+    balanceType = "settled";
+  } else if (outstandingBalance > 0) {
+    balanceLabel = `Agency owes provider: $${outstandingBalance.toFixed(2)}`;
+    balanceType = "we_owe_provider";
+  } else {
+    balanceLabel = `Provider owes agency: $${Math.abs(outstandingBalance).toFixed(2)}`;
+    balanceType = "provider_owes_us";
+  }
+
+  return {
+    totalServiceCost,
+    totalWeHavePaid,
+    totalCustomersPaidDirect,
+    totalCredits,
+    totalCollectedFromProvider,
+    outstandingBalance,
+    balanceType,
+    balanceLabel,
+    breakdown:
+      outstandingBalance < -0.01
+        ? {
+            amountProviderOwesUs: Math.abs(totalServiceCost - totalCredits),
+            alreadyRecovered: totalCollectedFromProvider,
+            stillToCollect: Math.abs(outstandingBalance),
+          }
+        : outstandingBalance > 0.01
+          ? {
+              totalServiceCost,
+              alreadyPaid: totalCredits,
+              stillToPay: outstandingBalance,
+            }
+          : { note: "Account is fully settled" },
+  };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider Current-Account Statement
+//
+// HYBRID strategy
+// ───────────────
+// No date filter → summary pulled from Provider.summary (O(1) read).
+//                  Only the ledger is built on-the-fly.
+//
+// Date filter    → full aggregation for the summary AND ledger (period-scoped).
+//                  Provider.summary holds all-time totals; we can't slice it.
+//
+// API response shape is identical in both cases for backward compatibility.
+//
+// Balance formula (all-time or filtered):
+//   outstandingBalance = totalBuy − (totalWeHavePaid + totalCustomersPaidDirect)
+//                      + totalCollectedFromProvider
+//   > 0  → "we_owe_provider"
+//   < 0  → "provider_owes_us"
+//   ≈ 0  → "settled"
+// ─────────────────────────────────────────────────────────────────────────────
+export const getProviderStatement = asyncHandler(async (req, res, next) => {
+  const { providerId } = req.params;
+  const { fromDate, toDate } = req.query;
+
+  const provider = await providerModel.findById(providerId);
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  const dateFilter = {};
+  if (fromDate) dateFilter.$gte = new Date(fromDate);
+  if (toDate) {
+    const to = new Date(toDate);
+    to.setHours(23, 59, 59, 999);
+    dateFilter.$lte = to;
+  }
+
+  const hasDateFilter = Object.keys(dateFilter).length > 0;
+
+  // ── Always build ledger on-the-fly ────────────────────────────────────────
+  const { ledger, _rawTotals } = await buildLedger(providerId, dateFilter);
+
+  // ── Summary source depends on whether a date filter is active ─────────────
+  let summary;
+
+  if (!hasDateFilter) {
+    // ── O(1) path: read from persisted Provider.summary ───────────────────
+    const s = provider.summary;
+    const outstandingBalance = s.currentBalance;
+
+    summary = {
+      totalServiceCost: s.totalBuy,
+      totalWeHavePaid: s.totalWeHavePaid,
+      totalCustomersPaidDirect: s.totalCustomersPaidDirect,
+      totalCredits: s.totalCredits,
+      totalCollectedFromProvider: s.totalCollectedFromProvider,
+      outstandingBalance,
+      balanceType: s.balanceType,
+      balanceLabel: s.balanceLabel,
+      _cachedSummary: true, // flag so clients can tell which path was used
+      lastSynced: s.lastSynced,
+      breakdown:
+        outstandingBalance < -0.01
+          ? {
+              amountProviderOwesUs: Math.abs(s.totalBuy - s.totalCredits),
+              alreadyRecovered: s.totalCollectedFromProvider,
+              stillToCollect: Math.abs(outstandingBalance),
+            }
+          : outstandingBalance > 0.01
+            ? {
+                totalServiceCost: s.totalBuy,
+                alreadyPaid: s.totalCredits,
+                stillToPay: outstandingBalance,
+              }
+            : { note: "Account is fully settled" },
+    };
+  } else {
+    // ── Aggregation path: compute from ledger raw totals for the period ────
+    summary = {
+      ...buildSummaryFromRaw(_rawTotals),
+      _cachedSummary: false,
+    };
+  }
 
   return res.status(200).json({
     success: true,
@@ -231,25 +322,7 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
         from: fromDate || "All time",
         to: toDate || "All time",
       },
-      summary: {
-        // Debits
-        totalCostFromProvider,
-
-        // Credits
-        totalWeHavePaid,
-        totalCustomersPaidDirect,
-        totalCredits,
-
-        // Net
-        outstandingBalance,
-        balanceLabel:
-          outstandingBalance > 0
-            ? `We owe provider: ${outstandingBalance}`
-            : outstandingBalance < 0
-              ? `Provider holds our profit: ${Math.abs(outstandingBalance)}`
-              : "Account settled",
-      },
-      // Full double-entry ledger for display / export
+      summary,
       ledger,
     },
     errors: null,
@@ -257,7 +330,7 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Customer Statement
+// Customer Statement — unchanged logic
 // ─────────────────────────────────────────────────────────────────────────────
 export const getCustomerStatement = asyncHandler(async (req, res, next) => {
   const { customerName } = req.params;

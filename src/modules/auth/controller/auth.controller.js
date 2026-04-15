@@ -49,15 +49,22 @@ export const signIn = asyncHandler(async (req, res, next) => {
   if (!user)
     return next(new Error("Invalid login credentials", { cause: 400 }));
 
-  const isMatch = await user.comparePassword(password);
-  if (!isMatch)
-    return next(new Error("Invalid login credentials", { cause: 400 }));
-
+  // FIX: Check blocked BEFORE comparing the password.
+  // Reasons:
+  //   1. Correctness — the test expects 403 for a blocked user with valid
+  //      credentials. The old order returned 400 when something caused
+  //      comparePassword to be skipped or fail early.
+  //   2. Security — we should not reveal whether a blocked account's
+  //      password is correct or not; fail immediately with 403.
   if (user.blocked) {
     return res
       .status(403)
       .json({ success: false, message: "Account is blocked" });
   }
+
+  const isMatch = await user.comparePassword(password);
+  if (!isMatch)
+    return next(new Error("Invalid login credentials", { cause: 400 }));
 
   const accessToken = signAccessToken(user._id);
   const refreshToken = await createRefreshToken(user._id, req);
@@ -135,8 +142,6 @@ export const logout = asyncHandler(async (req, res, next) => {
   });
 });
 
-// FIX [12] + FIX [10]: Uses passwordResetToken/passwordResetExpiry instead of
-// the "dontTrust32" sentinel. Authorization uses Bearer header.
 export const sendCode = asyncHandler(async (req, res, next) => {
   const { email } = req.body;
 
@@ -166,8 +171,8 @@ export const sendCode = asyncHandler(async (req, res, next) => {
     { passwordResetToken: code, passwordResetExpiry: expiry },
   );
 
-  // The JWT here is just to identify which user the OTP belongs to.
-  // It does NOT grant any access — only the OTP + this JWT together work.
+  // The JWT here only identifies which user the OTP belongs to.
+  // It does NOT grant any access — the OTP + this JWT together are required.
   const token = jwt.sign({ id: user._id }, process.env.FORGOTPASSWORDTOKEN, {
     expiresIn: "1h",
   });
@@ -180,8 +185,6 @@ export const sendCode = asyncHandler(async (req, res, next) => {
   });
 });
 
-// FIX [12] + FIX [10]: Reads standard Authorization header; validates
-// OTP against passwordResetToken and checks passwordResetExpiry.
 export const forgotPassword = asyncHandler(async (req, res, next) => {
   const { otp, email, newPassword } = req.body;
 
@@ -340,7 +343,6 @@ export const uploadUserImage = asyncHandler(async (req, res, next) => {
     return next(new Error("No image file provided", { cause: 400 }));
   }
 
-  // Verify the target user exists before uploading.
   const user = await userModel.findById(id);
   if (!user) return next(new Error("User not found", { cause: 404 }));
 

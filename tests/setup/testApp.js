@@ -25,6 +25,7 @@ import statementRouter from "../../src/modules/statement/statement.router.js";
 import voucherRouter from "../../src/modules/voucher/voucher.router.js";
 import expenseRouter from "../../src/modules/expense/expense.router.js";
 import providerPaymentRouter from "../../src/modules/providerPayment/providerPayment.router.js";
+import providerCollectionRouter from "../../src/modules/providerCollection/providerCollection.router.js";
 import reportRouter from "../../src/modules/report/report.router.js";
 
 const app = express();
@@ -45,6 +46,7 @@ app.use(`${baseUrl}/statement`, statementRouter);
 app.use(`${baseUrl}/voucher`, voucherRouter);
 app.use(`${baseUrl}/expense`, expenseRouter);
 app.use(`${baseUrl}/provider-payment`, providerPaymentRouter);
+app.use(`${baseUrl}/provider-collection`, providerCollectionRouter);
 app.use(`${baseUrl}/report`, reportRouter);
 
 // Global error handler (mirrors app.js).

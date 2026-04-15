@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { applyProviderSummaryDelta } from "../../src/services/providerSummaryService.js";
 
 /**
  * Records money paid OUT to a provider (hotel, car company, etc.).
@@ -7,8 +8,7 @@ import mongoose from "mongoose";
  *   - paymentModel  → money received FROM customers
  *   - providerPaymentModel → money paid TO providers
  *
- * The getProviderStatement controller uses both to show the full picture:
- *   totalCostFromProvider (what you owe) vs totalPaidToProvider (what you've paid).
+ * Hooks here keep Provider.summary.totalWeHavePaid in sync automatically.
  */
 const providerPaymentSchema = new mongoose.Schema(
   {
@@ -54,5 +54,38 @@ const providerPaymentSchema = new mongoose.Schema(
 );
 
 providerPaymentSchema.index({ provider: 1, date: -1 });
+
+// ── post-save: increment totalWeHavePaid ─────────────────────────────────────
+providerPaymentSchema.post("save", async function () {
+  try {
+    await applyProviderSummaryDelta(this.provider, {
+      totalWeHavePaid: this.amount,
+    });
+  } catch (err) {
+    console.error(
+      "❌ Provider summary sync failed after providerPayment save:",
+      err.message,
+    );
+  }
+});
+
+// ── post-deleteOne: reverse the increment ────────────────────────────────────
+// Triggered only by doc.deleteOne() — the controller uses this form.
+providerPaymentSchema.post(
+  "deleteOne",
+  { document: true, query: false },
+  async function () {
+    try {
+      await applyProviderSummaryDelta(this.provider, {
+        totalWeHavePaid: -this.amount,
+      });
+    } catch (err) {
+      console.error(
+        "❌ Provider summary sync failed after providerPayment delete:",
+        err.message,
+      );
+    }
+  },
+);
 
 export default mongoose.model("ProviderPayment", providerPaymentSchema);

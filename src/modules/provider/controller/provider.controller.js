@@ -3,6 +3,7 @@ import providerModel from "../../../../DB/model/provider.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import mongoose from "mongoose";
 import { pagination } from "../../../services/pagination.js";
+import { resyncProviderSummary } from "../../../services/providerSummaryService.js";
 
 export const createProvider = asyncHandler(async (req, res, next) => {
   const { name, type, phone, address } = req.body;
@@ -36,9 +37,6 @@ export const createProvider = asyncHandler(async (req, res, next) => {
 export const deleteProvider = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
-  // FIX [4]: The original check only covered provider (main) and
-  // accommodations.hotel, silently allowing deletion of providers that
-  // were only used in carRentals or tripsWithDrivers.
   const hasBookings = await mongoose.model("Booking").findOne({
     $or: [
       { provider: id },
@@ -120,10 +118,12 @@ export const updateProvider = asyncHandler(async (req, res, next) => {
 
   for (const [key, value] of Object.entries(req.body)) {
     // Prevent overwriting internal counters managed by the booking logic.
+    // Also prevent direct writes to summary — use the resync endpoint instead.
     if (
       key !== "_id" &&
       key !== "currentSequence" &&
       key !== "totalBookings" &&
+      key !== "summary" &&
       value != null
     ) {
       update[key] = value;
@@ -148,5 +148,82 @@ export const updateProvider = asyncHandler(async (req, res, next) => {
     message: "Provider updated successfully",
     data: { provider },
     errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resync a provider's financial summary from scratch
+// POST /api/v1/provider/:id/resync
+//
+// Use this when:
+//   - Migrating existing providers to the new summary system
+//   - Recovering from suspected data drift
+//   - After bulk data imports that bypassed normal Mongoose hooks
+//
+// Safe to call multiple times — fully idempotent.
+// ─────────────────────────────────────────────────────────────────────────────
+export const resyncProvider = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+
+  const provider = await providerModel.findById(id).select("_id name");
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  const summary = await resyncProviderSummary(id);
+
+  await logModel.create({
+    user: req.user._id,
+    action: "RESYNC_PROVIDER_SUMMARY",
+    details: { providerId: id, providerName: provider.name, summary },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: `Provider "${provider.name}" summary resynced successfully`,
+    data: { summary },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resync ALL providers — bulk migration utility
+// POST /api/v1/provider/resync-all
+//
+// Iterates every provider and rebuilds their summary.
+// Intended for one-time migration after deploying the summary feature.
+// ─────────────────────────────────────────────────────────────────────────────
+export const resyncAllProviders = asyncHandler(async (req, res, next) => {
+  const providers = await providerModel.find({}).select("_id name").lean();
+
+  const results = [];
+  const errors = [];
+
+  for (const provider of providers) {
+    try {
+      const summary = await resyncProviderSummary(provider._id.toString());
+      results.push({ providerId: provider._id, name: provider.name, summary });
+    } catch (err) {
+      errors.push({
+        providerId: provider._id,
+        name: provider.name,
+        error: err.message,
+      });
+    }
+  }
+
+  await logModel.create({
+    user: req.user._id,
+    action: "RESYNC_ALL_PROVIDER_SUMMARIES",
+    details: {
+      total: providers.length,
+      succeeded: results.length,
+      failed: errors.length,
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: `Resynced ${results.length} of ${providers.length} providers`,
+    data: { results, errors },
+    errors: errors.length ? errors : null,
   });
 });

@@ -13,10 +13,18 @@ import jwt from "jsonwebtoken";
 import userModel from "../../DB/model/user.model.js";
 import providerModel from "../../DB/model/provider.model.js";
 
+// ── Unique ID counter ─────────────────────────────────────────────────────────
+// Date.now() alone is not safe: multiple createUser() calls within the same
+// millisecond (which happens frequently in fast test suites) produce the same
+// email and trigger E11000 duplicate key errors on the users.email_1 index.
+// A module-level counter increments atomically per-process and never collides.
+let _seq = 0;
+const uid = () => `${Date.now()}_${++_seq}`;
+
 // ── Plain object builders ─────────────────────────────────────────────────────
 
 export const buildProvider = (overrides = {}) => ({
-  name: `Test Provider ${Date.now()}`,
+  name: `Test Provider ${uid()}`,
   type: "hotel",
   phone: "+970591234567",
   address: "Test Street 1",
@@ -26,7 +34,7 @@ export const buildProvider = (overrides = {}) => ({
 
 export const buildUser = (overrides = {}) => ({
   userName: "TestAdmin",
-  email: `admin_${Date.now()}@test.com`,
+  email: `user_${uid()}@test.com`,
   password: "Admin@123",
   role: "admin",
   ...overrides,
@@ -88,11 +96,9 @@ export const createUser = async (overrides = {}) => {
  * @returns {string} Authorization header value ("Bearer <token>")
  */
 export const getAuthHeader = (user) => {
-  const token = jwt.sign(
-    { id: user._id },
-    process.env.SIGNINTOKEN,
-    { expiresIn: "1h" },
-  );
+  const token = jwt.sign({ id: user._id }, process.env.SIGNINTOKEN, {
+    expiresIn: "1h",
+  });
   return `Bearer ${token}`;
 };
 

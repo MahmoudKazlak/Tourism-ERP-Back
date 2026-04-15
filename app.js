@@ -16,7 +16,7 @@ const REQUIRED_ENV = [
   "SALTROUND",
   "SENDEREMAIL",
   "SENDEREMAILPASSWORD",
-  // Cloudinary — required for image uploads (Feature 5)
+  // Cloudinary — required for image uploads
   "CLOUDINARY_CLOUD_NAME",
   "CLOUDINARY_API_KEY",
   "CLOUDINARY_API_SECRET",
@@ -38,7 +38,6 @@ const port = process.env.PORT || 3000;
 app.use(helmet());
 
 // Trust the first proxy hop (e.g. Nginx, Railway, Render).
-// Required for accurate req.ip in logs and rate limiters behind a reverse proxy.
 app.set("trust proxy", 1);
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
@@ -84,9 +83,10 @@ app.use(`${baseUrl}/dashboard`, indexRouter.dashboardRouter);
 app.use(`${baseUrl}/statement`, indexRouter.statementRouter);
 app.use(`${baseUrl}/voucher`, indexRouter.voucherRouter);
 app.use(`${baseUrl}/expense`, indexRouter.expenseRouter);
-// Feature [1]: Provider payments — money paid OUT to providers.
+// ProviderPayment: money paid OUT to providers for their services
 app.use(`${baseUrl}/provider-payment`, indexRouter.providerPaymentRouter);
-// Feature [2]: CSV/Excel export + P&L report.
+// ProviderCollection: money collected BACK from providers who held our funds
+app.use(`${baseUrl}/provider-collection`, indexRouter.providerCollectionRouter);
 app.use(`${baseUrl}/report`, indexRouter.reportRouter);
 
 // ── Global error handler ──────────────────────────────────────────────────────

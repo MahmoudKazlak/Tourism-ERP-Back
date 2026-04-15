@@ -8,6 +8,7 @@ import statementRouter from "./statement/statement.router.js";
 import voucherRouter from "./voucher/voucher.router.js";
 import expenseRouter from "./expense/expense.router.js";
 import providerPaymentRouter from "./providerPayment/providerPayment.router.js";
+import providerCollectionRouter from "./providerCollection/providerCollection.router.js";
 import reportRouter from "./report/report.router.js";
 
 export {
@@ -21,5 +22,6 @@ export {
   voucherRouter,
   expenseRouter,
   providerPaymentRouter,
+  providerCollectionRouter,
   reportRouter,
 };
