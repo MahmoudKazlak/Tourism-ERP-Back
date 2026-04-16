@@ -8,7 +8,6 @@ import * as indexRouter from "./src/modules/indexRouter.js";
 
 dotenv.config({ path: "./config/.env" });
 
-// ── Fail fast: abort startup if any critical env var is absent ───────────────
 const REQUIRED_ENV = [
   "DBURI",
   "SIGNINTOKEN",
@@ -16,7 +15,6 @@ const REQUIRED_ENV = [
   "SALTROUND",
   "SENDEREMAIL",
   "SENDEREMAILPASSWORD",
-  // Cloudinary — required for image uploads
   "CLOUDINARY_CLOUD_NAME",
   "CLOUDINARY_API_KEY",
   "CLOUDINARY_API_SECRET",
@@ -30,14 +28,11 @@ if (missingEnv.length) {
   console.error("   Add them to config/.env and restart.");
   process.exit(1);
 }
-// ─────────────────────────────────────────────────────────────────────────────
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(helmet());
-
-// Trust the first proxy hop (e.g. Nginx, Railway, Render).
 app.set("trust proxy", 1);
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
@@ -54,10 +49,10 @@ app.use(
     credentials: true,
   }),
 );
+// app.use(cors({}));
 
 app.use(express.json({ limit: "10kb" }));
 
-// Rate limiter for auth endpoints — brute force protection.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -73,23 +68,19 @@ connectDB();
 
 const baseUrl = process.env.BASEURL || "/api/v1";
 
-// ── Route registration ────────────────────────────────────────────────────────
 app.use(`${baseUrl}/auth`, authLimiter, indexRouter.authRouter);
 app.use(`${baseUrl}/booking`, indexRouter.bookingRouter);
 app.use(`${baseUrl}/booking`, indexRouter.paymentRouter);
 app.use(`${baseUrl}/provider`, indexRouter.providerRouter);
 app.use(`${baseUrl}/log`, indexRouter.logRouter);
-app.use(`${baseUrl}/dashboard`, indexRouter.dashboardRouter);
+app.use(`${baseUrl}/view-board`, indexRouter.viewBoardRouter);
 app.use(`${baseUrl}/statement`, indexRouter.statementRouter);
 app.use(`${baseUrl}/voucher`, indexRouter.voucherRouter);
 app.use(`${baseUrl}/expense`, indexRouter.expenseRouter);
-// ProviderPayment: money paid OUT to providers for their services
 app.use(`${baseUrl}/provider-payment`, indexRouter.providerPaymentRouter);
-// ProviderCollection: money collected BACK from providers who held our funds
 app.use(`${baseUrl}/provider-collection`, indexRouter.providerCollectionRouter);
 app.use(`${baseUrl}/report`, indexRouter.reportRouter);
 
-// ── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   const status = err.cause || 500;
   return res.status(status).json({
@@ -100,7 +91,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });

@@ -3,7 +3,7 @@ import bookingRouter from "./booking/booking.router.js";
 import providerRouter from "./provider/provider.router.js";
 import logRouter from "./log/log.router.js";
 import paymentRouter from "./payment/payment.router.js";
-import dashboardRouter from "./dashboard/dashboard.router.js";
+import viewBoardRouter from "./viewBoard/viewBoard.router.js";
 import statementRouter from "./statement/statement.router.js";
 import voucherRouter from "./voucher/voucher.router.js";
 import expenseRouter from "./expense/expense.router.js";
@@ -17,7 +17,7 @@ export {
   providerRouter,
   logRouter,
   paymentRouter,
-  dashboardRouter,
+  viewBoardRouter,
   statementRouter,
   voucherRouter,
   expenseRouter,

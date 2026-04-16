@@ -65,8 +65,6 @@ src/modules/auth/controller/auth.controller.js
 src/modules/booking/booking.router.js
 src/modules/booking/booking.validation.js
 src/modules/booking/controller/booking.controller.js
-src/modules/dashboard/controller/dashboard.controller.js
-src/modules/dashboard/dashboard.router.js
 src/modules/expense/controller/expense.controller.js
 src/modules/expense/expense.router.js
 src/modules/expense/expense.validation.js
@@ -90,6 +88,8 @@ src/modules/report/controller/report.controller.js
 src/modules/report/report.router.js
 src/modules/statement/controller/statement.controller.js
 src/modules/statement/statement.router.js
+src/modules/viewBoard/controller/viewBoard.controller.js
+src/modules/viewBoard/viewBoard.router.js
 src/modules/voucher/controller/voucher.controller.js
 src/modules/voucher/voucher.router.js
 src/services/bookingService.js
@@ -115,6 +115,775 @@ tests/unit/bookingService.test.js
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="src/modules/viewBoard/controller/viewBoard.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+import userModel from "../../../../DB/model/user.model.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Period builder
+//
+// Accepted ?period= values:
+//   today | yesterday | last3days | last4days | last5days | last6days |
+//   thisweek | thismonth | last3months | last6months | lastyear | all
+//
+// Returns:
+//   current  — { from: Date, to: Date } window for the requested period
+//   previous — equivalent prior window for growth comparisons (null for "all")
+// ─────────────────────────────────────────────────────────────────────────────
+const buildDateRanges = (period = "today") => {
+  const now = new Date();
+
+  const dayStart = (d) =>
+    new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+  const dayEnd = (d) =>
+    new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+  const daysAgo = (n) => {
+    const d = new Date(now);
+    d.setDate(d.getDate() - n);
+    return d;
+  };
+  const monthsAgo = (n) =>
+    new Date(now.getFullYear(), now.getMonth() - n, now.getDate());
+
+  const today = dayStart(now);
+  const todayClose = dayEnd(now);
+
+  let current, previous;
+
+  switch (period) {
+    // ── Day-level periods ───────────────────────────────────────────────────
+    case "today": {
+      const yd = daysAgo(1);
+      current = { from: today, to: todayClose };
+      previous = { from: dayStart(yd), to: dayEnd(yd) };
+      break;
+    }
+    case "yesterday": {
+      const yd = daysAgo(1);
+      const dby = daysAgo(2);
+      current = { from: dayStart(yd), to: dayEnd(yd) };
+      previous = { from: dayStart(dby), to: dayEnd(dby) };
+      break;
+    }
+    case "last3days": {
+      const start = dayStart(daysAgo(2)); // today − 2 → 3 days total
+      const prev = dayStart(daysAgo(5));
+      const prevE = dayEnd(daysAgo(3));
+      current = { from: start, to: todayClose };
+      previous = { from: prev, to: prevE };
+      break;
+    }
+    case "last4days": {
+      const start = dayStart(daysAgo(3));
+      const prev = dayStart(daysAgo(7));
+      const prevE = dayEnd(daysAgo(4));
+      current = { from: start, to: todayClose };
+      previous = { from: prev, to: prevE };
+      break;
+    }
+    case "last5days": {
+      const start = dayStart(daysAgo(4));
+      const prev = dayStart(daysAgo(9));
+      const prevE = dayEnd(daysAgo(5));
+      current = { from: start, to: todayClose };
+      previous = { from: prev, to: prevE };
+      break;
+    }
+    case "last6days": {
+      const start = dayStart(daysAgo(5));
+      const prev = dayStart(daysAgo(11));
+      const prevE = dayEnd(daysAgo(6));
+      current = { from: start, to: todayClose };
+      previous = { from: prev, to: prevE };
+      break;
+    }
+
+    // ── Week / month / multi-month ───────────────────────────────────────────
+    case "thisweek": {
+      const dow = (now.getDay() + 6) % 7; // Mon = 0
+      const weekStart = dayStart(daysAgo(dow));
+      const prevEnd = new Date(weekStart.getTime() - 1);
+      const prevStart = dayStart(daysAgo(dow + 7));
+      current = { from: weekStart, to: todayClose };
+      previous = { from: prevStart, to: prevEnd };
+      break;
+    }
+    case "thismonth": {
+      const mStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      const prevMEnd = new Date(mStart.getTime() - 1);
+      const prevMStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      current = { from: mStart, to: todayClose };
+      previous = { from: prevMStart, to: prevMEnd };
+      break;
+    }
+    case "last3months": {
+      const start = monthsAgo(3);
+      const prevEnd = new Date(start.getTime() - 1);
+      const prevStart = monthsAgo(6);
+      current = { from: start, to: todayClose };
+      previous = { from: prevStart, to: prevEnd };
+      break;
+    }
+    case "last6months": {
+      const start = monthsAgo(6);
+      const prevEnd = new Date(start.getTime() - 1);
+      const prevStart = monthsAgo(12);
+      current = { from: start, to: todayClose };
+      previous = { from: prevStart, to: prevEnd };
+      break;
+    }
+    case "lastyear": {
+      const start = new Date(
+        now.getFullYear() - 1,
+        now.getMonth(),
+        now.getDate(),
+      );
+      const prevEnd = new Date(start.getTime() - 1);
+      const prevStart = new Date(
+        now.getFullYear() - 2,
+        now.getMonth(),
+        now.getDate(),
+      );
+      current = { from: start, to: todayClose };
+      previous = { from: prevStart, to: prevEnd };
+      break;
+    }
+
+    case "all":
+    default:
+      current = null;
+      previous = null;
+      break;
+  }
+
+  return { current, previous };
+};
+
+/** Converts a range object to a Mongoose $match filter on createdAt. */
+const createdAtFilter = (range) =>
+  range ? { createdAt: { $gte: range.from, $lte: range.to } } : {};
+
+/** Growth percentage string, or null when previous is zero/absent. */
+const growth = (curr, prev) =>
+  prev > 0 ? `${(((curr - prev) / prev) * 100).toFixed(1)}%` : null;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: extract all service lines from a set of bookings, grouped by
+// provider ID.  Returns Map<pid:string, ServiceEntry>.
+// ─────────────────────────────────────────────────────────────────────────────
+const buildServicesMap = (bookings) => {
+  const map = new Map(); // pid → { services[], _bookingIds Set, periodStats }
+
+  const ensure = (pid) => {
+    if (!map.has(pid)) {
+      map.set(pid, {
+        services: [],
+        _bookingIds: new Set(),
+        periodStats: {
+          totalBuy: 0,
+          totalSell: 0,
+          bookingsCount: 0,
+          servicesCount: 0,
+        },
+      });
+    }
+    return map.get(pid);
+  };
+
+  for (const bk of bookings) {
+    const meta = {
+      bookingID: bk.bookingID,
+      bookingMongoId: bk._id,
+      bookingStatus: bk.status,
+      paymentStatus: bk.paymentStatus,
+      customer: bk.customers?.[0]?.name || "Unknown",
+      bookingDate: bk.createdAt,
+    };
+
+    const addService = (pid, extra, buy, sell) => {
+      if (!pid) return;
+      const entry = ensure(pid);
+      entry.services.push({ ...meta, buy, sell, profit: sell - buy, ...extra });
+      entry.periodStats.totalBuy += buy;
+      entry.periodStats.totalSell += sell;
+      entry.periodStats.servicesCount += 1;
+      if (!entry._bookingIds.has(bk._id.toString())) {
+        entry._bookingIds.add(bk._id.toString());
+        entry.periodStats.bookingsCount += 1;
+      }
+    };
+
+    for (const item of bk.accommodations || []) {
+      addService(
+        item.hotel?.toString(),
+        {
+          serviceType: "accommodation",
+          serviceNumber: item.serviceNumber,
+          checkIn: item.checkIn,
+          checkOut: item.checkOut,
+          duration: item.duration,
+          roomType: item.roomType,
+          room: item.room,
+          board: item.board,
+        },
+        Number(item.buy) || 0,
+        Number(item.sell) || 0,
+      );
+    }
+
+    for (const item of bk.carRentals || []) {
+      addService(
+        item.provider?.toString(),
+        {
+          serviceType: "carRental",
+          serviceNumber: item.serviceNumber,
+          brand: item.brand,
+          pickUp: item.pickUp,
+          dropOff: item.dropOff,
+        },
+        Number(item.buy) || 0,
+        Number(item.sell) || 0,
+      );
+    }
+
+    for (const item of bk.carWithDriver || []) {
+      addService(
+        item.provider?.toString(),
+        {
+          serviceType: "carWithDriver",
+          serviceNumber: item.serviceNumber,
+          driverName: item.driverName,
+          brand: item.brand,
+        },
+        Number(item.buy) || 0,
+        Number(item.sell) || 0,
+      );
+    }
+  }
+
+  return map;
+};
+
+/** Shape one provider entry (with allTimeSummary). */
+const shapeProviderFull = (doc, entry) => {
+  const stats = entry?.periodStats ?? {
+    totalBuy: 0,
+    totalSell: 0,
+    bookingsCount: 0,
+    servicesCount: 0,
+  };
+  return {
+    id: doc._id,
+    name: doc.name,
+    type: doc.type,
+    phone: doc.phone || null,
+    address: doc.address || null,
+    allTimeSummary: doc.summary || null,
+    periodStats: {
+      totalBuy: stats.totalBuy,
+      totalSell: stats.totalSell,
+      totalProfit: stats.totalSell - stats.totalBuy,
+      bookingsCount: stats.bookingsCount,
+      servicesCount: stats.servicesCount,
+    },
+    services: (entry?.services ?? []).sort(
+      (a, b) => new Date(a.bookingDate) - new Date(b.bookingDate),
+    ),
+  };
+};
+
+/** Shape one provider entry (without allTimeSummary — for active-services endpoint). */
+const shapeProviderActive = (doc, entry) => {
+  const stats = entry.periodStats;
+  return {
+    id: doc._id,
+    name: doc.name,
+    type: doc.type,
+    phone: doc.phone || null,
+    address: doc.address || null,
+    periodStats: {
+      totalBuy: stats.totalBuy,
+      totalSell: stats.totalSell,
+      totalProfit: stats.totalSell - stats.totalBuy,
+      bookingsCount: stats.bookingsCount,
+      servicesCount: stats.servicesCount,
+    },
+    services: entry.services.sort(
+      (a, b) => new Date(a.bookingDate) - new Date(b.bookingDate),
+    ),
+  };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Endpoint 1 — ALL providers (even those with no services in the period)
+// GET /api/v1/view-board/providers?period=today
+//
+// Response sections:
+//   period | dateRange | summary | overall | providers | byStatus |
+//   byPaymentStatus | serviceTypeBreakdown | counts | metrics
+// ─────────────────────────────────────────────────────────────────────────────
+export const getAllProviders = asyncHandler(async (req, res) => {
+  const period = req.query.period || "today";
+  const { current, previous } = buildDateRanges(period);
+  const curFilter = createdAtFilter(current);
+  const prevFilter = createdAtFilter(previous);
+
+  const [
+    curStats,
+    prevStats,
+    overallStats,
+    byStatus,
+    byPaymentStatus,
+    allProviderDocs,
+    usersCount,
+    totalBookings,
+    curBookings,
+  ] = await Promise.all([
+    // Current-period booking aggregates
+    bookingModel.aggregate([
+      { $match: curFilter },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+          revenue: { $sum: "$totalToPay" },
+          cost: { $sum: "$totalToBuy" },
+          profit: { $sum: "$totalProfit" },
+          collected: { $sum: "$totalPaid" },
+          outstanding: { $sum: "$remainingBalance" },
+        },
+      },
+    ]),
+
+    // Previous-period (for growth)
+    prevFilter
+      ? bookingModel.aggregate([
+          { $match: prevFilter },
+          {
+            $group: {
+              _id: null,
+              count: { $sum: 1 },
+              revenue: { $sum: "$totalToPay" },
+              profit: { $sum: "$totalProfit" },
+            },
+          },
+        ])
+      : Promise.resolve([]),
+
+    // All-time overall (never filtered)
+    bookingModel.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: "$totalToPay" },
+          totalProfit: { $sum: "$totalProfit" },
+          totalCollected: { $sum: "$totalPaid" },
+          totalPending: { $sum: "$remainingBalance" },
+        },
+      },
+    ]),
+
+    bookingModel.aggregate([
+      { $match: curFilter },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
+
+    bookingModel.aggregate([
+      { $match: curFilter },
+      { $group: { _id: "$paymentStatus", count: { $sum: 1 } } },
+    ]),
+
+    // ALL provider documents (regardless of bookings)
+    providerModel.find({}).select("_id name type phone address summary").lean(),
+
+    userModel.countDocuments(),
+    bookingModel.countDocuments(),
+
+    // Period bookings — for service-line extraction
+    bookingModel
+      .find(curFilter)
+      .select(
+        "bookingID status paymentStatus customers createdAt " +
+          "accommodations carRentals carWithDriver",
+      )
+      .lean(),
+  ]);
+
+  const cur = curStats[0] || {
+    count: 0,
+    revenue: 0,
+    cost: 0,
+    profit: 0,
+    collected: 0,
+    outstanding: 0,
+  };
+  const prev = prevStats[0] || { count: 0, revenue: 0, profit: 0 };
+  const ov = overallStats[0] || {
+    totalRevenue: 0,
+    totalProfit: 0,
+    totalCollected: 0,
+    totalPending: 0,
+  };
+
+  // Build service map from period bookings
+  const servicesMap = buildServicesMap(curBookings);
+
+  // Service-type totals across the period
+  const serviceTypeBreakdown = {
+    accommodation: 0,
+    carRental: 0,
+    carWithDriver: 0,
+  };
+  for (const entry of servicesMap.values()) {
+    for (const s of entry.services) {
+      if (serviceTypeBreakdown[s.serviceType] !== undefined) {
+        serviceTypeBreakdown[s.serviceType]++;
+      }
+    }
+  }
+
+  // Merge every provider doc with its (possibly empty) service map entry
+  const providers = allProviderDocs
+    .map((doc) => shapeProviderFull(doc, servicesMap.get(doc._id.toString())))
+    .sort((a, b) => b.periodStats.totalSell - a.periodStats.totalSell);
+
+  return res.status(200).json({
+    success: true,
+    message: "Providers retrieved successfully",
+    data: {
+      period,
+      dateRange: current
+        ? { from: current.from.toISOString(), to: current.to.toISOString() }
+        : { from: "all-time", to: "all-time" },
+
+      summary: {
+        bookingsCount: cur.count,
+        revenue: cur.revenue,
+        cost: cur.cost,
+        profit: cur.profit,
+        collected: cur.collected,
+        outstanding: cur.outstanding,
+        revenueGrowth: growth(cur.revenue, prev.revenue),
+        bookingsGrowth: growth(cur.count, prev.count),
+        profitGrowth: growth(cur.profit, prev.profit),
+      },
+
+      overall: {
+        totalRevenue: ov.totalRevenue,
+        totalProfit: ov.totalProfit,
+        totalCollected: ov.totalCollected,
+        totalPending: ov.totalPending,
+      },
+
+      providers,
+
+      byStatus: Object.fromEntries(byStatus.map((b) => [b._id, b.count])),
+      byPaymentStatus: Object.fromEntries(
+        byPaymentStatus.map((b) => [b._id, b.count]),
+      ),
+      serviceTypeBreakdown,
+
+      counts: {
+        totalProviders: allProviderDocs.length,
+        activeProviders: servicesMap.size, // providers with ≥1 service this period
+        users: usersCount,
+        totalBookings, // all-time
+        periodBookings: cur.count,
+      },
+
+      metrics: {
+        avgBookingValue:
+          cur.count > 0 ? +(cur.revenue / cur.count).toFixed(2) : 0,
+        avgProfit: cur.count > 0 ? +(cur.profit / cur.count).toFixed(2) : 0,
+        collectionRate:
+          cur.revenue > 0
+            ? `${((cur.collected / cur.revenue) * 100).toFixed(1)}%`
+            : "0%",
+        profitMargin:
+          cur.revenue > 0
+            ? `${((cur.profit / cur.revenue) * 100).toFixed(1)}%`
+            : "0%",
+      },
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Endpoint 2 — ONLY providers that have services within the period
+// GET /api/v1/view-board/active-services?period=today
+//
+// Response sections:
+//   period | dateRange | providers | counts | metrics
+//   (no overall, no byStatus/byPaymentStatus, no allTimeSummary on providers)
+// ─────────────────────────────────────────────────────────────────────────────
+export const getActiveServices = asyncHandler(async (req, res) => {
+  const period = req.query.period || "today";
+  const { current, previous } = buildDateRanges(period);
+  const curFilter = createdAtFilter(current);
+  const prevFilter = createdAtFilter(previous);
+
+  const [curBookings, prevStats, usersCount, totalBookings] = await Promise.all(
+    [
+      // Full booking docs for the period (service extraction)
+      bookingModel
+        .find(curFilter)
+        .select(
+          "bookingID status paymentStatus customers createdAt " +
+            "accommodations carRentals carWithDriver",
+        )
+        .lean(),
+
+      // Previous-period summary (for growth)
+      prevFilter
+        ? bookingModel.aggregate([
+            { $match: prevFilter },
+            {
+              $group: {
+                _id: null,
+                count: { $sum: 1 },
+                revenue: { $sum: "$totalToPay" },
+                profit: { $sum: "$totalProfit" },
+              },
+            },
+          ])
+        : Promise.resolve([]),
+
+      userModel.countDocuments(),
+      bookingModel.countDocuments(),
+    ],
+  );
+
+  const servicesMap = buildServicesMap(curBookings);
+
+  if (servicesMap.size === 0) {
+    return res.status(200).json({
+      success: true,
+      message: "No active services found for this period",
+      data: {
+        period,
+        dateRange: current
+          ? { from: current.from.toISOString(), to: current.to.toISOString() }
+          : { from: "all-time", to: "all-time" },
+        providers: [],
+        counts: {
+          activeProviders: 0,
+          periodBookings: 0,
+          periodServices: 0,
+          users: usersCount,
+          totalBookings,
+        },
+        metrics: {
+          avgBookingValue: 0,
+          avgProfit: 0,
+          collectionRate: "0%",
+          profitMargin: "0%",
+        },
+      },
+      errors: null,
+    });
+  }
+
+  // Fetch only the provider docs that appear in this period
+  const activeProviderIds = [...servicesMap.keys()];
+  const providerDocs = await providerModel
+    .find({ _id: { $in: activeProviderIds } })
+    .select("_id name type phone address")
+    .lean();
+
+  const docMap = new Map(providerDocs.map((d) => [d._id.toString(), d]));
+
+  const providers = activeProviderIds
+    .map((pid) => {
+      const doc = docMap.get(pid);
+      if (!doc) return null;
+      return shapeProviderActive(doc, servicesMap.get(pid));
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.periodStats.totalSell - a.periodStats.totalSell);
+
+  // Roll-up totals across all active providers for this period
+  const totals = providers.reduce(
+    (acc, p) => {
+      acc.revenue += p.periodStats.totalSell;
+      acc.cost += p.periodStats.totalBuy;
+      acc.profit += p.periodStats.totalProfit;
+      acc.bookingsCount += p.periodStats.bookingsCount;
+      acc.servicesCount += p.periodStats.servicesCount;
+      return acc;
+    },
+    { revenue: 0, cost: 0, profit: 0, bookingsCount: 0, servicesCount: 0 },
+  );
+
+  const prev = prevStats[0] || { count: 0, revenue: 0, profit: 0 };
+
+  return res.status(200).json({
+    success: true,
+    message: "Active services retrieved successfully",
+    data: {
+      period,
+      dateRange: current
+        ? { from: current.from.toISOString(), to: current.to.toISOString() }
+        : { from: "all-time", to: "all-time" },
+
+      providers,
+
+      counts: {
+        activeProviders: providers.length,
+        periodBookings: totals.bookingsCount,
+        periodServices: totals.servicesCount,
+        users: usersCount,
+        totalBookings,
+      },
+
+      metrics: {
+        totalRevenue: totals.revenue,
+        totalCost: totals.cost,
+        totalProfit: totals.profit,
+        avgBookingValue:
+          totals.bookingsCount > 0
+            ? +(totals.revenue / totals.bookingsCount).toFixed(2)
+            : 0,
+        avgProfit:
+          totals.bookingsCount > 0
+            ? +(totals.profit / totals.bookingsCount).toFixed(2)
+            : 0,
+        collectionRate:
+          totals.revenue > 0
+            ? `${((totals.revenue / totals.revenue) * 100).toFixed(1)}%`
+            : "0%",
+        profitMargin:
+          totals.revenue > 0
+            ? `${((totals.profit / totals.revenue) * 100).toFixed(1)}%`
+            : "0%",
+        revenueGrowth: growth(totals.revenue, prev.revenue),
+        bookingsGrowth: growth(totals.bookingsCount, prev.count),
+        profitGrowth: growth(totals.profit, prev.profit),
+      },
+    },
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/viewBoard/viewBoard.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import * as viewBoardController from "./controller/viewBoard.controller.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+/**
+ * GET /api/v1/view-board/providers?period=today
+ *
+ * Returns ALL providers (even those with no activity in the period),
+ * each with their service lines, period stats, and all-time summary.
+ * Also includes overall booking aggregates, status distributions, and metrics.
+ *
+ * period values:
+ *   today | yesterday | last3days | last4days | last5days | last6days |
+ *   thisweek | thismonth | last3months | last6months | lastyear | all
+ */
+router.get(
+  "/providers",
+  auth(endpoint.booking_view),
+  viewBoardController.getAllProviders,
+);
+
+/**
+ * GET /api/v1/view-board/active-services?period=today
+ *
+ * Returns ONLY providers that have at least one service in the period,
+ * each with their service lines and period stats.
+ * No allTimeSummary. Includes period-level counts and metrics.
+ *
+ * Same period values as above.
+ */
+router.get(
+  "/active-services",
+  auth(endpoint.booking_view),
+  viewBoardController.getActiveServices,
+);
+
+export default router;
+</file>
+
+<file path=".gitignore">
+node_modules/
+.env
+</file>
+
+<file path="DB/connection.js">
+import mongoose from "mongoose";
+import { seedAdmin } from "./adminSeed.js";
+
+const connectDB = async () => {
+  return await mongoose
+    .connect(process.env.DBURI)
+    .then(async (res) => {
+      console.log("connectDb");
+      await seedAdmin();
+    })
+    .catch((err) => {
+      console.log("faild to connect", err);
+    });
+};
+
+export default connectDB;
+</file>
+
+<file path="DB/model/expense.model.js">
+import mongoose from "mongoose";
+
+const expenseSchema = new mongoose.Schema(
+  {
+    category: {
+      type: String,
+      enum: ["rent", "utilities", "salary", "supplies", "maintenance", "other"],
+      required: [true, "Category is required"],
+    },
+    amount: {
+      type: Number,
+      required: [true, "Amount is required"],
+      min: [0.01, "Amount must be greater than 0"],
+    },
+    date: {
+      type: Date,
+      default: Date.now,
+      required: true,
+    },
+    description: {
+      type: String,
+      required: [true, "Description is required"],
+      trim: true,
+      maxlength: [200, "Description too long"],
+    },
+    method: {
+      type: String,
+      enum: ["cash", "bank_transfer", "check", "other"],
+      default: "cash",
+    },
+    // مرجع خارجي اختياري (مثلاً رقم فاتورة الكهرباء)
+    reference: { type: String, trim: true },
+    recordedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+  },
+  { timestamps: true },
+);
+
+// إضافة index على التاريخ للبحث السريع
+expenseSchema.index({ date: -1 });
+expenseSchema.index({ category: 1, date: -1 });
+
+export default mongoose.model("Expense", expenseSchema);
+</file>
 
 <file path="DB/model/providerCollection.model.js">
 import mongoose from "mongoose";
@@ -229,919 +998,6 @@ providerCollectionSchema.post(
 );
 
 export default mongoose.model("ProviderCollection", providerCollectionSchema);
-</file>
-
-<file path="src/modules/providerCollection/controller/providerCollection.controller.js">
-import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
-import providerModel from "../../../../DB/model/provider.model.js";
-import paymentModel from "../../../../DB/model/payment.model.js";
-import logModel from "../../../../DB/model/log.model.js";
-import { pagination } from "../../../services/pagination.js";
-import mongoose from "mongoose";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper: compute how much a provider currently owes our agency
-//
-// This is what Hotel A still needs to pay us AFTER we apply any prior
-// collections. Used to warn the user if they try to over-collect.
-// ─────────────────────────────────────────────────────────────────────────────
-const computeProviderOwesUs = async (providerId) => {
-  const providerObjId = new mongoose.Types.ObjectId(providerId);
-
-  // All bookings that reference this provider in any service role
-  const bookings = await mongoose
-    .model("Booking")
-    .find({
-      $or: [
-        { provider: providerObjId },
-        { "accommodations.hotel": providerObjId },
-        { "carRentals.provider": providerObjId },
-        { "carWithDriver.provider": providerObjId },
-      ],
-    })
-    .lean();
-
-  // Σ(buy prices of all services linked to this provider)
-  let totalServiceCost = 0;
-  for (const booking of bookings) {
-    for (const item of booking.accommodations || []) {
-      if (item.hotel?.toString() === providerId) {
-        totalServiceCost += Number(item.buy) || 0;
-      }
-    }
-    for (const item of booking.carRentals || []) {
-      if (item.provider?.toString() === providerId) {
-        totalServiceCost += Number(item.buy) || 0;
-      }
-    }
-    for (const item of booking.carWithDriver || []) {
-      if (item.provider?.toString() === providerId) {
-        totalServiceCost += Number(item.buy) || 0;
-      }
-    }
-  }
-
-  // Σ(ProviderPayment amounts we paid out to this provider)
-  const [provPayAgg, directPayAgg, collectionAgg] = await Promise.all([
-    mongoose
-      .model("ProviderPayment")
-      .aggregate([
-        { $match: { provider: providerObjId } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]),
-    // Σ(Payments where customer paid this provider directly)
-    paymentModel.aggregate([
-      { $match: { providerRecipient: providerObjId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-    // Σ(Collections we already received from this provider)
-    providerCollectionModel.aggregate([
-      { $match: { provider: providerObjId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-  ]);
-
-  const agencyPaymentsToProvider = provPayAgg[0]?.total || 0;
-  const customerDirectPayments = directPayAgg[0]?.total || 0;
-  const alreadyCollected = collectionAgg[0]?.total || 0;
-
-  // balance = serviceCost - agencyPaymentsOut - customerDirect + collectionsFromProvider
-  // Negative balance = provider owes us |balance|
-  const balance =
-    totalServiceCost -
-    agencyPaymentsToProvider -
-    customerDirectPayments +
-    alreadyCollected;
-
-  // Amount provider currently owes us (0 if we owe them, or balanced)
-  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
-
-  return { balance, providerOwesUs, alreadyCollected };
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Record a collection received FROM a provider
-// POST /api/v1/provider-collection/:providerId
-// ─────────────────────────────────────────────────────────────────────────────
-export const createProviderCollection = asyncHandler(async (req, res, next) => {
-  const { providerId } = req.params;
-  const { amount, date, method, notes, reference, booking } = req.body;
-
-  const provider = await providerModel.findById(providerId);
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  // Warn if this provider doesn't actually owe us anything.
-  // We allow the record anyway (edge cases exist) but flag it clearly.
-  const { balance } = await computeProviderOwesUs(providerId);
-  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
-
-  if (providerOwesUs === 0 && balance >= 0) {
-    return next(
-      new Error(
-        `Provider "${provider.name}" does not currently hold a receivable balance. ` +
-          "Collections can only be recorded when the provider owes the agency money " +
-          "(i.e., they collected from a customer on the agency's behalf).",
-        { cause: 400 },
-      ),
-    );
-  }
-
-  const numAmount = Number(amount);
-
-  if (numAmount > providerOwesUs) {
-    return next(
-      new Error(
-        `Collection amount ($${numAmount}) exceeds the outstanding balance ` +
-          `($${providerOwesUs.toFixed(2)}) that ${provider.name} owes the agency. ` +
-          "Record a collection no greater than the outstanding balance.",
-        { cause: 400 },
-      ),
-    );
-  }
-
-  const collection = await providerCollectionModel.create({
-    provider: providerId,
-    amount: numAmount,
-    date: date || new Date(),
-    method: method || "cash",
-    notes,
-    reference,
-    booking: booking || null,
-    recordedBy: req.user._id,
-  });
-
-  await logModel.create({
-    user: req.user._id,
-    action: "CREATE_PROVIDER_COLLECTION",
-    details: {
-      collectionId: collection._id,
-      providerId,
-      providerName: provider.name,
-      amount: numAmount,
-      method,
-      previousOwed: providerOwesUs,
-      remainingOwed: providerOwesUs - numAmount,
-    },
-  });
-
-  return res.status(201).json({
-    success: true,
-    message: `Collection of $${numAmount} from ${provider.name} recorded successfully`,
-    data: {
-      collection,
-      balanceSummary: {
-        previouslyOwed: providerOwesUs,
-        collected: numAmount,
-        remainingOwed: +(providerOwesUs - numAmount).toFixed(2),
-      },
-    },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Get all collections from a specific provider (paginated)
-// GET /api/v1/provider-collection/:providerId
-// ─────────────────────────────────────────────────────────────────────────────
-export const getProviderCollections = asyncHandler(async (req, res, next) => {
-  const { providerId } = req.params;
-  const { fromDate, toDate, page, size } = req.query;
-
-  const provider = await providerModel.findById(providerId).lean();
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  const query = { provider: providerId };
-  if (fromDate || toDate) {
-    query.date = {};
-    if (fromDate) query.date.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      query.date.$lte = to;
-    }
-  }
-
-  const { limit, skip } = pagination(page, size);
-
-  const [collections, totalCount, totalAmountResult] = await Promise.all([
-    providerCollectionModel
-      .find(query)
-      .populate("recordedBy", "userName")
-      .populate("booking", "bookingID customers")
-      .sort({ date: -1 })
-      .limit(limit)
-      .skip(skip),
-    providerCollectionModel.countDocuments(query),
-    providerCollectionModel.aggregate([
-      { $match: { provider: new mongoose.Types.ObjectId(providerId) } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-  ]);
-
-  // Include current outstanding balance for context
-  const { balance } = await computeProviderOwesUs(providerId);
-  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
-
-  return res.status(200).json({
-    success: true,
-    message: "Data retrieved successfully",
-    data: {
-      provider: { id: provider._id, name: provider.name, type: provider.type },
-      totalCount,
-      totalPages: Math.ceil(totalCount / limit),
-      totalCollected: totalAmountResult[0]?.total || 0,
-      currentOutstandingBalance: providerOwesUs,
-      collections,
-    },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Get all collections — accounting overview
-// GET /api/v1/provider-collection/all
-// ─────────────────────────────────────────────────────────────────────────────
-export const getAllProviderCollections = asyncHandler(async (req, res) => {
-  const { method, fromDate, toDate, page, size } = req.query;
-
-  const query = {};
-  if (method) query.method = method;
-  if (fromDate || toDate) {
-    query.date = {};
-    if (fromDate) query.date.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      query.date.$lte = to;
-    }
-  }
-
-  const { limit, skip } = pagination(page, size);
-
-  const [collections, totalCount, totalAmountResult] = await Promise.all([
-    providerCollectionModel
-      .find(query)
-      .populate("provider", "name type")
-      .populate("recordedBy", "userName")
-      .populate("booking", "bookingID customers")
-      .sort({ date: -1 })
-      .limit(limit)
-      .skip(skip),
-    providerCollectionModel.countDocuments(query),
-    providerCollectionModel.aggregate([
-      { $match: query },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-  ]);
-
-  return res.status(200).json({
-    success: true,
-    message: "Data retrieved successfully",
-    data: {
-      totalCount,
-      totalPages: Math.ceil(totalCount / limit),
-      totalAmount: totalAmountResult[0]?.total || 0,
-      collections,
-    },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Delete a collection (Admin only)
-// DELETE /api/v1/provider-collection/:collectionId
-// ─────────────────────────────────────────────────────────────────────────────
-export const deleteProviderCollection = asyncHandler(async (req, res, next) => {
-  const { collectionId } = req.params;
-
-  const collection = await providerCollectionModel
-    .findById(collectionId)
-    .populate("provider", "name");
-  if (!collection)
-    return next(new Error("Collection not found", { cause: 404 }));
-
-  await collection.deleteOne();
-
-  await logModel.create({
-    user: req.user._id,
-    action: "DELETE_PROVIDER_COLLECTION",
-    details: {
-      collectionId,
-      providerId: collection.provider._id,
-      providerName: collection.provider?.name,
-      amount: collection.amount,
-    },
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: "Provider collection deleted successfully",
-    data: null,
-    errors: null,
-  });
-});
-</file>
-
-<file path="src/modules/providerCollection/providerCollection.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import { validation } from "../../middleware/validation.js";
-import * as providerCollectionController from "./controller/providerCollection.controller.js";
-import * as validators from "./providerCollection.validation.js";
-import { endpoint } from "../indexEndpoint.js";
-
-const router = Router();
-
-// Static routes before dynamic ones.
-
-// GET /api/v1/provider-collection/all — overview for accounting
-router.get(
-  "/all",
-  auth(endpoint.accounting_only),
-  providerCollectionController.getAllProviderCollections,
-);
-
-// DELETE /api/v1/provider-collection/:collectionId — Admin only
-router.delete(
-  "/:collectionId",
-  auth(endpoint.AdminOnly),
-  validation(validators.deleteProviderCollection),
-  providerCollectionController.deleteProviderCollection,
-);
-
-// POST /api/v1/provider-collection/:providerId — record a recovery from a provider
-router.post(
-  "/:providerId",
-  auth(endpoint.accounting_only),
-  validation(validators.createProviderCollection),
-  providerCollectionController.createProviderCollection,
-);
-
-// GET /api/v1/provider-collection/:providerId — list collections for a provider
-router.get(
-  "/:providerId",
-  auth(endpoint.accounting_only),
-  validation(validators.getProviderCollections),
-  providerCollectionController.getProviderCollections,
-);
-
-export default router;
-</file>
-
-<file path="src/modules/providerCollection/providerCollection.validation.js">
-import Joi from "joi";
-
-const objectId = Joi.string().hex().length(24);
-
-export const createProviderCollection = {
-  body: Joi.object({
-    amount: Joi.number().positive().required().messages({
-      "number.positive": "Amount must be greater than 0",
-      "any.required": "Amount is required",
-    }),
-    date: Joi.date()
-      .max("now")
-      .default(() => new Date())
-      .messages({
-        "date.max": "Collection date cannot be in the future",
-      }),
-    method: Joi.string()
-      .valid("cash", "bank_transfer", "check", "other")
-      .default("cash"),
-    notes: Joi.string().trim().max(300).optional().allow(""),
-    reference: Joi.string().trim().max(100).optional().allow(""),
-    booking: objectId.optional().messages({
-      "string.hex": "Invalid booking ID",
-      "string.length": "Invalid booking ID",
-    }),
-  }),
-  params: Joi.object({
-    providerId: objectId.required().messages({
-      "string.hex": "Invalid provider ID",
-      "string.length": "Invalid provider ID",
-    }),
-  }),
-};
-
-export const deleteProviderCollection = {
-  params: Joi.object({
-    collectionId: objectId.required().messages({
-      "string.hex": "Invalid collection ID",
-    }),
-  }),
-};
-
-export const getProviderCollections = {
-  params: Joi.object({
-    providerId: objectId.required().messages({
-      "string.hex": "Invalid provider ID",
-    }),
-  }),
-  query: Joi.object({
-    fromDate: Joi.date(),
-    toDate: Joi.date().when("fromDate", {
-      is: Joi.exist(),
-      then: Joi.date().min(Joi.ref("fromDate")).messages({
-        "date.min": "toDate must be after fromDate",
-      }),
-    }),
-    page: Joi.number().integer().min(1).default(1),
-    size: Joi.number().integer().min(1).max(100).default(10),
-  }),
-};
-</file>
-
-<file path="src/services/providerSummaryService.js">
-/**
- * providerSummaryService.js
- *
- * Central service that keeps Provider.summary in sync with the four
- * source collections that affect a provider's financial position.
- *
- * TWO public entry points
- * ───────────────────────
- * 1. applyProviderSummaryDelta(providerId, delta)
- *    Increments raw counters and recomputes all derived fields in a single
- *    atomic MongoDB aggregation-pipeline update.  Zero extra round-trips.
- *    Used by Mongoose hooks and the payment controller.
- *
- * 2. resyncProviderSummary(providerId)
- *    Full recalculation from scratch by scanning all four source collections.
- *    Call via the admin /resync/:id endpoint after data imports or if drift
- *    is ever suspected.
- *
- * Circular-import strategy
- * ────────────────────────
- * This file imports only provider.model directly.
- * All other models are accessed lazily via mongoose.model() to avoid
- * circular-dependency chains through booking.model → this file → booking.model.
- */
-
-import mongoose from "mongoose";
-import providerModel from "../../DB/model/provider.model.js";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal: aggregation-pipeline update — one round-trip, fully atomic
-//
-// Stage 1: apply increments to the five raw counters (via $add + $ifNull)
-// Stage 2: recompute totalCredits and currentBalance from updated counters
-// Stage 3: derive balanceType and balanceLabel from currentBalance
-// ─────────────────────────────────────────────────────────────────────────────
-const buildSummaryPipeline = (delta) => {
-  const inc = (field, amount) => ({
-    $add: [{ $ifNull: [`$summary.${field}`, 0] }, amount],
-  });
-
-  return [
-    // Stage 1 — apply raw increments
-    {
-      $set: {
-        "summary.totalBuy": inc("totalBuy", delta.totalBuy ?? 0),
-        "summary.totalSell": inc("totalSell", delta.totalSell ?? 0),
-        "summary.totalWeHavePaid": inc(
-          "totalWeHavePaid",
-          delta.totalWeHavePaid ?? 0,
-        ),
-        "summary.totalCustomersPaidDirect": inc(
-          "totalCustomersPaidDirect",
-          delta.totalCustomersPaidDirect ?? 0,
-        ),
-        "summary.totalCollectedFromProvider": inc(
-          "totalCollectedFromProvider",
-          delta.totalCollectedFromProvider ?? 0,
-        ),
-        "summary.lastSynced": new Date(),
-      },
-    },
-
-    // Stage 2 — recompute derived aggregates
-    {
-      $set: {
-        "summary.totalCredits": {
-          $add: [
-            "$summary.totalWeHavePaid",
-            "$summary.totalCustomersPaidDirect",
-          ],
-        },
-        "summary.currentBalance": {
-          // balance = totalBuy − (weHavePaid + customerDirect) + collected
-          $subtract: [
-            {
-              $add: [
-                "$summary.totalBuy",
-                "$summary.totalCollectedFromProvider",
-              ],
-            },
-            {
-              $add: [
-                "$summary.totalWeHavePaid",
-                "$summary.totalCustomersPaidDirect",
-              ],
-            },
-          ],
-        },
-      },
-    },
-
-    // Stage 3 — human-readable balance type and label
-    {
-      $set: {
-        "summary.balanceType": {
-          $switch: {
-            branches: [
-              {
-                case: { $gt: ["$summary.currentBalance", 0.01] },
-                then: "we_owe_provider",
-              },
-              {
-                case: { $lt: ["$summary.currentBalance", -0.01] },
-                then: "provider_owes_us",
-              },
-            ],
-            default: "settled",
-          },
-        },
-        "summary.balanceLabel": {
-          $cond: {
-            if: { $gt: ["$summary.currentBalance", 0.01] },
-            then: {
-              $concat: [
-                "Agency owes provider: $",
-                {
-                  $toString: {
-                    $round: ["$summary.currentBalance", 2],
-                  },
-                },
-              ],
-            },
-            else: {
-              $cond: {
-                if: { $lt: ["$summary.currentBalance", -0.01] },
-                then: {
-                  $concat: [
-                    "Provider owes agency: $",
-                    {
-                      $toString: {
-                        $round: [{ $abs: "$summary.currentBalance" }, 2],
-                      },
-                    },
-                  ],
-                },
-                else: "Account settled — no outstanding balance",
-              },
-            },
-          },
-        },
-      },
-    },
-  ];
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: apply an incremental delta to a provider's summary
-//
-// delta shape (all fields optional, default 0):
-//   { totalBuy, totalSell, totalWeHavePaid,
-//     totalCustomersPaidDirect, totalCollectedFromProvider }
-//
-// Pass negative values to reverse a previously applied delta (e.g. on delete).
-// ─────────────────────────────────────────────────────────────────────────────
-export const applyProviderSummaryDelta = async (providerId, delta) => {
-  if (!providerId) return;
-
-  // التأكد من وجود تغييرات فعلية
-  const hasChange = Object.values(delta).some((v) => v !== 0);
-  if (!hasChange) return;
-
-  try {
-    // استخدام Native Driver الخاص بـ MongoDB لتمرير الـ Pipeline مباشرة
-    await providerModel.collection.updateOne(
-      { _id: new mongoose.Types.ObjectId(providerId.toString()) },
-      buildSummaryPipeline(delta),
-    );
-
-    console.log(`✅ Provider ${providerId} summary synchronized.`);
-  } catch (err) {
-    console.error(
-      `❌ providerSummaryService: delta update failed for ${providerId}:`,
-      err.message,
-    );
-  }
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal helper: extract per-provider {buy, sell} from a booking document
-// Returns Map<providerId:string, { buy: number, sell: number }>
-// ─────────────────────────────────────────────────────────────────────────────
-export const computeServiceDeltas = (booking) => {
-  const map = new Map();
-
-  const add = (pid, buy, sell) => {
-    if (!pid) return;
-    const k = pid.toString();
-    const cur = map.get(k) || { buy: 0, sell: 0 };
-    map.set(k, {
-      buy: cur.buy + (Number(buy) || 0),
-      sell: cur.sell + (Number(sell) || 0),
-    });
-  };
-
-  for (const item of booking.accommodations || []) {
-    add(item.hotel, item.buy, item.sell);
-  }
-  for (const item of booking.carRentals || []) {
-    add(item.provider, item.buy, item.sell);
-  }
-  for (const item of booking.carWithDriver || []) {
-    add(item.provider, item.buy, item.sell);
-  }
-
-  return map;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: full recalculation from scratch (admin resync endpoint)
-//
-// Scans all four source collections and overwrites Provider.summary
-// with precise values.  Safe to call at any time — idempotent.
-// ─────────────────────────────────────────────────────────────────────────────
-export const resyncProviderSummary = async (providerId) => {
-  // Lazy model references to avoid circular imports
-  const Booking = mongoose.model("Booking");
-  const ProviderPayment = mongoose.model("ProviderPayment");
-  const Payment = mongoose.model("Payment");
-  const ProviderCollection = mongoose.model("ProviderCollection");
-
-  const providerObjId = new mongoose.Types.ObjectId(providerId);
-
-  // ── 1. Scan all bookings that reference this provider in any service role ──
-  const bookings = await Booking.find({
-    $or: [
-      { provider: providerObjId },
-      { "accommodations.hotel": providerObjId },
-      { "carRentals.provider": providerObjId },
-      { "carWithDriver.provider": providerObjId },
-    ],
-  }).lean();
-
-  let totalBuy = 0;
-  let totalSell = 0;
-
-  for (const booking of bookings) {
-    for (const item of booking.accommodations || []) {
-      if (item.hotel?.toString() === providerId) {
-        totalBuy += Number(item.buy) || 0;
-        totalSell += Number(item.sell) || 0;
-      }
-    }
-    for (const item of booking.carRentals || []) {
-      if (item.provider?.toString() === providerId) {
-        totalBuy += Number(item.buy) || 0;
-        totalSell += Number(item.sell) || 0;
-      }
-    }
-    for (const item of booking.carWithDriver || []) {
-      if (item.provider?.toString() === providerId) {
-        totalBuy += Number(item.buy) || 0;
-        totalSell += Number(item.sell) || 0;
-      }
-    }
-  }
-
-  // ── 2. Aggregate the three payment types ───────────────────────────────────
-  const [provPayAgg, directPayAgg, collectionAgg] = await Promise.all([
-    ProviderPayment.aggregate([
-      { $match: { provider: providerObjId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-    Payment.aggregate([
-      { $match: { providerRecipient: providerObjId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-    ProviderCollection.aggregate([
-      { $match: { provider: providerObjId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-  ]);
-
-  const totalWeHavePaid = provPayAgg[0]?.total || 0;
-  const totalCustomersPaidDirect = directPayAgg[0]?.total || 0;
-  const totalCollectedFromProvider = collectionAgg[0]?.total || 0;
-
-  // ── 3. Derive computed fields ───────────────────────────────────────────────
-  const totalCredits = totalWeHavePaid + totalCustomersPaidDirect;
-  const currentBalance = totalBuy - totalCredits + totalCollectedFromProvider;
-
-  const balanceType =
-    currentBalance > 0.01
-      ? "we_owe_provider"
-      : currentBalance < -0.01
-        ? "provider_owes_us"
-        : "settled";
-
-  const balanceLabel =
-    balanceType === "we_owe_provider"
-      ? `Agency owes provider: $${currentBalance.toFixed(2)}`
-      : balanceType === "provider_owes_us"
-        ? `Provider owes agency: $${Math.abs(currentBalance).toFixed(2)}`
-        : "Account settled — no outstanding balance";
-
-  // ── 4. Overwrite with precise values ───────────────────────────────────────
-  await providerModel.findByIdAndUpdate(providerId, {
-    $set: {
-      "summary.totalBuy": totalBuy,
-      "summary.totalSell": totalSell,
-      "summary.totalWeHavePaid": totalWeHavePaid,
-      "summary.totalCustomersPaidDirect": totalCustomersPaidDirect,
-      "summary.totalCollectedFromProvider": totalCollectedFromProvider,
-      "summary.totalCredits": totalCredits,
-      "summary.currentBalance": currentBalance,
-      "summary.balanceType": balanceType,
-      "summary.balanceLabel": balanceLabel,
-      "summary.lastSynced": new Date(),
-    },
-  });
-
-  return {
-    totalBuy,
-    totalSell,
-    totalWeHavePaid,
-    totalCustomersPaidDirect,
-    totalCollectedFromProvider,
-    totalCredits,
-    currentBalance,
-    balanceType,
-    balanceLabel,
-  };
-};
-</file>
-
-<file path=".gitignore">
-node_modules/
-.env
-</file>
-
-<file path="DB/connection.js">
-import mongoose from "mongoose";
-import { seedAdmin } from "./adminSeed.js";
-
-const connectDB = async () => {
-  return await mongoose
-    .connect(process.env.DBURI)
-    .then(async (res) => {
-      console.log("connectDb");
-      await seedAdmin();
-    })
-    .catch((err) => {
-      console.log("faild to connect", err);
-    });
-};
-
-export default connectDB;
-</file>
-
-<file path="DB/model/expense.model.js">
-import mongoose from "mongoose";
-
-const expenseSchema = new mongoose.Schema(
-  {
-    category: {
-      type: String,
-      enum: ["rent", "utilities", "salary", "supplies", "maintenance", "other"],
-      required: [true, "Category is required"],
-    },
-    amount: {
-      type: Number,
-      required: [true, "Amount is required"],
-      min: [0.01, "Amount must be greater than 0"],
-    },
-    date: {
-      type: Date,
-      default: Date.now,
-      required: true,
-    },
-    description: {
-      type: String,
-      required: [true, "Description is required"],
-      trim: true,
-      maxlength: [200, "Description too long"],
-    },
-    method: {
-      type: String,
-      enum: ["cash", "bank_transfer", "check", "other"],
-      default: "cash",
-    },
-    // مرجع خارجي اختياري (مثلاً رقم فاتورة الكهرباء)
-    reference: { type: String, trim: true },
-    recordedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
-  },
-  { timestamps: true },
-);
-
-// إضافة index على التاريخ للبحث السريع
-expenseSchema.index({ date: -1 });
-expenseSchema.index({ category: 1, date: -1 });
-
-export default mongoose.model("Expense", expenseSchema);
-</file>
-
-<file path="DB/model/providerPayment.model.js">
-import mongoose from "mongoose";
-import { applyProviderSummaryDelta } from "../../src/services/providerSummaryService.js";
-
-/**
- * Records money paid OUT to a provider (hotel, car company, etc.).
- *
- * This is the liability side of the ledger:
- *   - paymentModel  → money received FROM customers
- *   - providerPaymentModel → money paid TO providers
- *
- * Hooks here keep Provider.summary.totalWeHavePaid in sync automatically.
- */
-const providerPaymentSchema = new mongoose.Schema(
-  {
-    provider: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Provider",
-      required: [true, "Provider is required"],
-      index: true,
-    },
-    amount: {
-      type: Number,
-      required: [true, "Amount is required"],
-      min: [0.01, "Amount must be greater than 0"],
-    },
-    date: {
-      type: Date,
-      default: Date.now,
-      required: true,
-    },
-    method: {
-      type: String,
-      enum: ["cash", "bank_transfer", "check", "other"],
-      default: "cash",
-    },
-    notes: {
-      type: String,
-      trim: true,
-      maxlength: [300, "Notes too long"],
-    },
-    // External reference: invoice number, wire transfer ID, cheque number, etc.
-    reference: {
-      type: String,
-      trim: true,
-      maxlength: [100, "Reference too long"],
-    },
-    recordedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
-  },
-  { timestamps: true },
-);
-
-providerPaymentSchema.index({ provider: 1, date: -1 });
-
-// ── post-save: increment totalWeHavePaid ─────────────────────────────────────
-providerPaymentSchema.post("save", async function () {
-  try {
-    await applyProviderSummaryDelta(this.provider, {
-      totalWeHavePaid: this.amount,
-    });
-  } catch (err) {
-    console.error(
-      "❌ Provider summary sync failed after providerPayment save:",
-      err.message,
-    );
-  }
-});
-
-// ── post-deleteOne: reverse the increment ────────────────────────────────────
-// Triggered only by doc.deleteOne() — the controller uses this form.
-providerPaymentSchema.post(
-  "deleteOne",
-  { document: true, query: false },
-  async function () {
-    try {
-      await applyProviderSummaryDelta(this.provider, {
-        totalWeHavePaid: -this.amount,
-      });
-    } catch (err) {
-      console.error(
-        "❌ Provider summary sync failed after providerPayment delete:",
-        err.message,
-      );
-    }
-  },
-);
-
-export default mongoose.model("ProviderPayment", providerPaymentSchema);
 </file>
 
 <file path="DB/model/refreshToken.model.js">
@@ -1311,157 +1167,6 @@ export const validation = (schema) => {
     }
   };
 };
-</file>
-
-<file path="src/modules/dashboard/controller/dashboard.controller.js">
-import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import bookingModel from "../../../../DB/model/booking.model.js";
-import providerModel from "../../../../DB/model/provider.model.js";
-import userModel from "../../../../DB/model/user.model.js";
-
-export const getDashboard = asyncHandler(async (req, res, next) => {
-  const now = new Date();
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const endOfLastMonth = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    0,
-    23,
-    59,
-    59,
-  );
-
-  // FIX: استبدال find().lean() بـ aggregate — أسرع بكثير مع بيانات كبيرة
-  const [
-    thisMonthStats,
-    lastMonthStats,
-    overallStats,
-    byStatus,
-    byPaymentStatus,
-    providersCount,
-    usersCount,
-    totalBookings,
-  ] = await Promise.all([
-    // إحصائيات هذا الشهر
-    bookingModel.aggregate([
-      { $match: { createdAt: { $gte: startOfMonth } } },
-      {
-        $group: {
-          _id: null,
-          count: { $sum: 1 },
-          revenue: { $sum: "$totalToPay" },
-          profit: { $sum: "$totalProfit" },
-          collected: { $sum: "$totalPaid" },
-        },
-      },
-    ]),
-
-    // إحصائيات الشهر الماضي
-    bookingModel.aggregate([
-      {
-        $match: { createdAt: { $gte: startOfLastMonth, $lte: endOfLastMonth } },
-      },
-      {
-        $group: {
-          _id: null,
-          count: { $sum: 1 },
-          revenue: { $sum: "$totalToPay" },
-          profit: { $sum: "$totalProfit" },
-        },
-      },
-    ]),
-
-    // الإجمالي الكلي
-    bookingModel.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: "$totalToPay" },
-          totalProfit: { $sum: "$totalProfit" },
-          totalCollected: { $sum: "$totalPaid" },
-          totalPending: { $sum: "$remainingBalance" },
-        },
-      },
-    ]),
-
-    // توزيع حسب الحالة
-    bookingModel.aggregate([
-      { $group: { _id: "$status", count: { $sum: 1 } } },
-    ]),
-
-    // توزيع حسب حالة الدفع
-    bookingModel.aggregate([
-      { $group: { _id: "$paymentStatus", count: { $sum: 1 } } },
-    ]),
-
-    providerModel.countDocuments(),
-    userModel.countDocuments(),
-    bookingModel.countDocuments(),
-  ]);
-
-  const tm = thisMonthStats[0] || {
-    count: 0,
-    revenue: 0,
-    profit: 0,
-    collected: 0,
-  };
-  const lm = lastMonthStats[0] || { count: 0, revenue: 0, profit: 0 };
-  const ov = overallStats[0] || {
-    totalRevenue: 0,
-    totalProfit: 0,
-    totalCollected: 0,
-    totalPending: 0,
-  };
-
-  const calcGrowth = (curr, prev) =>
-    prev > 0 ? `${(((curr - prev) / prev) * 100).toFixed(1)}%` : "N/A";
-
-  return res.status(200).json({
-    success: true,
-    message: "Dashboard data retrieved successfully",
-    data: {
-      thisMonth: {
-        bookingsCount: tm.count,
-        revenue: tm.revenue,
-        profit: tm.profit,
-        collected: tm.collected,
-        revenueGrowth: calcGrowth(tm.revenue, lm.revenue),
-        bookingsGrowth: calcGrowth(tm.count, lm.count),
-      },
-      lastMonth: {
-        bookingsCount: lm.count,
-        revenue: lm.revenue,
-        profit: lm.profit,
-      },
-      overall: {
-        totalRevenue: ov.totalRevenue,
-        totalProfit: ov.totalProfit,
-        totalCollected: ov.totalCollected,
-        totalPending: ov.totalPending,
-      },
-      byStatus: Object.fromEntries(byStatus.map((b) => [b._id, b.count])),
-      byPaymentStatus: Object.fromEntries(
-        byPaymentStatus.map((b) => [b._id, b.count]),
-      ),
-      counts: { providers: providersCount, users: usersCount, totalBookings },
-    },
-    errors: null,
-  });
-});
-</file>
-
-<file path="src/modules/dashboard/dashboard.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import * as dashboardController from "./controller/dashboard.controller.js";
-import { endpoint } from "../indexEndpoint.js";
-
-const router = Router();
-
-router.get("/", auth(endpoint.booking_view), dashboardController.getDashboard);
-
-export default router;
 </file>
 
 <file path="src/modules/expense/controller/expense.controller.js">
@@ -2039,6 +1744,427 @@ export const updateProvider = {
       "string.hex": "Invalid provider ID",
       "string.length": "Invalid provider ID",
     }),
+  }),
+};
+</file>
+
+<file path="src/modules/providerCollection/controller/providerCollection.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+import logModel from "../../../../DB/model/log.model.js";
+import { pagination } from "../../../services/pagination.js";
+import mongoose from "mongoose";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: compute how much a provider currently owes our agency
+//
+// This is what Hotel A still needs to pay us AFTER we apply any prior
+// collections. Used to warn the user if they try to over-collect.
+// ─────────────────────────────────────────────────────────────────────────────
+const computeProviderOwesUs = async (providerId) => {
+  const providerObjId = new mongoose.Types.ObjectId(providerId);
+
+  // All bookings that reference this provider in any service role
+  const bookings = await mongoose
+    .model("Booking")
+    .find({
+      $or: [
+        { provider: providerObjId },
+        { "accommodations.hotel": providerObjId },
+        { "carRentals.provider": providerObjId },
+        { "carWithDriver.provider": providerObjId },
+      ],
+    })
+    .lean();
+
+  // Σ(buy prices of all services linked to this provider)
+  let totalServiceCost = 0;
+  for (const booking of bookings) {
+    for (const item of booking.accommodations || []) {
+      if (item.hotel?.toString() === providerId) {
+        totalServiceCost += Number(item.buy) || 0;
+      }
+    }
+    for (const item of booking.carRentals || []) {
+      if (item.provider?.toString() === providerId) {
+        totalServiceCost += Number(item.buy) || 0;
+      }
+    }
+    for (const item of booking.carWithDriver || []) {
+      if (item.provider?.toString() === providerId) {
+        totalServiceCost += Number(item.buy) || 0;
+      }
+    }
+  }
+
+  // Σ(ProviderPayment amounts we paid out to this provider)
+  const [provPayAgg, directPayAgg, collectionAgg] = await Promise.all([
+    mongoose
+      .model("ProviderPayment")
+      .aggregate([
+        { $match: { provider: providerObjId } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+    // Σ(Payments where customer paid this provider directly)
+    paymentModel.aggregate([
+      { $match: { providerRecipient: providerObjId } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+    // Σ(Collections we already received from this provider)
+    providerCollectionModel.aggregate([
+      { $match: { provider: providerObjId } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+  ]);
+
+  const agencyPaymentsToProvider = provPayAgg[0]?.total || 0;
+  const customerDirectPayments = directPayAgg[0]?.total || 0;
+  const alreadyCollected = collectionAgg[0]?.total || 0;
+
+  // balance = serviceCost - agencyPaymentsOut - customerDirect + collectionsFromProvider
+  // Negative balance = provider owes us |balance|
+  const balance =
+    totalServiceCost -
+    agencyPaymentsToProvider -
+    customerDirectPayments +
+    alreadyCollected;
+
+  // Amount provider currently owes us (0 if we owe them, or balanced)
+  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
+
+  return { balance, providerOwesUs, alreadyCollected };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Record a collection received FROM a provider
+// POST /api/v1/provider-collection/:providerId
+// ─────────────────────────────────────────────────────────────────────────────
+export const createProviderCollection = asyncHandler(async (req, res, next) => {
+  const { providerId } = req.params;
+  const { amount, date, method, notes, reference, booking } = req.body;
+
+  const provider = await providerModel.findById(providerId);
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  // Warn if this provider doesn't actually owe us anything.
+  // We allow the record anyway (edge cases exist) but flag it clearly.
+  const { balance } = await computeProviderOwesUs(providerId);
+  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
+
+  if (providerOwesUs === 0 && balance >= 0) {
+    return next(
+      new Error(
+        `Provider "${provider.name}" does not currently hold a receivable balance. ` +
+          "Collections can only be recorded when the provider owes the agency money " +
+          "(i.e., they collected from a customer on the agency's behalf).",
+        { cause: 400 },
+      ),
+    );
+  }
+
+  const numAmount = Number(amount);
+
+  if (numAmount > providerOwesUs) {
+    return next(
+      new Error(
+        `Collection amount ($${numAmount}) exceeds the outstanding balance ` +
+          `($${providerOwesUs.toFixed(2)}) that ${provider.name} owes the agency. ` +
+          "Record a collection no greater than the outstanding balance.",
+        { cause: 400 },
+      ),
+    );
+  }
+
+  const collection = await providerCollectionModel.create({
+    provider: providerId,
+    amount: numAmount,
+    date: date || new Date(),
+    method: method || "cash",
+    notes,
+    reference,
+    booking: booking || null,
+    recordedBy: req.user._id,
+  });
+
+  await logModel.create({
+    user: req.user._id,
+    action: "CREATE_PROVIDER_COLLECTION",
+    details: {
+      collectionId: collection._id,
+      providerId,
+      providerName: provider.name,
+      amount: numAmount,
+      method,
+      previousOwed: providerOwesUs,
+      remainingOwed: providerOwesUs - numAmount,
+    },
+  });
+
+  return res.status(201).json({
+    success: true,
+    message: `Collection of $${numAmount} from ${provider.name} recorded successfully`,
+    data: {
+      collection,
+      balanceSummary: {
+        previouslyOwed: providerOwesUs,
+        collected: numAmount,
+        remainingOwed: +(providerOwesUs - numAmount).toFixed(2),
+      },
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all collections from a specific provider (paginated)
+// GET /api/v1/provider-collection/:providerId
+// ─────────────────────────────────────────────────────────────────────────────
+export const getProviderCollections = asyncHandler(async (req, res, next) => {
+  const { providerId } = req.params;
+  const { fromDate, toDate, page, size } = req.query;
+
+  const provider = await providerModel.findById(providerId).lean();
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  const query = { provider: providerId };
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const { limit, skip } = pagination(page, size);
+
+  const [collections, totalCount, totalAmountResult] = await Promise.all([
+    providerCollectionModel
+      .find(query)
+      .populate("recordedBy", "userName")
+      .populate("booking", "bookingID customers")
+      .sort({ date: -1 })
+      .limit(limit)
+      .skip(skip),
+    providerCollectionModel.countDocuments(query),
+    providerCollectionModel.aggregate([
+      { $match: { provider: new mongoose.Types.ObjectId(providerId) } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+  ]);
+
+  // Include current outstanding balance for context
+  const { balance } = await computeProviderOwesUs(providerId);
+  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      provider: { id: provider._id, name: provider.name, type: provider.type },
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      totalCollected: totalAmountResult[0]?.total || 0,
+      currentOutstandingBalance: providerOwesUs,
+      collections,
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all collections — accounting overview
+// GET /api/v1/provider-collection/all
+// ─────────────────────────────────────────────────────────────────────────────
+export const getAllProviderCollections = asyncHandler(async (req, res) => {
+  const { method, fromDate, toDate, page, size } = req.query;
+
+  const query = {};
+  if (method) query.method = method;
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const { limit, skip } = pagination(page, size);
+
+  const [collections, totalCount, totalAmountResult] = await Promise.all([
+    providerCollectionModel
+      .find(query)
+      .populate("provider", "name type")
+      .populate("recordedBy", "userName")
+      .populate("booking", "bookingID customers")
+      .sort({ date: -1 })
+      .limit(limit)
+      .skip(skip),
+    providerCollectionModel.countDocuments(query),
+    providerCollectionModel.aggregate([
+      { $match: query },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      totalAmount: totalAmountResult[0]?.total || 0,
+      collections,
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete a collection (Admin only)
+// DELETE /api/v1/provider-collection/:collectionId
+// ─────────────────────────────────────────────────────────────────────────────
+export const deleteProviderCollection = asyncHandler(async (req, res, next) => {
+  const { collectionId } = req.params;
+
+  const collection = await providerCollectionModel
+    .findById(collectionId)
+    .populate("provider", "name");
+  if (!collection)
+    return next(new Error("Collection not found", { cause: 404 }));
+
+  await collection.deleteOne();
+
+  await logModel.create({
+    user: req.user._id,
+    action: "DELETE_PROVIDER_COLLECTION",
+    details: {
+      collectionId,
+      providerId: collection.provider._id,
+      providerName: collection.provider?.name,
+      amount: collection.amount,
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Provider collection deleted successfully",
+    data: null,
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/providerCollection/providerCollection.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as providerCollectionController from "./controller/providerCollection.controller.js";
+import * as validators from "./providerCollection.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// Static routes before dynamic ones.
+
+// GET /api/v1/provider-collection/all — overview for accounting
+router.get(
+  "/all",
+  auth(endpoint.accounting_only),
+  providerCollectionController.getAllProviderCollections,
+);
+
+// DELETE /api/v1/provider-collection/:collectionId — Admin only
+router.delete(
+  "/:collectionId",
+  auth(endpoint.AdminOnly),
+  validation(validators.deleteProviderCollection),
+  providerCollectionController.deleteProviderCollection,
+);
+
+// POST /api/v1/provider-collection/:providerId — record a recovery from a provider
+router.post(
+  "/:providerId",
+  auth(endpoint.accounting_only),
+  validation(validators.createProviderCollection),
+  providerCollectionController.createProviderCollection,
+);
+
+// GET /api/v1/provider-collection/:providerId — list collections for a provider
+router.get(
+  "/:providerId",
+  auth(endpoint.accounting_only),
+  validation(validators.getProviderCollections),
+  providerCollectionController.getProviderCollections,
+);
+
+export default router;
+</file>
+
+<file path="src/modules/providerCollection/providerCollection.validation.js">
+import Joi from "joi";
+
+const objectId = Joi.string().hex().length(24);
+
+export const createProviderCollection = {
+  body: Joi.object({
+    amount: Joi.number().positive().required().messages({
+      "number.positive": "Amount must be greater than 0",
+      "any.required": "Amount is required",
+    }),
+    date: Joi.date()
+      .max("now")
+      .default(() => new Date())
+      .messages({
+        "date.max": "Collection date cannot be in the future",
+      }),
+    method: Joi.string()
+      .valid("cash", "bank_transfer", "check", "other")
+      .default("cash"),
+    notes: Joi.string().trim().max(300).optional().allow(""),
+    reference: Joi.string().trim().max(100).optional().allow(""),
+    booking: objectId.optional().messages({
+      "string.hex": "Invalid booking ID",
+      "string.length": "Invalid booking ID",
+    }),
+  }),
+  params: Joi.object({
+    providerId: objectId.required().messages({
+      "string.hex": "Invalid provider ID",
+      "string.length": "Invalid provider ID",
+    }),
+  }),
+};
+
+export const deleteProviderCollection = {
+  params: Joi.object({
+    collectionId: objectId.required().messages({
+      "string.hex": "Invalid collection ID",
+    }),
+  }),
+};
+
+export const getProviderCollections = {
+  params: Joi.object({
+    providerId: objectId.required().messages({
+      "string.hex": "Invalid provider ID",
+    }),
+  }),
+  query: Joi.object({
+    fromDate: Joi.date(),
+    toDate: Joi.date().when("fromDate", {
+      is: Joi.exist(),
+      then: Joi.date().min(Joi.ref("fromDate")).messages({
+        "date.min": "toDate must be after fromDate",
+      }),
+    }),
+    page: Joi.number().integer().min(1).default(1),
+    size: Joi.number().integer().min(1).max(100).default(10),
   }),
 };
 </file>
@@ -3088,6 +3214,331 @@ export const notifyProviderPaymentRecorded = async (
       err.message,
     );
   }
+};
+</file>
+
+<file path="src/services/providerSummaryService.js">
+/**
+ * providerSummaryService.js
+ *
+ * Central service that keeps Provider.summary in sync with the four
+ * source collections that affect a provider's financial position.
+ *
+ * TWO public entry points
+ * ───────────────────────
+ * 1. applyProviderSummaryDelta(providerId, delta)
+ *    Increments raw counters and recomputes all derived fields in a single
+ *    atomic MongoDB aggregation-pipeline update.  Zero extra round-trips.
+ *    Used by Mongoose hooks and the payment controller.
+ *
+ * 2. resyncProviderSummary(providerId)
+ *    Full recalculation from scratch by scanning all four source collections.
+ *    Call via the admin /resync/:id endpoint after data imports or if drift
+ *    is ever suspected.
+ *
+ * Circular-import strategy
+ * ────────────────────────
+ * This file imports only provider.model directly.
+ * All other models are accessed lazily via mongoose.model() to avoid
+ * circular-dependency chains through booking.model → this file → booking.model.
+ */
+
+import mongoose from "mongoose";
+import providerModel from "../../DB/model/provider.model.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: aggregation-pipeline update — one round-trip, fully atomic
+//
+// Stage 1: apply increments to the five raw counters (via $add + $ifNull)
+// Stage 2: recompute totalCredits and currentBalance from updated counters
+// Stage 3: derive balanceType and balanceLabel from currentBalance
+// ─────────────────────────────────────────────────────────────────────────────
+const buildSummaryPipeline = (delta) => {
+  const inc = (field, amount) => ({
+    $add: [{ $ifNull: [`$summary.${field}`, 0] }, amount],
+  });
+
+  return [
+    // Stage 1 — apply raw increments
+    {
+      $set: {
+        "summary.totalBuy": inc("totalBuy", delta.totalBuy ?? 0),
+        "summary.totalSell": inc("totalSell", delta.totalSell ?? 0),
+        "summary.totalWeHavePaid": inc(
+          "totalWeHavePaid",
+          delta.totalWeHavePaid ?? 0,
+        ),
+        "summary.totalCustomersPaidDirect": inc(
+          "totalCustomersPaidDirect",
+          delta.totalCustomersPaidDirect ?? 0,
+        ),
+        "summary.totalCollectedFromProvider": inc(
+          "totalCollectedFromProvider",
+          delta.totalCollectedFromProvider ?? 0,
+        ),
+        "summary.lastSynced": new Date(),
+      },
+    },
+
+    // Stage 2 — recompute derived aggregates
+    {
+      $set: {
+        "summary.totalCredits": {
+          $add: [
+            "$summary.totalWeHavePaid",
+            "$summary.totalCustomersPaidDirect",
+          ],
+        },
+        "summary.currentBalance": {
+          // balance = totalBuy − (weHavePaid + customerDirect) + collected
+          $subtract: [
+            {
+              $add: [
+                "$summary.totalBuy",
+                "$summary.totalCollectedFromProvider",
+              ],
+            },
+            {
+              $add: [
+                "$summary.totalWeHavePaid",
+                "$summary.totalCustomersPaidDirect",
+              ],
+            },
+          ],
+        },
+      },
+    },
+
+    // Stage 3 — human-readable balance type and label
+    {
+      $set: {
+        "summary.balanceType": {
+          $switch: {
+            branches: [
+              {
+                case: { $gt: ["$summary.currentBalance", 0.01] },
+                then: "we_owe_provider",
+              },
+              {
+                case: { $lt: ["$summary.currentBalance", -0.01] },
+                then: "provider_owes_us",
+              },
+            ],
+            default: "settled",
+          },
+        },
+        "summary.balanceLabel": {
+          $cond: {
+            if: { $gt: ["$summary.currentBalance", 0.01] },
+            then: {
+              $concat: [
+                "Agency owes provider: $",
+                {
+                  $toString: {
+                    $round: ["$summary.currentBalance", 2],
+                  },
+                },
+              ],
+            },
+            else: {
+              $cond: {
+                if: { $lt: ["$summary.currentBalance", -0.01] },
+                then: {
+                  $concat: [
+                    "Provider owes agency: $",
+                    {
+                      $toString: {
+                        $round: [{ $abs: "$summary.currentBalance" }, 2],
+                      },
+                    },
+                  ],
+                },
+                else: "Account settled — no outstanding balance",
+              },
+            },
+          },
+        },
+      },
+    },
+  ];
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: apply an incremental delta to a provider's summary
+//
+// delta shape (all fields optional, default 0):
+//   { totalBuy, totalSell, totalWeHavePaid,
+//     totalCustomersPaidDirect, totalCollectedFromProvider }
+//
+// Pass negative values to reverse a previously applied delta (e.g. on delete).
+// ─────────────────────────────────────────────────────────────────────────────
+export const applyProviderSummaryDelta = async (providerId, delta) => {
+  if (!providerId) return;
+
+  // التأكد من وجود تغييرات فعلية
+  const hasChange = Object.values(delta).some((v) => v !== 0);
+  if (!hasChange) return;
+
+  try {
+    // استخدام Native Driver الخاص بـ MongoDB لتمرير الـ Pipeline مباشرة
+    await providerModel.collection.updateOne(
+      { _id: new mongoose.Types.ObjectId(providerId.toString()) },
+      buildSummaryPipeline(delta),
+    );
+
+    console.log(`✅ Provider ${providerId} summary synchronized.`);
+  } catch (err) {
+    console.error(
+      `❌ providerSummaryService: delta update failed for ${providerId}:`,
+      err.message,
+    );
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal helper: extract per-provider {buy, sell} from a booking document
+// Returns Map<providerId:string, { buy: number, sell: number }>
+// ─────────────────────────────────────────────────────────────────────────────
+export const computeServiceDeltas = (booking) => {
+  const map = new Map();
+
+  const add = (pid, buy, sell) => {
+    if (!pid) return;
+    const k = pid.toString();
+    const cur = map.get(k) || { buy: 0, sell: 0 };
+    map.set(k, {
+      buy: cur.buy + (Number(buy) || 0),
+      sell: cur.sell + (Number(sell) || 0),
+    });
+  };
+
+  for (const item of booking.accommodations || []) {
+    add(item.hotel, item.buy, item.sell);
+  }
+  for (const item of booking.carRentals || []) {
+    add(item.provider, item.buy, item.sell);
+  }
+  for (const item of booking.carWithDriver || []) {
+    add(item.provider, item.buy, item.sell);
+  }
+
+  return map;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: full recalculation from scratch (admin resync endpoint)
+//
+// Scans all four source collections and overwrites Provider.summary
+// with precise values.  Safe to call at any time — idempotent.
+// ─────────────────────────────────────────────────────────────────────────────
+export const resyncProviderSummary = async (providerId) => {
+  // Lazy model references to avoid circular imports
+  const Booking = mongoose.model("Booking");
+  const ProviderPayment = mongoose.model("ProviderPayment");
+  const Payment = mongoose.model("Payment");
+  const ProviderCollection = mongoose.model("ProviderCollection");
+
+  const providerObjId = new mongoose.Types.ObjectId(providerId);
+
+  // ── 1. Scan all bookings that reference this provider in any service role ──
+  const bookings = await Booking.find({
+    $or: [
+      { provider: providerObjId },
+      { "accommodations.hotel": providerObjId },
+      { "carRentals.provider": providerObjId },
+      { "carWithDriver.provider": providerObjId },
+    ],
+  }).lean();
+
+  let totalBuy = 0;
+  let totalSell = 0;
+
+  for (const booking of bookings) {
+    for (const item of booking.accommodations || []) {
+      if (item.hotel?.toString() === providerId) {
+        totalBuy += Number(item.buy) || 0;
+        totalSell += Number(item.sell) || 0;
+      }
+    }
+    for (const item of booking.carRentals || []) {
+      if (item.provider?.toString() === providerId) {
+        totalBuy += Number(item.buy) || 0;
+        totalSell += Number(item.sell) || 0;
+      }
+    }
+    for (const item of booking.carWithDriver || []) {
+      if (item.provider?.toString() === providerId) {
+        totalBuy += Number(item.buy) || 0;
+        totalSell += Number(item.sell) || 0;
+      }
+    }
+  }
+
+  // ── 2. Aggregate the three payment types ───────────────────────────────────
+  const [provPayAgg, directPayAgg, collectionAgg] = await Promise.all([
+    ProviderPayment.aggregate([
+      { $match: { provider: providerObjId } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+    Payment.aggregate([
+      { $match: { providerRecipient: providerObjId } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+    ProviderCollection.aggregate([
+      { $match: { provider: providerObjId } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+  ]);
+
+  const totalWeHavePaid = provPayAgg[0]?.total || 0;
+  const totalCustomersPaidDirect = directPayAgg[0]?.total || 0;
+  const totalCollectedFromProvider = collectionAgg[0]?.total || 0;
+
+  // ── 3. Derive computed fields ───────────────────────────────────────────────
+  const totalCredits = totalWeHavePaid + totalCustomersPaidDirect;
+  const currentBalance = totalBuy - totalCredits + totalCollectedFromProvider;
+
+  const balanceType =
+    currentBalance > 0.01
+      ? "we_owe_provider"
+      : currentBalance < -0.01
+        ? "provider_owes_us"
+        : "settled";
+
+  const balanceLabel =
+    balanceType === "we_owe_provider"
+      ? `Agency owes provider: $${currentBalance.toFixed(2)}`
+      : balanceType === "provider_owes_us"
+        ? `Provider owes agency: $${Math.abs(currentBalance).toFixed(2)}`
+        : "Account settled — no outstanding balance";
+
+  // ── 4. Overwrite with precise values ───────────────────────────────────────
+  await providerModel.findByIdAndUpdate(providerId, {
+    $set: {
+      "summary.totalBuy": totalBuy,
+      "summary.totalSell": totalSell,
+      "summary.totalWeHavePaid": totalWeHavePaid,
+      "summary.totalCustomersPaidDirect": totalCustomersPaidDirect,
+      "summary.totalCollectedFromProvider": totalCollectedFromProvider,
+      "summary.totalCredits": totalCredits,
+      "summary.currentBalance": currentBalance,
+      "summary.balanceType": balanceType,
+      "summary.balanceLabel": balanceLabel,
+      "summary.lastSynced": new Date(),
+    },
+  });
+
+  return {
+    totalBuy,
+    totalSell,
+    totalWeHavePaid,
+    totalCustomersPaidDirect,
+    totalCollectedFromProvider,
+    totalCredits,
+    currentBalance,
+    balanceType,
+    balanceLabel,
+  };
 };
 </file>
 
@@ -4650,75 +5101,6 @@ export default async function globalTeardown() {
 }
 </file>
 
-<file path="tests/setup/testApp.js">
-/**
- * Test-only Express application.
- *
- * Mirrors app.js exactly EXCEPT it does not call connectDB().
- * Each integration test suite connects to the memory server itself
- * via connectTestDB() from tests/setup/db.js, giving us full control
- * over the connection lifecycle.
- *
- * WHY a separate file instead of importing app.js:
- *   app.js calls connectDB() at module load time. If we import it in tests,
- *   Mongoose tries to connect to DBURI immediately — before our memory server
- *   URI is necessarily ready. A separate file avoids that race condition.
- */
-import express from "express";
-import cors from "cors";
-import helmet from "helmet";
-
-import authRouter from "../../src/modules/auth/auth.router.js";
-import bookingRouter from "../../src/modules/booking/booking.router.js";
-import paymentRouter from "../../src/modules/payment/payment.router.js";
-import providerRouter from "../../src/modules/provider/provider.router.js";
-import logRouter from "../../src/modules/log/log.router.js";
-import dashboardRouter from "../../src/modules/dashboard/dashboard.router.js";
-import statementRouter from "../../src/modules/statement/statement.router.js";
-import voucherRouter from "../../src/modules/voucher/voucher.router.js";
-import expenseRouter from "../../src/modules/expense/expense.router.js";
-import providerPaymentRouter from "../../src/modules/providerPayment/providerPayment.router.js";
-import providerCollectionRouter from "../../src/modules/providerCollection/providerCollection.router.js";
-import reportRouter from "../../src/modules/report/report.router.js";
-
-const app = express();
-
-app.use(helmet());
-app.use(cors({ origin: "*", credentials: true }));
-app.use(express.json({ limit: "10kb" }));
-
-const baseUrl = "/api/v1";
-
-app.use(`${baseUrl}/auth`, authRouter);
-app.use(`${baseUrl}/booking`, bookingRouter);
-app.use(`${baseUrl}/booking`, paymentRouter);
-app.use(`${baseUrl}/provider`, providerRouter);
-app.use(`${baseUrl}/log`, logRouter);
-app.use(`${baseUrl}/dashboard`, dashboardRouter);
-app.use(`${baseUrl}/statement`, statementRouter);
-app.use(`${baseUrl}/voucher`, voucherRouter);
-app.use(`${baseUrl}/expense`, expenseRouter);
-app.use(`${baseUrl}/provider-payment`, providerPaymentRouter);
-app.use(`${baseUrl}/provider-collection`, providerCollectionRouter);
-app.use(`${baseUrl}/report`, reportRouter);
-
-// Global error handler (mirrors app.js).
-app.use((err, req, res, next) => {
-  const status = err.cause || 500;
-  return res.status(status).json({
-    success: false,
-    message: err.message || "Server Error",
-    errors: null,
-  });
-});
-
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: "Route not found" });
-});
-
-export default app;
-</file>
-
 <file path="DB/adminSeed.js">
 import logModel from "./model/log.model.js";
 import userModel from "./model/user.model.js";
@@ -4842,84 +5224,98 @@ paymentSchema.index({ providerRecipient: 1, date: -1 });
 export default mongoose.model("Payment", paymentSchema);
 </file>
 
-<file path="DB/model/provider.model.js">
+<file path="DB/model/providerPayment.model.js">
 import mongoose from "mongoose";
+import { applyProviderSummaryDelta } from "../../src/services/providerSummaryService.js";
 
 /**
- * Embedded financial summary for a provider.
+ * Records money paid OUT to a provider (hotel, car company, etc.).
  *
- * All fields are updated atomically via a single MongoDB aggregation-pipeline
- * update in providerSummaryService.applyProviderSummaryDelta(). They represent
- * "all-time" totals and are derived from four source collections:
+ * This is the liability side of the ledger:
+ *   - paymentModel  → money received FROM customers
+ *   - providerPaymentModel → money paid TO providers
  *
- *   totalBuy                ← Σ(service.buy)  across all bookings
- *   totalSell               ← Σ(service.sell) across all bookings
- *   totalWeHavePaid         ← Σ(ProviderPayment.amount)
- *   totalCustomersPaidDirect← Σ(Payment.amount where providerRecipient = this)
- *   totalCollectedFromProvider ← Σ(ProviderCollection.amount)
- *
- * Derived fields (recomputed in the same DB round-trip):
- *   totalCredits = totalWeHavePaid + totalCustomersPaidDirect
- *   currentBalance = totalBuy − totalCredits + totalCollectedFromProvider
- *   balanceType / balanceLabel = human-readable position
- *
- * Balance semantics:
- *   > 0  → we still owe the provider ("we_owe_provider")
- *   < 0  → provider owes us (they collected more than their service cost)
- *   = 0  → settled
+ * Hooks here keep Provider.summary.totalWeHavePaid in sync automatically.
  */
-const providerSummarySchema = new mongoose.Schema(
+const providerPaymentSchema = new mongoose.Schema(
   {
-    totalBuy: { type: Number, default: 0 },
-    totalSell: { type: Number, default: 0 },
-    totalWeHavePaid: { type: Number, default: 0 },
-    totalCustomersPaidDirect: { type: Number, default: 0 },
-    totalCollectedFromProvider: { type: Number, default: 0 },
-    // Derived — recomputed on every delta update
-    totalCredits: { type: Number, default: 0 },
-    currentBalance: { type: Number, default: 0 },
-    balanceType: {
-      type: String,
-      enum: ["we_owe_provider", "provider_owes_us", "settled"],
-      default: "settled",
+    provider: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Provider",
+      required: [true, "Provider is required"],
+      index: true,
     },
-    balanceLabel: {
-      type: String,
-      default: "Account settled — no outstanding balance",
+    amount: {
+      type: Number,
+      required: [true, "Amount is required"],
+      min: [0.01, "Amount must be greater than 0"],
     },
-    // When was this summary last written (for debugging / staleness checks)
-    lastSynced: { type: Date, default: null },
-  },
-  { _id: false }, // embedded — no separate _id needed
-);
-
-const providerSchema = new mongoose.Schema(
-  {
-    name: { type: String, required: true },
-    type: {
-      type: String,
-      enum: ["hotel", "car_rental", "driver_company", "tourism"],
+    date: {
+      type: Date,
+      default: Date.now,
       required: true,
     },
-    currentSequence: { type: Number, default: 0 },
-    totalBookings: { type: Number, default: 0 },
-    phone: String,
-    address: String,
-
-    /**
-     * Persisted financial summary — O(1) read instead of multi-collection scan.
-     * Kept in sync automatically by Mongoose hooks on Booking, ProviderPayment,
-     * Payment (controller-level), and ProviderCollection.
-     *
-     * Use providerSummaryService.resyncProviderSummary() to rebuild from scratch
-     * if drift is suspected.
-     */
-    summary: { type: providerSummarySchema, default: () => ({}) },
+    method: {
+      type: String,
+      enum: ["cash", "bank_transfer", "check", "other"],
+      default: "cash",
+    },
+    notes: {
+      type: String,
+      trim: true,
+      maxlength: [300, "Notes too long"],
+    },
+    // External reference: invoice number, wire transfer ID, cheque number, etc.
+    reference: {
+      type: String,
+      trim: true,
+      maxlength: [100, "Reference too long"],
+    },
+    recordedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
   },
   { timestamps: true },
 );
 
-export default mongoose.model("Provider", providerSchema);
+providerPaymentSchema.index({ provider: 1, date: -1 });
+
+// ── post-save: increment totalWeHavePaid ─────────────────────────────────────
+providerPaymentSchema.post("save", async function () {
+  try {
+    await applyProviderSummaryDelta(this.provider, {
+      totalWeHavePaid: this.amount,
+    });
+  } catch (err) {
+    console.error(
+      "❌ Provider summary sync failed after providerPayment save:",
+      err.message,
+    );
+  }
+});
+
+// ── post-deleteOne: reverse the increment ────────────────────────────────────
+// Triggered only by doc.deleteOne() — the controller uses this form.
+providerPaymentSchema.post(
+  "deleteOne",
+  { document: true, query: false },
+  async function () {
+    try {
+      await applyProviderSummaryDelta(this.provider, {
+        totalWeHavePaid: -this.amount,
+      });
+    } catch (err) {
+      console.error(
+        "❌ Provider summary sync failed after providerPayment delete:",
+        err.message,
+      );
+    }
+  },
+);
+
+export default mongoose.model("ProviderPayment", providerPaymentSchema);
 </file>
 
 <file path="DB/model/user.model.js">
@@ -5130,154 +5526,6 @@ export const updateUser = {
     }),
   }),
 };
-</file>
-
-<file path="src/modules/indexRouter.js">
-import authRouter from "./auth/auth.router.js";
-import bookingRouter from "./booking/booking.router.js";
-import providerRouter from "./provider/provider.router.js";
-import logRouter from "./log/log.router.js";
-import paymentRouter from "./payment/payment.router.js";
-import dashboardRouter from "./dashboard/dashboard.router.js";
-import statementRouter from "./statement/statement.router.js";
-import voucherRouter from "./voucher/voucher.router.js";
-import expenseRouter from "./expense/expense.router.js";
-import providerPaymentRouter from "./providerPayment/providerPayment.router.js";
-import providerCollectionRouter from "./providerCollection/providerCollection.router.js";
-import reportRouter from "./report/report.router.js";
-
-export {
-  authRouter,
-  bookingRouter,
-  providerRouter,
-  logRouter,
-  paymentRouter,
-  dashboardRouter,
-  statementRouter,
-  voucherRouter,
-  expenseRouter,
-  providerPaymentRouter,
-  providerCollectionRouter,
-  reportRouter,
-};
-</file>
-
-<file path="src/modules/payment/payment.validation.js">
-import Joi from "joi";
-
-export const addPayment = {
-  body: Joi.object({
-    amount: Joi.number().positive().required().messages({
-      "number.positive": "Amount must be greater than 0",
-      "number.base": "Amount must be a number",
-      "any.required": "Amount is required",
-    }),
-    date: Joi.date().max("now").optional().messages({
-      "date.max": "Payment date cannot be in the future",
-    }),
-    method: Joi.string()
-      .valid("cash", "bank_transfer", "check", "other")
-      .default("cash"),
-    notes: Joi.string().trim().max(300).optional().allow(""),
-
-    /**
-     * Optional. When provided, indicates the customer paid this provider
-     * directly instead of paying our office.
-     *
-     * Accounting effects:
-     *   1. booking.totalPaid increases by `amount` → customer's debt is cleared.
-     *   2. In the provider current-account ledger, `amount` is treated as a
-     *      credit: it retires the buy-price debt AND may transfer profit to
-     *      the provider as a receivable they hold for us.
-     *
-     * Must reference a provider that is actually linked to the booking
-     * (enforced in the controller via getLinkedProviderIds).
-     */
-    providerRecipient: Joi.string().hex().length(24).optional().messages({
-      "string.hex": "Invalid provider ID",
-      "string.length": "Invalid provider ID",
-    }),
-  }),
-  params: Joi.object({
-    id: Joi.string().hex().length(24).required().messages({
-      "string.hex": "Invalid booking ID",
-      "string.length": "Invalid booking ID",
-    }),
-  }),
-};
-
-export const deletePayment = {
-  params: Joi.object({
-    paymentId: Joi.string().hex().length(24).required().messages({
-      "string.hex": "Invalid payment ID",
-    }),
-  }),
-};
-</file>
-
-<file path="src/modules/provider/provider.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import { validation } from "../../middleware/validation.js";
-import * as providerController from "./controller/provider.controller.js";
-import * as validators from "./provider.validation.js";
-import { endpoint } from "../indexEndpoint.js";
-
-const router = Router();
-
-// ── Static routes before dynamic ones ────────────────────────────────────────
-
-// POST /api/v1/provider/resync-all — rebuild all provider summaries (migration)
-router.post(
-  "/resync-all",
-  auth(endpoint.AdminOnly),
-  providerController.resyncAllProviders,
-);
-
-// ── Standard CRUD ─────────────────────────────────────────────────────────────
-
-router.post(
-  "/create",
-  auth(endpoint.provider_manage),
-  validation(validators.createProvider),
-  providerController.createProvider,
-);
-
-router.get(
-  "/getAll",
-  auth(endpoint.provider_view),
-  providerController.getAllProviders,
-);
-
-router.get(
-  "/get/:id",
-  auth(endpoint.provider_view),
-  providerController.getProviderById,
-);
-
-router.patch(
-  "/update/:id",
-  auth(endpoint.provider_manage),
-  validation(validators.updateProvider),
-  providerController.updateProvider,
-);
-
-router.delete(
-  "/delete/:id",
-  auth(endpoint.provider_manage),
-  providerController.deleteProvider,
-);
-
-// ── Per-provider resync (placed after /delete/:id intentionally) ─────────────
-
-// POST /api/v1/provider/:id/resync — rebuild a single provider's summary
-router.post(
-  "/:id/resync",
-  auth(endpoint.AdminOnly),
-  providerController.resyncProvider,
-);
-
-export default router;
 </file>
 
 <file path="src/modules/statement/statement.router.js">
@@ -7030,130 +7278,59 @@ describe("Provider — DELETE /delete/:id", () => {
 });
 </file>
 
-<file path="tests/setup/factories.js">
-/**
- * Test data factories.
- *
- * Every factory returns a plain object ready to pass to Model.create()
- * or to an HTTP request body. Factories accept partial overrides so
- * individual tests only spell out what they care about.
- *
- * Naming convention:
- *   build<Model>   → returns a plain object (no DB write)
- *   create<Model>  → writes to the DB and returns the document
- */
-import jwt from "jsonwebtoken";
-import userModel from "../../DB/model/user.model.js";
-import providerModel from "../../DB/model/provider.model.js";
+<file path="tests/setup/testApp.js">
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
 
-// ── Unique ID counter ─────────────────────────────────────────────────────────
-// Date.now() alone is not safe: multiple createUser() calls within the same
-// millisecond (which happens frequently in fast test suites) produce the same
-// email and trigger E11000 duplicate key errors on the users.email_1 index.
-// A module-level counter increments atomically per-process and never collides.
-let _seq = 0;
-const uid = () => `${Date.now()}_${++_seq}`;
+import authRouter from "../../src/modules/auth/auth.router.js";
+import bookingRouter from "../../src/modules/booking/booking.router.js";
+import paymentRouter from "../../src/modules/payment/payment.router.js";
+import providerRouter from "../../src/modules/provider/provider.router.js";
+import logRouter from "../../src/modules/log/log.router.js";
+import viewBoardRouter from "../../src/modules/viewBoard/viewBoard.router.js";
+import statementRouter from "../../src/modules/statement/statement.router.js";
+import voucherRouter from "../../src/modules/voucher/voucher.router.js";
+import expenseRouter from "../../src/modules/expense/expense.router.js";
+import providerPaymentRouter from "../../src/modules/providerPayment/providerPayment.router.js";
+import providerCollectionRouter from "../../src/modules/providerCollection/providerCollection.router.js";
+import reportRouter from "../../src/modules/report/report.router.js";
 
-// ── Plain object builders ─────────────────────────────────────────────────────
+const app = express();
 
-export const buildProvider = (overrides = {}) => ({
-  name: `Test Provider ${uid()}`,
-  type: "hotel",
-  phone: "+970591234567",
-  address: "Test Street 1",
-  currentSequence: 0,
-  ...overrides,
-});
+app.use(helmet());
+app.use(cors({ origin: "*", credentials: true }));
+app.use(express.json({ limit: "10kb" }));
 
-export const buildUser = (overrides = {}) => ({
-  userName: "TestAdmin",
-  email: `user_${uid()}@test.com`,
-  password: "Admin@123",
-  role: "admin",
-  ...overrides,
-});
+const baseUrl = "/api/v1";
 
-export const buildCustomer = (overrides = {}) => ({
-  name: "John Doe",
-  ageType: "adult",
-  ...overrides,
-});
+app.use(`${baseUrl}/auth`, authRouter);
+app.use(`${baseUrl}/booking`, bookingRouter);
+app.use(`${baseUrl}/booking`, paymentRouter);
+app.use(`${baseUrl}/provider`, providerRouter);
+app.use(`${baseUrl}/log`, logRouter);
+app.use(`${baseUrl}/view-board`, viewBoardRouter);
+app.use(`${baseUrl}/statement`, statementRouter);
+app.use(`${baseUrl}/voucher`, voucherRouter);
+app.use(`${baseUrl}/expense`, expenseRouter);
+app.use(`${baseUrl}/provider-payment`, providerPaymentRouter);
+app.use(`${baseUrl}/provider-collection`, providerCollectionRouter);
+app.use(`${baseUrl}/report`, reportRouter);
 
-export const buildAccommodation = (hotelId, overrides = {}) => ({
-  hotel: hotelId.toString(),
-  checkIn: new Date("2025-06-01"),
-  checkOut: new Date("2025-06-05"), // 4 nights
-  roomType: "Double",
-  board: "BB",
-  buy: 400,
-  sell: 600,
-  ...overrides,
-});
-
-export const buildCarRental = (providerId, overrides = {}) => ({
-  provider: providerId.toString(),
-  brand: "Toyota Camry",
-  pickUp: new Date("2025-06-01"),
-  dropOff: new Date("2025-06-05"),
-  buy: 200,
-  sell: 320,
-  ...overrides,
-});
-
-export const buildCarWithDriver = (providerId, overrides = {}) => ({
-  provider: providerId.toString(),
-  driverName: "Ahmad",
-  brand: "Mercedes",
-  buy: 100,
-  sell: 150,
-  ...overrides,
-});
-
-// ── DB-writing creators ───────────────────────────────────────────────────────
-
-export const createProvider = async (overrides = {}) => {
-  return providerModel.create(buildProvider(overrides));
-};
-
-export const createUser = async (overrides = {}) => {
-  return userModel.create(buildUser(overrides));
-};
-
-// ── Auth token helpers ────────────────────────────────────────────────────────
-
-/**
- * Signs a JWT access token for the given user document.
- * Uses the same secret and algorithm as the production auth middleware.
- *
- * @param {import('mongoose').Document} user
- * @returns {string} Authorization header value ("Bearer <token>")
- */
-export const getAuthHeader = (user) => {
-  const token = jwt.sign({ id: user._id }, process.env.SIGNINTOKEN, {
-    expiresIn: "1h",
+app.use((err, req, res, next) => {
+  const status = err.cause || 500;
+  return res.status(status).json({
+    success: false,
+    message: err.message || "Server Error",
+    errors: null,
   });
-  return `Bearer ${token}`;
-};
+});
 
-/**
- * Creates an admin user in the DB and returns a ready-to-use auth header.
- * Convenience wrapper used in beforeEach blocks.
- *
- * @param {object} overrides
- * @returns {{ user, authHeader }}
- */
-export const createAdminWithToken = async (overrides = {}) => {
-  const user = await createUser({ role: "admin", ...overrides });
-  return { user, authHeader: getAuthHeader(user) };
-};
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: "Route not found" });
+});
 
-/**
- * Creates a booking_staff user and returns auth header.
- */
-export const createBookingStaffWithToken = async (overrides = {}) => {
-  const user = await createUser({ role: "booking_staff", ...overrides });
-  return { user, authHeader: getAuthHeader(user) };
-};
+export default app;
 </file>
 
 <file path="tests/unit/bookingService.test.js">
@@ -7554,115 +7731,84 @@ describe("assignBookingSequences()", () => {
 });
 </file>
 
-<file path="app.js">
-import express from "express";
-import dotenv from "dotenv";
-import cors from "cors";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
-import connectDB from "./DB/connection.js";
-import * as indexRouter from "./src/modules/indexRouter.js";
+<file path="DB/model/provider.model.js">
+import mongoose from "mongoose";
 
-dotenv.config({ path: "./config/.env" });
-
-// ── Fail fast: abort startup if any critical env var is absent ───────────────
-const REQUIRED_ENV = [
-  "DBURI",
-  "SIGNINTOKEN",
-  "FORGOTPASSWORDTOKEN",
-  "SALTROUND",
-  "SENDEREMAIL",
-  "SENDEREMAILPASSWORD",
-  // Cloudinary — required for image uploads
-  "CLOUDINARY_CLOUD_NAME",
-  "CLOUDINARY_API_KEY",
-  "CLOUDINARY_API_SECRET",
-];
-
-const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
-if (missingEnv.length) {
-  console.error(
-    `❌ Missing required environment variables: ${missingEnv.join(", ")}`,
-  );
-  console.error("   Add them to config/.env and restart.");
-  process.exit(1);
-}
-// ─────────────────────────────────────────────────────────────────────────────
-
-const app = express();
-const port = process.env.PORT || 3000;
-
-app.use(helmet());
-
-// Trust the first proxy hop (e.g. Nginx, Railway, Render).
-app.set("trust proxy", 1);
-
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",")
-  : ["http://localhost:3000", "http://localhost:5173"];
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin))
-        return callback(null, true);
-      callback(new Error("Not allowed by CORS"));
+/**
+ * Embedded financial summary for a provider.
+ *
+ * All fields are updated atomically via a single MongoDB aggregation-pipeline
+ * update in providerSummaryService.applyProviderSummaryDelta(). They represent
+ * "all-time" totals and are derived from four source collections:
+ *
+ *   totalBuy                ← Σ(service.buy)  across all bookings
+ *   totalSell               ← Σ(service.sell) across all bookings
+ *   totalWeHavePaid         ← Σ(ProviderPayment.amount)
+ *   totalCustomersPaidDirect← Σ(Payment.amount where providerRecipient = this)
+ *   totalCollectedFromProvider ← Σ(ProviderCollection.amount)
+ *
+ * Derived fields (recomputed in the same DB round-trip):
+ *   totalCredits = totalWeHavePaid + totalCustomersPaidDirect
+ *   currentBalance = totalBuy − totalCredits + totalCollectedFromProvider
+ *   balanceType / balanceLabel = human-readable position
+ *
+ * Balance semantics:
+ *   > 0  → we still owe the provider ("we_owe_provider")
+ *   < 0  → provider owes us (they collected more than their service cost)
+ *   = 0  → settled
+ */
+const providerSummarySchema = new mongoose.Schema(
+  {
+    totalBuy: { type: Number, default: 0 },
+    totalSell: { type: Number, default: 0 },
+    totalWeHavePaid: { type: Number, default: 0 },
+    totalCustomersPaidDirect: { type: Number, default: 0 },
+    totalCollectedFromProvider: { type: Number, default: 0 },
+    // Derived — recomputed on every delta update
+    totalCredits: { type: Number, default: 0 },
+    currentBalance: { type: Number, default: 0 },
+    balanceType: {
+      type: String,
+      enum: ["we_owe_provider", "provider_owes_us", "settled"],
+      default: "settled",
     },
-    credentials: true,
-  }),
+    balanceLabel: {
+      type: String,
+      default: "Account settled — no outstanding balance",
+    },
+    // When was this summary last written (for debugging / staleness checks)
+    lastSynced: { type: Date, default: null },
+  },
+  { _id: false }, // embedded — no separate _id needed
 );
 
-app.use(express.json({ limit: "10kb" }));
+const providerSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    type: {
+      type: String,
+      enum: ["hotel", "car_rental", "driver_company", "tourism"],
+      required: true,
+    },
+    currentSequence: { type: Number, default: 0 },
+    totalBookings: { type: Number, default: 0 },
+    phone: String,
+    address: String,
 
-// Rate limiter for auth endpoints — brute force protection.
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: {
-    success: false,
-    message: "Too many requests, please try again later.",
+    /**
+     * Persisted financial summary — O(1) read instead of multi-collection scan.
+     * Kept in sync automatically by Mongoose hooks on Booking, ProviderPayment,
+     * Payment (controller-level), and ProviderCollection.
+     *
+     * Use providerSummaryService.resyncProviderSummary() to rebuild from scratch
+     * if drift is suspected.
+     */
+    summary: { type: providerSummarySchema, default: () => ({}) },
   },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+  { timestamps: true },
+);
 
-connectDB();
-
-const baseUrl = process.env.BASEURL || "/api/v1";
-
-// ── Route registration ────────────────────────────────────────────────────────
-app.use(`${baseUrl}/auth`, authLimiter, indexRouter.authRouter);
-app.use(`${baseUrl}/booking`, indexRouter.bookingRouter);
-app.use(`${baseUrl}/booking`, indexRouter.paymentRouter);
-app.use(`${baseUrl}/provider`, indexRouter.providerRouter);
-app.use(`${baseUrl}/log`, indexRouter.logRouter);
-app.use(`${baseUrl}/dashboard`, indexRouter.dashboardRouter);
-app.use(`${baseUrl}/statement`, indexRouter.statementRouter);
-app.use(`${baseUrl}/voucher`, indexRouter.voucherRouter);
-app.use(`${baseUrl}/expense`, indexRouter.expenseRouter);
-// ProviderPayment: money paid OUT to providers for their services
-app.use(`${baseUrl}/provider-payment`, indexRouter.providerPaymentRouter);
-// ProviderCollection: money collected BACK from providers who held our funds
-app.use(`${baseUrl}/provider-collection`, indexRouter.providerCollectionRouter);
-app.use(`${baseUrl}/report`, indexRouter.reportRouter);
-
-// ── Global error handler ──────────────────────────────────────────────────────
-app.use((err, req, res, next) => {
-  const status = err.cause || 500;
-  return res.status(status).json({
-    success: false,
-    message: err.message || "Server Error",
-    errors: null,
-    stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-  });
-});
-
-// ── 404 ───────────────────────────────────────────────────────────────────────
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: "Route not found" });
-});
-
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+export default mongoose.model("Provider", providerSchema);
 </file>
 
 <file path="src/middleware/auth.js">
@@ -7748,6 +7894,937 @@ export const auth = (accessRoles = []) => {
     }
   };
 };
+</file>
+
+<file path="src/modules/booking/booking.validation.js">
+import Joi from "joi";
+
+const objectId = Joi.string().hex().length(24);
+
+const customerSchema = Joi.object({
+  name: Joi.string().trim().min(2).max(100).required().messages({
+    "any.required": "Customer name is required",
+    "string.min": "Customer name must be at least 2 characters",
+  }),
+  ageType: Joi.string().valid("adult", "child", "infant").default("adult"),
+});
+
+const accommodationSchema = Joi.object({
+  hotel: objectId.required().messages({
+    "any.required": "Hotel ID is required",
+    "string.hex": "Invalid hotel ID format",
+    "string.length": "Invalid hotel ID length",
+  }),
+  checkIn: Joi.date().required().messages({
+    "any.required": "Check-in date is required",
+  }),
+  checkOut: Joi.date().greater(Joi.ref("checkIn")).required().messages({
+    "any.required": "Check-out date is required",
+    "date.greater": "Check-out must be after check-in",
+  }),
+  room: Joi.string().trim().max(50).optional().allow(""),
+  roomType: Joi.string().trim().max(50).optional().allow(""),
+  board: Joi.string().trim().max(50).optional().allow(""),
+  buy: Joi.number().min(0).default(0),
+  sell: Joi.number().min(0).default(0),
+});
+
+const carRentalSchema = Joi.object({
+  provider: objectId.required().messages({
+    "any.required": "Provider ID is required",
+    "string.hex": "Invalid provider ID format",
+    "string.length": "Invalid provider ID length",
+  }),
+  brand: Joi.string().trim().max(100).optional().allow(""),
+  pickUp: Joi.date().required().messages({
+    "any.required": "Pick-up date is required",
+  }),
+  dropOff: Joi.date().greater(Joi.ref("pickUp")).required().messages({
+    "any.required": "Drop-off date is required",
+    "date.greater": "Drop-off must be after pick-up",
+  }),
+  buy: Joi.number().min(0).default(0),
+  sell: Joi.number().min(0).default(0),
+});
+
+// Renamed from tripSchema / tripsWithDrivers
+const carWithDriverSchema = Joi.object({
+  provider: objectId.required().messages({
+    "any.required": "Provider ID is required",
+    "string.hex": "Invalid provider ID format",
+    "string.length": "Invalid provider ID length",
+  }),
+  driverName: Joi.string().trim().max(100).optional().allow(""),
+  brand: Joi.string().trim().max(100).optional().allow(""),
+  buy: Joi.number().min(0).default(0),
+  sell: Joi.number().min(0).default(0),
+});
+
+const totalPaxSchema = Joi.object({
+  adults: Joi.number().integer().min(0).default(0),
+  kids: Joi.number().integer().min(0).default(0),
+});
+
+// ── Route schemas ─────────────────────────────────────────────────────────────
+
+export const createBooking = {
+  body: Joi.object({
+    provider: objectId.required().messages({
+      "any.required": "Main provider is required",
+      "string.hex": "Invalid provider ID format",
+      "string.length": "Invalid provider ID length",
+    }),
+    status: Joi.string()
+      .valid("pending", "confirmed", "cancelled", "completed")
+      .default("pending"),
+    customers: Joi.array().items(customerSchema).min(1).required().messages({
+      "any.required": "At least one customer is required",
+      "array.min": "At least one customer is required",
+    }),
+    accommodations: Joi.array().items(accommodationSchema).default([]),
+    carRentals: Joi.array().items(carRentalSchema).default([]),
+    carWithDriver: Joi.array().items(carWithDriverSchema).default([]), // renamed
+    totalPax: totalPaxSchema.optional(),
+  }),
+};
+
+export const updateBooking = {
+  body: Joi.object({
+    status: Joi.string().valid(
+      "pending",
+      "confirmed",
+      "cancelled",
+      "completed",
+    ),
+    customers: Joi.array().items(customerSchema).min(1),
+    accommodations: Joi.array().items(accommodationSchema),
+    carRentals: Joi.array().items(carRentalSchema),
+    carWithDriver: Joi.array().items(carWithDriverSchema), // renamed
+    totalPax: totalPaxSchema,
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    id: objectId.required().messages({
+      "string.hex": "Invalid booking ID",
+      "string.length": "Invalid booking ID",
+    }),
+  }),
+};
+
+export const addService = {
+  body: Joi.object({
+    serviceType: Joi.string()
+      .valid("accommodations", "carRentals", "carWithDriver") // renamed
+      .required()
+      .messages({
+        "any.required": "serviceType is required",
+        "any.only":
+          "serviceType must be accommodations, carRentals, or carWithDriver",
+      }),
+    serviceData: Joi.object().required().messages({
+      "any.required": "serviceData is required",
+    }),
+  }),
+  params: Joi.object({
+    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
+  }),
+};
+
+export const removeService = {
+  body: Joi.object({
+    serviceType: Joi.string()
+      .valid("accommodations", "carRentals", "carWithDriver") // renamed
+      .required(),
+    serviceId: objectId.required().messages({
+      "string.hex": "Invalid service ID",
+    }),
+  }),
+  params: Joi.object({
+    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
+  }),
+};
+
+export const bookingIdParam = {
+  params: Joi.object({
+    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
+  }),
+};
+
+export const getAllBookingsQuery = {
+  query: Joi.object({
+    bookingID: Joi.number().integer().min(1),
+    provider: objectId,
+    status: Joi.string().valid(
+      "pending",
+      "confirmed",
+      "cancelled",
+      "completed",
+    ),
+    paymentStatus: Joi.string().valid("unpaid", "partial", "paid"),
+    customerName: Joi.string().trim().min(1).max(100),
+    fromDate: Joi.date(),
+    toDate: Joi.date().when("fromDate", {
+      is: Joi.exist(),
+      then: Joi.date().min(Joi.ref("fromDate")).messages({
+        "date.min": "toDate must be after fromDate",
+      }),
+    }),
+    minAmount: Joi.number().min(0),
+    maxAmount: Joi.number().min(0),
+    sortBy: Joi.string().valid(
+      "createdAt",
+      "bookingID",
+      "totalToPay",
+      "totalProfit",
+    ),
+    sortOrder: Joi.string().valid("asc", "desc"),
+    page: Joi.number().integer().min(1).default(1),
+    size: Joi.number().integer().min(1).max(100).default(10),
+  }),
+};
+</file>
+
+<file path="src/modules/indexRouter.js">
+import authRouter from "./auth/auth.router.js";
+import bookingRouter from "./booking/booking.router.js";
+import providerRouter from "./provider/provider.router.js";
+import logRouter from "./log/log.router.js";
+import paymentRouter from "./payment/payment.router.js";
+import viewBoardRouter from "./viewBoard/viewBoard.router.js";
+import statementRouter from "./statement/statement.router.js";
+import voucherRouter from "./voucher/voucher.router.js";
+import expenseRouter from "./expense/expense.router.js";
+import providerPaymentRouter from "./providerPayment/providerPayment.router.js";
+import providerCollectionRouter from "./providerCollection/providerCollection.router.js";
+import reportRouter from "./report/report.router.js";
+
+export {
+  authRouter,
+  bookingRouter,
+  providerRouter,
+  logRouter,
+  paymentRouter,
+  viewBoardRouter,
+  statementRouter,
+  voucherRouter,
+  expenseRouter,
+  providerPaymentRouter,
+  providerCollectionRouter,
+  reportRouter,
+};
+</file>
+
+<file path="src/modules/payment/payment.validation.js">
+import Joi from "joi";
+
+export const addPayment = {
+  body: Joi.object({
+    amount: Joi.number().positive().required().messages({
+      "number.positive": "Amount must be greater than 0",
+      "number.base": "Amount must be a number",
+      "any.required": "Amount is required",
+    }),
+    date: Joi.date().max("now").optional().messages({
+      "date.max": "Payment date cannot be in the future",
+    }),
+    method: Joi.string()
+      .valid("cash", "bank_transfer", "check", "other")
+      .default("cash"),
+    notes: Joi.string().trim().max(300).optional().allow(""),
+
+    /**
+     * Optional. When provided, indicates the customer paid this provider
+     * directly instead of paying our office.
+     *
+     * Accounting effects:
+     *   1. booking.totalPaid increases by `amount` → customer's debt is cleared.
+     *   2. In the provider current-account ledger, `amount` is treated as a
+     *      credit: it retires the buy-price debt AND may transfer profit to
+     *      the provider as a receivable they hold for us.
+     *
+     * Must reference a provider that is actually linked to the booking
+     * (enforced in the controller via getLinkedProviderIds).
+     */
+    providerRecipient: Joi.string().hex().length(24).optional().messages({
+      "string.hex": "Invalid provider ID",
+      "string.length": "Invalid provider ID",
+    }),
+  }),
+  params: Joi.object({
+    id: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid booking ID",
+      "string.length": "Invalid booking ID",
+    }),
+  }),
+};
+
+export const deletePayment = {
+  params: Joi.object({
+    paymentId: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid payment ID",
+    }),
+  }),
+};
+</file>
+
+<file path="src/modules/provider/provider.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as providerController from "./controller/provider.controller.js";
+import * as validators from "./provider.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// ── Static routes before dynamic ones ────────────────────────────────────────
+
+// POST /api/v1/provider/resync-all — rebuild all provider summaries (migration)
+router.post(
+  "/resync-all",
+  auth(endpoint.AdminOnly),
+  providerController.resyncAllProviders,
+);
+
+// ── Standard CRUD ─────────────────────────────────────────────────────────────
+
+router.post(
+  "/create",
+  auth(endpoint.provider_manage),
+  validation(validators.createProvider),
+  providerController.createProvider,
+);
+
+router.get(
+  "/getAll",
+  auth(endpoint.provider_view),
+  providerController.getAllProviders,
+);
+
+router.get(
+  "/get/:id",
+  auth(endpoint.provider_view),
+  providerController.getProviderById,
+);
+
+router.patch(
+  "/update/:id",
+  auth(endpoint.provider_manage),
+  validation(validators.updateProvider),
+  providerController.updateProvider,
+);
+
+router.delete(
+  "/delete/:id",
+  auth(endpoint.provider_manage),
+  providerController.deleteProvider,
+);
+
+// ── Per-provider resync (placed after /delete/:id intentionally) ─────────────
+
+// POST /api/v1/provider/:id/resync — rebuild a single provider's summary
+router.post(
+  "/:id/resync",
+  auth(endpoint.AdminOnly),
+  providerController.resyncProvider,
+);
+
+export default router;
+</file>
+
+<file path="src/modules/voucher/controller/voucher.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Service Voucher — for the provider (hotel / car company / driver)
+// Contains service details only — NO sell prices.
+// ─────────────────────────────────────────────────────────────────────────────
+export const getServiceVoucher = asyncHandler(async (req, res, next) => {
+  const { bookingId } = req.params;
+  const { serviceType, serviceIndex } = req.query;
+
+  const booking = await bookingModel
+    .findById(bookingId)
+    .populate("provider", "name phone address")
+    .populate("accommodations.hotel", "name phone address")
+    .populate("carRentals.provider", "name phone")
+    .populate("carWithDriver.provider", "name phone") // renamed
+    .lean();
+
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const generateAccommodationVouchers = () =>
+    booking.accommodations?.map((acc, i) => ({
+      voucherType: "SERVICE_VOUCHER",
+      voucherFor: "hotel",
+      voucherNumber: `VCH-${booking.bookingID}-ACC-${acc.serviceNumber || i + 1}`,
+      issueDate: new Date().toISOString(),
+      hotel: {
+        name: acc.hotel?.name || "N/A",
+        phone: acc.hotel?.phone || "",
+        address: acc.hotel?.address || "",
+      },
+      guests: booking.customers?.map((c) => ({
+        name: c.name,
+        type: c.ageType || "Adult",
+      })),
+      checkIn: acc.checkIn,
+      checkOut: acc.checkOut,
+      duration: acc.duration,
+      roomType: acc.roomType,
+      room: acc.room,
+      board: acc.board,
+      totalPax: booking.totalPax,
+      notes: "Kindly provide the mentioned services for the above guests.",
+    })) || [];
+
+  const generateCarVouchers = () =>
+    booking.carRentals?.map((car, i) => ({
+      voucherType: "SERVICE_VOUCHER",
+      voucherFor: "car_rental",
+      voucherNumber: `VCH-${booking.bookingID}-CAR-${car.serviceNumber || i + 1}`,
+      issueDate: new Date().toISOString(),
+      provider: {
+        name: car.provider?.name || "N/A",
+        phone: car.provider?.phone || "",
+      },
+      guests: booking.customers?.map((c) => ({
+        name: c.name,
+        type: c.ageType,
+      })),
+      brand: car.brand,
+      pickUp: car.pickUp,
+      dropOff: car.dropOff,
+      totalPax: booking.totalPax,
+    })) || [];
+
+  // Renamed: generateTripVouchers → generateCarWithDriverVouchers
+  const generateCarWithDriverVouchers = () =>
+    booking.carWithDriver?.map((trip, i) => ({
+      // renamed field
+      voucherType: "SERVICE_VOUCHER",
+      voucherFor: "car_with_driver", // renamed value
+      voucherNumber: `VCH-${booking.bookingID}-CWD-${trip.serviceNumber || i + 1}`, // renamed prefix
+      issueDate: new Date().toISOString(),
+      provider: {
+        name: trip.provider?.name || "N/A",
+        phone: trip.provider?.phone || "",
+      },
+      guests: booking.customers?.map((c) => ({
+        name: c.name,
+        type: c.ageType,
+      })),
+      driverName: trip.driverName,
+      brand: trip.brand,
+      totalPax: booking.totalPax,
+    })) || [];
+
+  let vouchers = [];
+
+  if (!serviceType || serviceType === "accommodations") {
+    const v = generateAccommodationVouchers();
+    vouchers.push(
+      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
+    );
+  }
+  if (!serviceType || serviceType === "carRentals") {
+    const v = generateCarVouchers();
+    vouchers.push(
+      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
+    );
+  }
+  if (!serviceType || serviceType === "carWithDriver") {
+    // renamed
+    const v = generateCarWithDriverVouchers(); // renamed
+    vouchers.push(
+      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
+    );
+  }
+
+  vouchers = vouchers.filter(Boolean);
+
+  if (!vouchers.length) {
+    return next(
+      new Error("No services found for this booking", { cause: 404 }),
+    );
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: "Service voucher generated",
+    data: {
+      bookingID: booking.bookingID,
+      issuedBy: booking.createdBy,
+      vouchersCount: vouchers.length,
+      vouchers,
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Invoice — customer-facing invoice with sell prices
+//
+// When serviceType filter is applied, totals reflect ONLY the filtered service
+// amount to avoid showing a confusing remaining-balance figure that doesn't
+// match the line items on the invoice.
+// Full booking payment status is included separately as fullBooking for reference.
+// ─────────────────────────────────────────────────────────────────────────────
+export const getInvoice = asyncHandler(async (req, res, next) => {
+  const { bookingId } = req.params;
+  const { serviceType } = req.query;
+
+  const booking = await bookingModel
+    .findById(bookingId)
+    .populate("provider", "name phone address")
+    .populate("accommodations.hotel", "name")
+    .populate("carRentals.provider", "name")
+    .populate("carWithDriver.provider", "name") // renamed
+    .populate("createdBy", "userName")
+    .lean();
+
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const payments = await paymentModel
+    .find({ booking: booking._id })
+    .populate("providerRecipient", "name") // surface direct-payment recipient
+    .sort({ date: 1 })
+    .lean();
+
+  const lineItems = [];
+  let filteredTotal = 0;
+
+  if (!serviceType || serviceType === "accommodations") {
+    booking.accommodations?.forEach((acc) => {
+      lineItems.push({
+        serviceNumber: acc.serviceNumber,
+        type: "Hotel Accommodation",
+        description: `${acc.hotel?.name || "Hotel"} — ${acc.roomType || ""} / ${acc.board || ""} / ${acc.duration || 0} Nights`,
+        checkIn: acc.checkIn,
+        checkOut: acc.checkOut,
+        amount: acc.sell,
+      });
+      filteredTotal += Number(acc.sell) || 0;
+    });
+  }
+
+  if (!serviceType || serviceType === "carRentals") {
+    booking.carRentals?.forEach((car) => {
+      lineItems.push({
+        serviceNumber: car.serviceNumber,
+        type: "Car Rental",
+        description: `${car.provider?.name || "Provider"} — ${car.brand || ""}`,
+        pickUp: car.pickUp,
+        dropOff: car.dropOff,
+        amount: car.sell,
+      });
+      filteredTotal += Number(car.sell) || 0;
+    });
+  }
+
+  if (!serviceType || serviceType === "carWithDriver") {
+    // renamed
+    booking.carWithDriver?.forEach((trip) => {
+      // renamed field
+      lineItems.push({
+        serviceNumber: trip.serviceNumber,
+        type: "Car with Driver", // renamed label
+        description: `${trip.provider?.name || "Provider"} — ${trip.brand || ""} / ${trip.driverName || ""}`,
+        amount: trip.sell,
+      });
+      filteredTotal += Number(trip.sell) || 0;
+    });
+  }
+
+  // For a filtered invoice, payments cover the booking as a whole — not
+  // individual services — so we show the filtered subtotal with a note
+  // rather than the full paid/remaining, which would be misleading.
+  const filteredTotals = serviceType
+    ? {
+        subtotal: filteredTotal,
+        note: "Payment totals below reflect the full booking — individual service payments are not tracked separately.",
+        fullBooking: {
+          totalToPay: booking.totalToPay,
+          totalPaid: booking.totalPaid,
+          remainingBalance: booking.remainingBalance,
+          paymentStatus: booking.paymentStatus,
+        },
+      }
+    : {
+        subtotal: booking.totalToPay,
+        totalToPay: booking.totalToPay,
+        totalPaid: booking.totalPaid,
+        remainingBalance: booking.remainingBalance,
+        paymentStatus: booking.paymentStatus,
+      };
+
+  const invoice = {
+    invoiceType: serviceType
+      ? `PARTIAL INVOICE - ${serviceType.toUpperCase()}`
+      : "FULL INVOICE",
+    invoiceNumber: `INV-${booking.bookingID}-${Date.now().toString().slice(-4)}`,
+    issueDate: new Date().toISOString(),
+    booking: { id: booking._id, bookingID: booking.bookingID },
+    billTo: {
+      names: booking.customers?.map((c) => c.name) || [],
+      pax: booking.totalPax,
+    },
+    issuedBy: booking.createdBy?.userName || "N/A",
+    lineItems,
+    totals: filteredTotals,
+    // Payments shown only on full invoices; surface who received each payment.
+    payments: !serviceType
+      ? payments.map((p) => ({
+          date: p.date,
+          amount: p.amount,
+          method: p.method,
+          paidTo: p.providerRecipient?.name || "Office",
+        }))
+      : [],
+  };
+
+  return res.status(200).json({
+    success: true,
+    message: serviceType
+      ? `Partial invoice for ${serviceType} generated`
+      : "Full invoice generated",
+    data: invoice,
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Receipt — payment receipt for a single payment
+// ─────────────────────────────────────────────────────────────────────────────
+export const getReceipt = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+
+  const payment = await paymentModel
+    .findById(paymentId)
+    .populate("recordedBy", "userName")
+    .populate("providerRecipient", "name") // surface direct-payment recipient
+    .lean();
+
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  const booking = await bookingModel
+    .findById(payment.booking)
+    .populate("provider", "name")
+    .lean();
+
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  const receipt = {
+    receiptType: "RECEIPT",
+    receiptNumber: `RCP-${booking.bookingID}-${payment._id.toString().slice(-6).toUpperCase()}`,
+    issueDate: new Date().toISOString(),
+    paymentDate: payment.date,
+    receivedFrom: booking.customers?.[0]?.name || "Unknown",
+    // When providerRecipient is set, the customer paid a provider directly.
+    // The receipt should reflect who actually received the money.
+    receivedBy: payment.providerRecipient?.name || "Office",
+    amount: payment.amount,
+    method: payment.method,
+    methodLabel:
+      {
+        cash: "Cash (نقداً)",
+        bank_transfer: "Bank Transfer (حوالة بنكية)",
+        check: "Check (شيك)",
+        other: "Other (أخرى)",
+      }[payment.method] || payment.method,
+    notes: payment.notes,
+    forBooking: {
+      bookingID: booking.bookingID,
+      provider: booking.provider?.name,
+    },
+    bookingSummary: {
+      totalToPay: booking.totalToPay,
+      totalPaid: booking.totalPaid,
+      remainingBalance: booking.remainingBalance,
+      paymentStatus: booking.paymentStatus,
+    },
+    recordedBy: payment.recordedBy?.userName || "N/A",
+  };
+
+  return res.status(200).json({
+    success: true,
+    message: "Receipt generated",
+    data: receipt,
+    errors: null,
+  });
+});
+</file>
+
+<file path="tests/setup/factories.js">
+/**
+ * Test data factories.
+ *
+ * Every factory returns a plain object ready to pass to Model.create()
+ * or to an HTTP request body. Factories accept partial overrides so
+ * individual tests only spell out what they care about.
+ *
+ * Naming convention:
+ *   build<Model>   → returns a plain object (no DB write)
+ *   create<Model>  → writes to the DB and returns the document
+ */
+import jwt from "jsonwebtoken";
+import userModel from "../../DB/model/user.model.js";
+import providerModel from "../../DB/model/provider.model.js";
+
+// ── Unique ID counter ─────────────────────────────────────────────────────────
+// Date.now() alone is not safe: multiple createUser() calls within the same
+// millisecond (which happens frequently in fast test suites) produce the same
+// email and trigger E11000 duplicate key errors on the users.email_1 index.
+// A module-level counter increments atomically per-process and never collides.
+let _seq = 0;
+const uid = () => `${Date.now()}_${++_seq}`;
+
+// ── Plain object builders ─────────────────────────────────────────────────────
+
+export const buildProvider = (overrides = {}) => ({
+  name: `Test Provider ${uid()}`,
+  type: "hotel",
+  phone: "+970591234567",
+  address: "Test Street 1",
+  currentSequence: 0,
+  ...overrides,
+});
+
+export const buildUser = (overrides = {}) => ({
+  userName: "TestAdmin",
+  email: `user_${uid()}@test.com`,
+  password: "Admin@123",
+  role: "admin",
+  ...overrides,
+});
+
+export const buildCustomer = (overrides = {}) => ({
+  name: "John Doe",
+  ageType: "adult",
+  ...overrides,
+});
+
+export const buildAccommodation = (hotelId, overrides = {}) => ({
+  hotel: hotelId.toString(),
+  checkIn: new Date("2025-06-01"),
+  checkOut: new Date("2025-06-05"), // 4 nights
+  roomType: "Double",
+  board: "BB",
+  buy: 400,
+  sell: 600,
+  ...overrides,
+});
+
+export const buildCarRental = (providerId, overrides = {}) => ({
+  provider: providerId.toString(),
+  brand: "Toyota Camry",
+  pickUp: new Date("2025-06-01"),
+  dropOff: new Date("2025-06-05"),
+  buy: 200,
+  sell: 320,
+  ...overrides,
+});
+
+export const buildCarWithDriver = (providerId, overrides = {}) => ({
+  provider: providerId.toString(),
+  driverName: "Ahmad",
+  brand: "Mercedes",
+  buy: 100,
+  sell: 150,
+  ...overrides,
+});
+
+// ── DB-writing creators ───────────────────────────────────────────────────────
+
+export const createProvider = async (overrides = {}) => {
+  return providerModel.create(buildProvider(overrides));
+};
+
+export const createUser = async (overrides = {}) => {
+  return userModel.create(buildUser(overrides));
+};
+
+// ── Auth token helpers ────────────────────────────────────────────────────────
+
+/**
+ * Signs a JWT access token for the given user document.
+ * Uses the same secret and algorithm as the production auth middleware.
+ *
+ * @param {import('mongoose').Document} user
+ * @returns {string} Authorization header value ("Bearer <token>")
+ */
+export const getAuthHeader = (user) => {
+  const token = jwt.sign({ id: user._id }, process.env.SIGNINTOKEN, {
+    expiresIn: "1h",
+  });
+  return `Bearer ${token}`;
+};
+
+/**
+ * Creates an admin user in the DB and returns a ready-to-use auth header.
+ * Convenience wrapper used in beforeEach blocks.
+ *
+ * @param {object} overrides
+ * @returns {{ user, authHeader }}
+ */
+export const createAdminWithToken = async (overrides = {}) => {
+  const user = await createUser({ role: "admin", ...overrides });
+  return { user, authHeader: getAuthHeader(user) };
+};
+
+/**
+ * Creates a booking_staff user and returns auth header.
+ */
+export const createBookingStaffWithToken = async (overrides = {}) => {
+  const user = await createUser({ role: "booking_staff", ...overrides });
+  return { user, authHeader: getAuthHeader(user) };
+};
+</file>
+
+<file path="app.js">
+import express from "express";
+import dotenv from "dotenv";
+import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import connectDB from "./DB/connection.js";
+import * as indexRouter from "./src/modules/indexRouter.js";
+
+dotenv.config({ path: "./config/.env" });
+
+const REQUIRED_ENV = [
+  "DBURI",
+  "SIGNINTOKEN",
+  "FORGOTPASSWORDTOKEN",
+  "SALTROUND",
+  "SENDEREMAIL",
+  "SENDEREMAILPASSWORD",
+  "CLOUDINARY_CLOUD_NAME",
+  "CLOUDINARY_API_KEY",
+  "CLOUDINARY_API_SECRET",
+];
+
+const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
+if (missingEnv.length) {
+  console.error(
+    `❌ Missing required environment variables: ${missingEnv.join(", ")}`,
+  );
+  console.error("   Add them to config/.env and restart.");
+  process.exit(1);
+}
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(helmet());
+app.set("trust proxy", 1);
+
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",")
+  : ["http://localhost:3000", "http://localhost:5173"];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin))
+        return callback(null, true);
+      callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+  }),
+);
+// app.use(cors({}));
+
+app.use(express.json({ limit: "10kb" }));
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: {
+    success: false,
+    message: "Too many requests, please try again later.",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+connectDB();
+
+const baseUrl = process.env.BASEURL || "/api/v1";
+
+app.use(`${baseUrl}/auth`, authLimiter, indexRouter.authRouter);
+app.use(`${baseUrl}/booking`, indexRouter.bookingRouter);
+app.use(`${baseUrl}/booking`, indexRouter.paymentRouter);
+app.use(`${baseUrl}/provider`, indexRouter.providerRouter);
+app.use(`${baseUrl}/log`, indexRouter.logRouter);
+app.use(`${baseUrl}/view-board`, indexRouter.viewBoardRouter);
+app.use(`${baseUrl}/statement`, indexRouter.statementRouter);
+app.use(`${baseUrl}/voucher`, indexRouter.voucherRouter);
+app.use(`${baseUrl}/expense`, indexRouter.expenseRouter);
+app.use(`${baseUrl}/provider-payment`, indexRouter.providerPaymentRouter);
+app.use(`${baseUrl}/provider-collection`, indexRouter.providerCollectionRouter);
+app.use(`${baseUrl}/report`, indexRouter.reportRouter);
+
+app.use((err, req, res, next) => {
+  const status = err.cause || 500;
+  return res.status(status).json({
+    success: false,
+    message: err.message || "Server Error",
+    errors: null,
+    stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+  });
+});
+
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: "Route not found" });
+});
+
+app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+</file>
+
+<file path="package.json">
+{
+  "name": "booking",
+  "version": "2.0.0",
+  "description": "Tourism booking management system",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
+    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/unit",
+    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/integration",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage"
+  },
+  "type": "module",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cloudinary": "^2.8.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.3.2",
+    "helmet": "^8.1.0",
+    "joi": "^18.0.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.1.2",
+    "multer": "^2.0.2",
+    "nanoid": "^5.1.6",
+    "nodemailer": "^7.0.12"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^10.0.0",
+    "supertest": "^7.0.0"
+  }
+}
 </file>
 
 <file path="src/modules/auth/controller/auth.controller.js">
@@ -8127,518 +9204,74 @@ export const uploadUserImage = asyncHandler(async (req, res, next) => {
 });
 </file>
 
-<file path="src/modules/booking/booking.validation.js">
-import Joi from "joi";
+<file path="src/modules/booking/booking.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as bookingController from "./controller/booking.controller.js";
+import * as validators from "./booking.validation.js";
+import { endpoint } from "../indexEndpoint.js";
 
-const objectId = Joi.string().hex().length(24);
+const router = Router();
 
-const customerSchema = Joi.object({
-  name: Joi.string().trim().min(2).max(100).required().messages({
-    "any.required": "Customer name is required",
-    "string.min": "Customer name must be at least 2 characters",
-  }),
-  ageType: Joi.string().valid("adult", "child", "infant").default("adult"),
-});
+router.post(
+  "/create",
+  auth(endpoint.booking_manage),
+  validation(validators.createBooking),
+  bookingController.createBooking,
+);
 
-const accommodationSchema = Joi.object({
-  hotel: objectId.required().messages({
-    "any.required": "Hotel ID is required",
-    "string.hex": "Invalid hotel ID format",
-    "string.length": "Invalid hotel ID length",
-  }),
-  checkIn: Joi.date().required().messages({
-    "any.required": "Check-in date is required",
-  }),
-  checkOut: Joi.date().greater(Joi.ref("checkIn")).required().messages({
-    "any.required": "Check-out date is required",
-    "date.greater": "Check-out must be after check-in",
-  }),
-  room: Joi.string().trim().max(50).optional().allow(""),
-  roomType: Joi.string().trim().max(50).optional().allow(""),
-  board: Joi.string().trim().max(50).optional().allow(""),
-  buy: Joi.number().min(0).default(0),
-  sell: Joi.number().min(0).default(0),
-});
+// Feature [3] + Fix [5]: Added query validation (catches invalid ObjectIds
+// before they reach MongoDB and cause a CastError 500).
+router.get(
+  "/getAll",
+  auth(endpoint.booking_view),
+  validation(validators.getAllBookingsQuery),
+  bookingController.getAllBookings,
+);
 
-const carRentalSchema = Joi.object({
-  provider: objectId.required().messages({
-    "any.required": "Provider ID is required",
-    "string.hex": "Invalid provider ID format",
-    "string.length": "Invalid provider ID length",
-  }),
-  brand: Joi.string().trim().max(100).optional().allow(""),
-  pickUp: Joi.date().required().messages({
-    "any.required": "Pick-up date is required",
-  }),
-  dropOff: Joi.date().greater(Joi.ref("pickUp")).required().messages({
-    "any.required": "Drop-off date is required",
-    "date.greater": "Drop-off must be after pick-up",
-  }),
-  buy: Joi.number().min(0).default(0),
-  sell: Joi.number().min(0).default(0),
-});
+router.get(
+  "/get/:id",
+  auth(endpoint.booking_view),
+  validation(validators.bookingIdParam),
+  bookingController.getBookingById,
+);
 
-// Renamed from tripSchema / tripsWithDrivers
-const carWithDriverSchema = Joi.object({
-  provider: objectId.required().messages({
-    "any.required": "Provider ID is required",
-    "string.hex": "Invalid provider ID format",
-    "string.length": "Invalid provider ID length",
-  }),
-  driverName: Joi.string().trim().max(100).optional().allow(""),
-  brand: Joi.string().trim().max(100).optional().allow(""),
-  buy: Joi.number().min(0).default(0),
-  sell: Joi.number().min(0).default(0),
-});
+router.patch(
+  "/edit/:id",
+  auth(endpoint.booking_manage),
+  validation(validators.updateBooking),
+  bookingController.updateBooking,
+);
 
-const totalPaxSchema = Joi.object({
-  adults: Joi.number().integer().min(0).default(0),
-  kids: Joi.number().integer().min(0).default(0),
-});
+router.patch(
+  "/:id/addService",
+  auth(endpoint.booking_manage),
+  validation(validators.addService),
+  bookingController.addServiceToBooking,
+);
 
-// ── Route schemas ─────────────────────────────────────────────────────────────
+router.patch(
+  "/:id/remove",
+  auth(endpoint.booking_manage),
+  validation(validators.removeService),
+  bookingController.removeServiceFromBooking,
+);
 
-export const createBooking = {
-  body: Joi.object({
-    provider: objectId.required().messages({
-      "any.required": "Main provider is required",
-      "string.hex": "Invalid provider ID format",
-      "string.length": "Invalid provider ID length",
-    }),
-    status: Joi.string()
-      .valid("pending", "confirmed", "cancelled", "completed")
-      .default("pending"),
-    customers: Joi.array().items(customerSchema).min(1).required().messages({
-      "any.required": "At least one customer is required",
-      "array.min": "At least one customer is required",
-    }),
-    accommodations: Joi.array().items(accommodationSchema).default([]),
-    carRentals: Joi.array().items(carRentalSchema).default([]),
-    carWithDriver: Joi.array().items(carWithDriverSchema).default([]), // renamed
-    totalPax: totalPaxSchema.optional(),
-  }),
-};
+router.delete(
+  "/delete/:id",
+  auth(endpoint.booking_delete),
+  validation(validators.bookingIdParam),
+  bookingController.deleteBooking,
+);
 
-export const updateBooking = {
-  body: Joi.object({
-    status: Joi.string().valid(
-      "pending",
-      "confirmed",
-      "cancelled",
-      "completed",
-    ),
-    customers: Joi.array().items(customerSchema).min(1),
-    accommodations: Joi.array().items(accommodationSchema),
-    carRentals: Joi.array().items(carRentalSchema),
-    carWithDriver: Joi.array().items(carWithDriverSchema), // renamed
-    totalPax: totalPaxSchema,
-  })
-    .min(1)
-    .messages({ "object.min": "At least one field is required to update" }),
-  params: Joi.object({
-    id: objectId.required().messages({
-      "string.hex": "Invalid booking ID",
-      "string.length": "Invalid booking ID",
-    }),
-  }),
-};
+router.patch(
+  "/:id/status",
+  auth(endpoint.booking_manage),
+  bookingController.editStatus,
+);
 
-export const addService = {
-  body: Joi.object({
-    serviceType: Joi.string()
-      .valid("accommodations", "carRentals", "carWithDriver") // renamed
-      .required()
-      .messages({
-        "any.required": "serviceType is required",
-        "any.only":
-          "serviceType must be accommodations, carRentals, or carWithDriver",
-      }),
-    serviceData: Joi.object().required().messages({
-      "any.required": "serviceData is required",
-    }),
-  }),
-  params: Joi.object({
-    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
-  }),
-};
-
-export const removeService = {
-  body: Joi.object({
-    serviceType: Joi.string()
-      .valid("accommodations", "carRentals", "carWithDriver") // renamed
-      .required(),
-    serviceId: objectId.required().messages({
-      "string.hex": "Invalid service ID",
-    }),
-  }),
-  params: Joi.object({
-    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
-  }),
-};
-
-export const bookingIdParam = {
-  params: Joi.object({
-    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
-  }),
-};
-
-export const getAllBookingsQuery = {
-  query: Joi.object({
-    bookingID: Joi.number().integer().min(1),
-    provider: objectId,
-    status: Joi.string().valid(
-      "pending",
-      "confirmed",
-      "cancelled",
-      "completed",
-    ),
-    paymentStatus: Joi.string().valid("unpaid", "partial", "paid"),
-    customerName: Joi.string().trim().min(1).max(100),
-    fromDate: Joi.date(),
-    toDate: Joi.date().when("fromDate", {
-      is: Joi.exist(),
-      then: Joi.date().min(Joi.ref("fromDate")).messages({
-        "date.min": "toDate must be after fromDate",
-      }),
-    }),
-    minAmount: Joi.number().min(0),
-    maxAmount: Joi.number().min(0),
-    sortBy: Joi.string().valid(
-      "createdAt",
-      "bookingID",
-      "totalToPay",
-      "totalProfit",
-    ),
-    sortOrder: Joi.string().valid("asc", "desc"),
-    page: Joi.number().integer().min(1).default(1),
-    size: Joi.number().integer().min(1).max(100).default(10),
-  }),
-};
-</file>
-
-<file path="src/modules/voucher/controller/voucher.controller.js">
-import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import bookingModel from "../../../../DB/model/booking.model.js";
-import paymentModel from "../../../../DB/model/payment.model.js";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Service Voucher — for the provider (hotel / car company / driver)
-// Contains service details only — NO sell prices.
-// ─────────────────────────────────────────────────────────────────────────────
-export const getServiceVoucher = asyncHandler(async (req, res, next) => {
-  const { bookingId } = req.params;
-  const { serviceType, serviceIndex } = req.query;
-
-  const booking = await bookingModel
-    .findById(bookingId)
-    .populate("provider", "name phone address")
-    .populate("accommodations.hotel", "name phone address")
-    .populate("carRentals.provider", "name phone")
-    .populate("carWithDriver.provider", "name phone") // renamed
-    .lean();
-
-  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
-
-  const generateAccommodationVouchers = () =>
-    booking.accommodations?.map((acc, i) => ({
-      voucherType: "SERVICE_VOUCHER",
-      voucherFor: "hotel",
-      voucherNumber: `VCH-${booking.bookingID}-ACC-${acc.serviceNumber || i + 1}`,
-      issueDate: new Date().toISOString(),
-      hotel: {
-        name: acc.hotel?.name || "N/A",
-        phone: acc.hotel?.phone || "",
-        address: acc.hotel?.address || "",
-      },
-      guests: booking.customers?.map((c) => ({
-        name: c.name,
-        type: c.ageType || "Adult",
-      })),
-      checkIn: acc.checkIn,
-      checkOut: acc.checkOut,
-      duration: acc.duration,
-      roomType: acc.roomType,
-      room: acc.room,
-      board: acc.board,
-      totalPax: booking.totalPax,
-      notes: "Kindly provide the mentioned services for the above guests.",
-    })) || [];
-
-  const generateCarVouchers = () =>
-    booking.carRentals?.map((car, i) => ({
-      voucherType: "SERVICE_VOUCHER",
-      voucherFor: "car_rental",
-      voucherNumber: `VCH-${booking.bookingID}-CAR-${car.serviceNumber || i + 1}`,
-      issueDate: new Date().toISOString(),
-      provider: {
-        name: car.provider?.name || "N/A",
-        phone: car.provider?.phone || "",
-      },
-      guests: booking.customers?.map((c) => ({
-        name: c.name,
-        type: c.ageType,
-      })),
-      brand: car.brand,
-      pickUp: car.pickUp,
-      dropOff: car.dropOff,
-      totalPax: booking.totalPax,
-    })) || [];
-
-  // Renamed: generateTripVouchers → generateCarWithDriverVouchers
-  const generateCarWithDriverVouchers = () =>
-    booking.carWithDriver?.map((trip, i) => ({
-      // renamed field
-      voucherType: "SERVICE_VOUCHER",
-      voucherFor: "car_with_driver", // renamed value
-      voucherNumber: `VCH-${booking.bookingID}-CWD-${trip.serviceNumber || i + 1}`, // renamed prefix
-      issueDate: new Date().toISOString(),
-      provider: {
-        name: trip.provider?.name || "N/A",
-        phone: trip.provider?.phone || "",
-      },
-      guests: booking.customers?.map((c) => ({
-        name: c.name,
-        type: c.ageType,
-      })),
-      driverName: trip.driverName,
-      brand: trip.brand,
-      totalPax: booking.totalPax,
-    })) || [];
-
-  let vouchers = [];
-
-  if (!serviceType || serviceType === "accommodations") {
-    const v = generateAccommodationVouchers();
-    vouchers.push(
-      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
-    );
-  }
-  if (!serviceType || serviceType === "carRentals") {
-    const v = generateCarVouchers();
-    vouchers.push(
-      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
-    );
-  }
-  if (!serviceType || serviceType === "carWithDriver") {
-    // renamed
-    const v = generateCarWithDriverVouchers(); // renamed
-    vouchers.push(
-      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
-    );
-  }
-
-  vouchers = vouchers.filter(Boolean);
-
-  if (!vouchers.length) {
-    return next(
-      new Error("No services found for this booking", { cause: 404 }),
-    );
-  }
-
-  return res.status(200).json({
-    success: true,
-    message: "Service voucher generated",
-    data: {
-      bookingID: booking.bookingID,
-      issuedBy: booking.createdBy,
-      vouchersCount: vouchers.length,
-      vouchers,
-    },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Invoice — customer-facing invoice with sell prices
-//
-// When serviceType filter is applied, totals reflect ONLY the filtered service
-// amount to avoid showing a confusing remaining-balance figure that doesn't
-// match the line items on the invoice.
-// Full booking payment status is included separately as fullBooking for reference.
-// ─────────────────────────────────────────────────────────────────────────────
-export const getInvoice = asyncHandler(async (req, res, next) => {
-  const { bookingId } = req.params;
-  const { serviceType } = req.query;
-
-  const booking = await bookingModel
-    .findById(bookingId)
-    .populate("provider", "name phone address")
-    .populate("accommodations.hotel", "name")
-    .populate("carRentals.provider", "name")
-    .populate("carWithDriver.provider", "name") // renamed
-    .populate("createdBy", "userName")
-    .lean();
-
-  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
-
-  const payments = await paymentModel
-    .find({ booking: booking._id })
-    .populate("providerRecipient", "name") // surface direct-payment recipient
-    .sort({ date: 1 })
-    .lean();
-
-  const lineItems = [];
-  let filteredTotal = 0;
-
-  if (!serviceType || serviceType === "accommodations") {
-    booking.accommodations?.forEach((acc) => {
-      lineItems.push({
-        serviceNumber: acc.serviceNumber,
-        type: "Hotel Accommodation",
-        description: `${acc.hotel?.name || "Hotel"} — ${acc.roomType || ""} / ${acc.board || ""} / ${acc.duration || 0} Nights`,
-        checkIn: acc.checkIn,
-        checkOut: acc.checkOut,
-        amount: acc.sell,
-      });
-      filteredTotal += Number(acc.sell) || 0;
-    });
-  }
-
-  if (!serviceType || serviceType === "carRentals") {
-    booking.carRentals?.forEach((car) => {
-      lineItems.push({
-        serviceNumber: car.serviceNumber,
-        type: "Car Rental",
-        description: `${car.provider?.name || "Provider"} — ${car.brand || ""}`,
-        pickUp: car.pickUp,
-        dropOff: car.dropOff,
-        amount: car.sell,
-      });
-      filteredTotal += Number(car.sell) || 0;
-    });
-  }
-
-  if (!serviceType || serviceType === "carWithDriver") {
-    // renamed
-    booking.carWithDriver?.forEach((trip) => {
-      // renamed field
-      lineItems.push({
-        serviceNumber: trip.serviceNumber,
-        type: "Car with Driver", // renamed label
-        description: `${trip.provider?.name || "Provider"} — ${trip.brand || ""} / ${trip.driverName || ""}`,
-        amount: trip.sell,
-      });
-      filteredTotal += Number(trip.sell) || 0;
-    });
-  }
-
-  // For a filtered invoice, payments cover the booking as a whole — not
-  // individual services — so we show the filtered subtotal with a note
-  // rather than the full paid/remaining, which would be misleading.
-  const filteredTotals = serviceType
-    ? {
-        subtotal: filteredTotal,
-        note: "Payment totals below reflect the full booking — individual service payments are not tracked separately.",
-        fullBooking: {
-          totalToPay: booking.totalToPay,
-          totalPaid: booking.totalPaid,
-          remainingBalance: booking.remainingBalance,
-          paymentStatus: booking.paymentStatus,
-        },
-      }
-    : {
-        subtotal: booking.totalToPay,
-        totalToPay: booking.totalToPay,
-        totalPaid: booking.totalPaid,
-        remainingBalance: booking.remainingBalance,
-        paymentStatus: booking.paymentStatus,
-      };
-
-  const invoice = {
-    invoiceType: serviceType
-      ? `PARTIAL INVOICE - ${serviceType.toUpperCase()}`
-      : "FULL INVOICE",
-    invoiceNumber: `INV-${booking.bookingID}-${Date.now().toString().slice(-4)}`,
-    issueDate: new Date().toISOString(),
-    booking: { id: booking._id, bookingID: booking.bookingID },
-    billTo: {
-      names: booking.customers?.map((c) => c.name) || [],
-      pax: booking.totalPax,
-    },
-    issuedBy: booking.createdBy?.userName || "N/A",
-    lineItems,
-    totals: filteredTotals,
-    // Payments shown only on full invoices; surface who received each payment.
-    payments: !serviceType
-      ? payments.map((p) => ({
-          date: p.date,
-          amount: p.amount,
-          method: p.method,
-          paidTo: p.providerRecipient?.name || "Office",
-        }))
-      : [],
-  };
-
-  return res.status(200).json({
-    success: true,
-    message: serviceType
-      ? `Partial invoice for ${serviceType} generated`
-      : "Full invoice generated",
-    data: invoice,
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Receipt — payment receipt for a single payment
-// ─────────────────────────────────────────────────────────────────────────────
-export const getReceipt = asyncHandler(async (req, res, next) => {
-  const { paymentId } = req.params;
-
-  const payment = await paymentModel
-    .findById(paymentId)
-    .populate("recordedBy", "userName")
-    .populate("providerRecipient", "name") // surface direct-payment recipient
-    .lean();
-
-  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
-
-  const booking = await bookingModel
-    .findById(payment.booking)
-    .populate("provider", "name")
-    .lean();
-
-  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
-
-  const receipt = {
-    receiptType: "RECEIPT",
-    receiptNumber: `RCP-${booking.bookingID}-${payment._id.toString().slice(-6).toUpperCase()}`,
-    issueDate: new Date().toISOString(),
-    paymentDate: payment.date,
-    receivedFrom: booking.customers?.[0]?.name || "Unknown",
-    // When providerRecipient is set, the customer paid a provider directly.
-    // The receipt should reflect who actually received the money.
-    receivedBy: payment.providerRecipient?.name || "Office",
-    amount: payment.amount,
-    method: payment.method,
-    methodLabel:
-      {
-        cash: "Cash (نقداً)",
-        bank_transfer: "Bank Transfer (حوالة بنكية)",
-        check: "Check (شيك)",
-        other: "Other (أخرى)",
-      }[payment.method] || payment.method,
-    notes: payment.notes,
-    forBooking: {
-      bookingID: booking.bookingID,
-      provider: booking.provider?.name,
-    },
-    bookingSummary: {
-      totalToPay: booking.totalToPay,
-      totalPaid: booking.totalPaid,
-      remainingBalance: booking.remainingBalance,
-      paymentStatus: booking.paymentStatus,
-    },
-    recordedBy: payment.recordedBy?.userName || "N/A",
-  };
-
-  return res.status(200).json({
-    success: true,
-    message: "Receipt generated",
-    data: receipt,
-    errors: null,
-  });
-});
+export default router;
 </file>
 
 <file path="src/services/bookingService.js">
@@ -9004,118 +9637,6 @@ bookingSchema.post(
 );
 
 export default mongoose.model("Booking", bookingSchema);
-</file>
-
-<file path="package.json">
-{
-  "name": "booking",
-  "version": "2.0.0",
-  "description": "Tourism booking management system",
-  "main": "app.js",
-  "scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
-    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/unit",
-    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/integration",
-    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --watch",
-    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage"
-  },
-  "type": "module",
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "bcrypt": "^6.0.0",
-    "cloudinary": "^2.8.0",
-    "cors": "^2.8.6",
-    "dotenv": "^17.2.3",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.3.2",
-    "helmet": "^8.1.0",
-    "joi": "^18.0.2",
-    "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.1.2",
-    "multer": "^2.0.2",
-    "nanoid": "^5.1.6",
-    "nodemailer": "^7.0.12"
-  },
-  "devDependencies": {
-    "jest": "^29.7.0",
-    "mongodb-memory-server": "^10.0.0",
-    "supertest": "^7.0.0"
-  }
-}
-</file>
-
-<file path="src/modules/booking/booking.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import { validation } from "../../middleware/validation.js";
-import * as bookingController from "./controller/booking.controller.js";
-import * as validators from "./booking.validation.js";
-import { endpoint } from "../indexEndpoint.js";
-
-const router = Router();
-
-router.post(
-  "/create",
-  auth(endpoint.booking_manage),
-  validation(validators.createBooking),
-  bookingController.createBooking,
-);
-
-// Feature [3] + Fix [5]: Added query validation (catches invalid ObjectIds
-// before they reach MongoDB and cause a CastError 500).
-router.get(
-  "/getAll",
-  auth(endpoint.booking_view),
-  validation(validators.getAllBookingsQuery),
-  bookingController.getAllBookings,
-);
-
-router.get(
-  "/get/:id",
-  auth(endpoint.booking_view),
-  validation(validators.bookingIdParam),
-  bookingController.getBookingById,
-);
-
-router.patch(
-  "/edit/:id",
-  auth(endpoint.booking_manage),
-  validation(validators.updateBooking),
-  bookingController.updateBooking,
-);
-
-router.patch(
-  "/:id/addService",
-  auth(endpoint.booking_manage),
-  validation(validators.addService),
-  bookingController.addServiceToBooking,
-);
-
-router.patch(
-  "/:id/remove",
-  auth(endpoint.booking_manage),
-  validation(validators.removeService),
-  bookingController.removeServiceFromBooking,
-);
-
-router.delete(
-  "/delete/:id",
-  auth(endpoint.booking_delete),
-  validation(validators.bookingIdParam),
-  bookingController.deleteBooking,
-);
-
-router.patch(
-  "/:id/status",
-  auth(endpoint.booking_manage),
-  bookingController.editStatus,
-);
-
-export default router;
 </file>
 
 <file path="src/modules/payment/controller/payment.controller.js">
