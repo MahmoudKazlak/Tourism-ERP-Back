@@ -37,13 +37,9 @@ export const createProvider = asyncHandler(async (req, res, next) => {
 export const deleteProvider = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
+  // Check if this provider is referenced anywhere in the bookings collection
   const hasBookings = await mongoose.model("Booking").findOne({
-    $or: [
-      { provider: id },
-      { "accommodations.hotel": id },
-      { "carRentals.provider": id },
-      { "carWithDriver.provider": id },
-    ],
+    $or: [{ provider: id }, { "services.provider": id }],
   });
 
   if (hasBookings) {

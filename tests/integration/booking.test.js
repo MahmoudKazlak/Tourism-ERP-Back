@@ -1,18 +1,9 @@
 /**
  * Integration tests — Booking module
  *
- * Tests the full HTTP request → controller → service → model → DB → response
- * stack using Supertest against the in-memory MongoDB.
- *
- * Mocking strategy:
- *   - notification.js  → all functions replaced with jest.fn() stubs.
- *     Email sends must never run in tests (no real SMTP credentials).
- *   - cloudinary.js    → stubbed — not exercised by booking routes but
- *     loaded transitively by auth.controller.js.
- *   - nodemailer       → stubbed at the bottom of the dependency chain.
- *
- * Because the project uses native ESM, mocking is done with
- * jest.unstable_mockModule() BEFORE any dynamic import() calls.
+ * Updated for the unified `services` array schema.
+ * All former named arrays (accommodations, carRentals, carWithDriver)
+ * are now a single `booking.services[]` with a `serviceType` discriminator.
  */
 
 import {
@@ -28,8 +19,6 @@ import {
 
 // ── 1. Mock external services BEFORE importing any app modules ────────────────
 
-// Capture references to the mock functions at registration time.
-// Re-importing inside tests can return stale references in some Jest ESM builds.
 const mockNotifyStatusChanged = jest.fn().mockResolvedValue(undefined);
 const mockNotifyPayment = jest.fn().mockResolvedValue(undefined);
 const mockNotifyProviderPayment = jest.fn().mockResolvedValue(undefined);
@@ -55,7 +44,8 @@ await jest.unstable_mockModule("../../src/services/cloudinary.js", () => ({
   }),
   deleteImage: jest.fn().mockResolvedValue({ result: "ok" }),
 }));
-// ── 2. Dynamic imports AFTER mocks are registered ─────────────────────────────
+
+// ── 2. Dynamic imports AFTER mocks ────────────────────────────────────────────
 
 const { default: request } = await import("supertest");
 const { default: app } = await import("../setup/testApp.js");
@@ -77,7 +67,7 @@ const { default: paymentModel } =
   await import("../../DB/model/payment.model.js");
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test lifecycle
+// Lifecycle
 // ─────────────────────────────────────────────────────────────────────────────
 
 beforeAll(connectTestDB);
@@ -89,8 +79,8 @@ afterAll(disconnectTestDB);
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Sends POST /api/v1/booking/create and returns the supertest response.
- * Accepts partial body overrides; defaults to a minimal valid booking.
+ * Sends POST /api/v1/booking/create with a minimal valid body.
+ * No services by default — add via the `overrides.services` key.
  */
 const postBooking = async (authHeader, providerId, overrides = {}) =>
   request(app)
@@ -102,6 +92,12 @@ const postBooking = async (authHeader, providerId, overrides = {}) =>
       status: "pending",
       ...overrides,
     });
+
+/**
+ * Finds the first service of a given type inside booking.services[].
+ */
+const findService = (booking, serviceType) =>
+  booking.services.find((s) => s.serviceType === serviceType);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Authentication & Authorization
@@ -133,9 +129,7 @@ describe("Auth guard on booking routes", () => {
       role: "accounting_staff",
     });
     const provider = await createProvider();
-
     const res = await postBooking(authHeader, provider._id);
-
     expect(res.status).toBe(403);
   });
 
@@ -217,17 +211,22 @@ describe("Booking creation — input validation", () => {
       .send({
         provider: provider._id,
         customers: [{ name: "Test User" }],
-        accommodations: [
+        // controller-level validation catches reversed dates
+        services: [
           {
-            hotel: provider._id,
-            checkIn: "2025-06-10",
-            checkOut: "2025-06-05", // Before checkIn — invalid
+            serviceType: "accommodation",
+            provider: provider._id.toString(),
             buy: 100,
             sell: 150,
+            details: {
+              checkIn: "2025-06-10",
+              checkOut: "2025-06-05", // before checkIn — invalid
+            },
           },
         ],
       });
 
+    // Controller's validateServiceDetails() returns 400
     expect(res.status).toBe(400);
   });
 
@@ -277,8 +276,6 @@ describe("Provider sequence — booking creation", () => {
     expect(res.status).toBe(201);
 
     const updated = await providerModel.findById(provider._id);
-
-    // The booking's bookingID must equal the provider's sequence post-increment.
     expect(res.body.data.booking.bookingID).toBe(updated.currentSequence);
     expect(res.body.data.booking.bookingID).toBe(1);
   });
@@ -318,15 +315,13 @@ describe("Provider sequence — booking creation", () => {
     const provider = await createProvider();
     const sequenceBefore = provider.currentSequence;
 
-    // Send invalid body — missing customers — so Joi rejects at middleware level.
     const res = await request(app)
       .post("/api/v1/booking/create")
       .set("Authorization", authHeader)
-      .send({ provider: provider._id }); // No customers field
+      .send({ provider: provider._id }); // missing customers
 
-    expect(res.status).toBe(400); // Validation rejected
+    expect(res.status).toBe(400);
 
-    // Provider sequence must be completely untouched.
     const updated = await providerModel.findById(provider._id);
     expect(updated.currentSequence).toBe(sequenceBefore);
   });
@@ -338,7 +333,6 @@ describe("Provider sequence — booking creation", () => {
     const res = await postBooking(authHeader, fakeId);
     expect(res.status).toBe(404);
 
-    // No provider exists to have its sequence changed — just confirm no crash.
     const allProviders = await providerModel.find({});
     allProviders.forEach((p) => {
       expect(p.currentSequence).toBe(0);
@@ -357,8 +351,7 @@ describe("Service numbering", () => {
     ({ authHeader } = await createBookingStaffWithToken());
   });
 
-  it("assigns serviceNumber = bookingID when hotel is the same as main provider", async () => {
-    // Main provider is a hotel — the accommodation uses the same provider.
+  it("assigns serviceNumber = bookingID when service provider equals main provider", async () => {
     const hotel = await createProvider({ name: "Same Hotel", type: "hotel" });
 
     const res = await request(app)
@@ -367,13 +360,13 @@ describe("Service numbering", () => {
       .send({
         provider: hotel._id.toString(),
         customers: [{ name: "Samer Khalil" }],
-        accommodations: [buildAccommodation(hotel._id)],
+        services: [buildAccommodation(hotel._id)],
       });
 
     expect(res.status).toBe(201);
 
     const { booking } = res.body.data;
-    expect(booking.accommodations[0].serviceNumber).toBe(booking.bookingID);
+    expect(booking.services[0].serviceNumber).toBe(booking.bookingID);
   });
 
   it("assigns unique serviceNumber from sub-provider sequence when hotel differs from main provider", async () => {
@@ -392,18 +385,16 @@ describe("Service numbering", () => {
       .send({
         provider: tourOperator._id.toString(),
         customers: [{ name: "Layla Ahmad" }],
-        accommodations: [buildAccommodation(hotel._id)],
+        services: [buildAccommodation(hotel._id)],
       });
 
     expect(res.status).toBe(201);
 
-    // The hotel's sequence should have incremented by 1.
     const updatedHotel = await providerModel.findById(hotel._id);
     expect(updatedHotel.currentSequence).toBe(1);
 
-    // The service number should match the hotel's new sequence.
     const { booking } = res.body.data;
-    expect(booking.accommodations[0].serviceNumber).toBe(1);
+    expect(booking.services[0].serviceNumber).toBe(1);
   });
 
   it("assigns correct service numbers for mixed service types in one booking", async () => {
@@ -426,26 +417,24 @@ describe("Service numbering", () => {
       .send({
         provider: mainProvider._id.toString(),
         customers: [{ name: "Omar Qasim" }],
-        accommodations: [buildAccommodation(hotel._id)],
-        carRentals: [buildCarRental(carCo._id)],
+        services: [buildAccommodation(hotel._id), buildCarRental(carCo._id)],
       });
 
     expect(res.status).toBe(201);
 
     const { booking } = res.body.data;
 
-    // Both sub-providers should have been incremented.
     const updatedHotel = await providerModel.findById(hotel._id);
     const updatedCar = await providerModel.findById(carCo._id);
 
     expect(updatedHotel.currentSequence).toBe(1);
     expect(updatedCar.currentSequence).toBe(1);
 
-    expect(booking.accommodations[0].serviceNumber).toBe(1);
-    expect(booking.carRentals[0].serviceNumber).toBe(1);
+    expect(findService(booking, "accommodation").serviceNumber).toBe(1);
+    expect(findService(booking, "carRental").serviceNumber).toBe(1);
   });
 
-  it("assigns sequential service numbers for multiple accommodations at the same hotel", async () => {
+  it("assigns sequential service numbers for multiple services at the same hotel", async () => {
     const mainProvider = await createProvider({
       name: "Galaxy Tours",
       type: "tourism",
@@ -459,7 +448,7 @@ describe("Service numbering", () => {
       .send({
         provider: mainProvider._id.toString(),
         customers: [{ name: "Booking One" }],
-        accommodations: [buildAccommodation(hotel._id)],
+        services: [buildAccommodation(hotel._id)],
       });
 
     // Second booking — hotel gets serviceNumber = 2
@@ -469,11 +458,11 @@ describe("Service numbering", () => {
       .send({
         provider: mainProvider._id.toString(),
         customers: [{ name: "Booking Two" }],
-        accommodations: [buildAccommodation(hotel._id)],
+        services: [buildAccommodation(hotel._id)],
       });
 
     expect(res2.status).toBe(201);
-    expect(res2.body.data.booking.accommodations[0].serviceNumber).toBe(2);
+    expect(res2.body.data.booking.services[0].serviceNumber).toBe(2);
 
     const updatedHotel = await providerModel.findById(hotel._id);
     expect(updatedHotel.currentSequence).toBe(2);
@@ -503,9 +492,7 @@ describe("Financial roll-up on booking creation", () => {
       .send({
         provider: provider._id.toString(),
         customers: [{ name: "Financial Test" }],
-        accommodations: [
-          buildAccommodation(provider._id, { buy: 400, sell: 600 }),
-        ],
+        services: [buildAccommodation(provider._id, { buy: 400, sell: 600 })],
       });
 
     expect(res.status).toBe(201);
@@ -514,7 +501,7 @@ describe("Financial roll-up on booking creation", () => {
     expect(res.body.data.booking.totalProfit).toBe(200);
   });
 
-  it("calculates correct totals for a mixed booking (accommodation + car + trip)", async () => {
+  it("calculates correct totals for a mixed booking (accommodation + car + carWithDriver)", async () => {
     const mainProvider = await createProvider({
       name: "Aqaba Tours",
       type: "tourism",
@@ -538,11 +525,11 @@ describe("Financial roll-up on booking creation", () => {
       .send({
         provider: mainProvider._id.toString(),
         customers: [{ name: "Farid Nassar" }],
-        accommodations: [
+        services: [
           buildAccommodation(hotel._id, { buy: 400, sell: 600 }),
+          buildCarRental(carCo._id, { buy: 200, sell: 320 }),
+          buildCarWithDriver(driverCo._id, { buy: 100, sell: 150 }),
         ],
-        carRentals: [buildCarRental(carCo._id, { buy: 200, sell: 320 })],
-        carWithDriver: [buildCarWithDriver(driverCo._id, { buy: 100, sell: 150 })],
       });
 
     expect(res.status).toBe(201);
@@ -565,7 +552,7 @@ describe("Financial roll-up on booking creation", () => {
       .send({
         provider: provider._id.toString(),
         customers: [{ name: "Status Check" }],
-        accommodations: [buildAccommodation(provider._id, { sell: 500 })],
+        services: [buildAccommodation(provider._id, { sell: 500 })],
       });
 
     expect(res.status).toBe(201);
@@ -575,7 +562,7 @@ describe("Financial roll-up on booking creation", () => {
     expect(booking.remainingBalance).toBe(booking.totalToPay);
   });
 
-  it("calculates hotel duration (nights) automatically from checkIn/checkOut", async () => {
+  it("calculates duration (nights) automatically from checkIn/checkOut in details", async () => {
     const provider = await createProvider({
       name: "Duration Hotel",
       type: "hotel",
@@ -587,24 +574,28 @@ describe("Financial roll-up on booking creation", () => {
       .send({
         provider: provider._id.toString(),
         customers: [{ name: "Duration Test" }],
-        accommodations: [
+        services: [
           {
-            hotel: provider._id.toString(),
-            checkIn: "2025-06-01",
-            checkOut: "2025-06-08", // 7 nights
+            serviceType: "accommodation",
+            provider: provider._id.toString(),
             buy: 700,
             sell: 1050,
+            details: {
+              checkIn: "2025-06-01",
+              checkOut: "2025-06-08", // 7 nights
+            },
           },
         ],
       });
 
     expect(res.status).toBe(201);
-    expect(res.body.data.booking.accommodations[0].duration).toBe(7);
+    // duration is stored on the service item, not the booking root
+    expect(res.body.data.booking.services[0].duration).toBe(7);
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. Booking Deletion & Sequence Rollback
+// 6. Booking Deletion
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("Booking deletion", () => {
@@ -627,7 +618,7 @@ describe("Booking deletion", () => {
     expect(deleteRes.status).toBe(403);
   });
 
-  it("decrements provider.currentSequence and totalBookings when booking is deleted", async () => {
+  it("does NOT decrement provider.currentSequence (high-water mark) when booking is deleted", async () => {
     const provider = await createProvider();
 
     const createRes = await postBooking(staffHeader, provider._id);
@@ -641,17 +632,17 @@ describe("Booking deletion", () => {
       .set("Authorization", adminHeader);
 
     const afterDelete = await providerModel.findById(provider._id);
-    expect(afterDelete.currentSequence).toBe(1);  //kazkaz
-    expect(afterDelete.totalBookings).toBe(0);
+    expect(afterDelete.currentSequence).toBe(1); // high-water mark preserved
+    expect(afterDelete.totalBookings).toBe(0); // stat counter decremented
   });
 
-  it("decrements sub-provider sequence when a service with different provider is removed", async () => {
+  it("does NOT decrement sub-provider sequence when booking with service is deleted", async () => {
     const mainProvider = await createProvider({
       name: "Main Delete Tour",
       type: "tourism",
     });
     const hotel = await createProvider({
-      name: "Hotel To Decrment",
+      name: "Hotel To Decrement",
       type: "hotel",
     });
 
@@ -661,10 +652,11 @@ describe("Booking deletion", () => {
       .send({
         provider: mainProvider._id.toString(),
         customers: [{ name: "Delete Test" }],
-        accommodations: [buildAccommodation(hotel._id)],
+        services: [buildAccommodation(hotel._id)],
       });
 
     const bookingId = createRes.body.data.booking._id;
+
     const hotelAfterCreate = await providerModel.findById(hotel._id);
     expect(hotelAfterCreate.currentSequence).toBe(1);
 
@@ -673,7 +665,7 @@ describe("Booking deletion", () => {
       .set("Authorization", adminHeader);
 
     const hotelAfterDelete = await providerModel.findById(hotel._id);
-    expect(hotelAfterDelete.currentSequence).toBe(1); //kazkaz
+    expect(hotelAfterDelete.currentSequence).toBe(1); // high-water mark preserved
   });
 
   it("also deletes associated payments when booking is deleted", async () => {
@@ -684,7 +676,6 @@ describe("Booking deletion", () => {
     const bookingId = createRes.body.data.booking._id;
     const numericBookingId = createRes.body.data.booking.bookingID;
 
-    // Manually insert a payment for this booking.
     await paymentModel.create({
       booking: bookingId,
       bookingID: numericBookingId,
@@ -759,16 +750,47 @@ describe("GET booking endpoints", () => {
     expect(res.body.data.bookings[0].bookingID).toBe(1);
   });
 
+  it("GET /booking/getAll filters by serviceType", async () => {
+    const provider = await createProvider({ type: "hotel" });
+    const carCo = await createProvider({ type: "car_rental" });
+
+    // Booking with accommodation
+    await request(app)
+      .post("/api/v1/booking/create")
+      .set("Authorization", staffHeader)
+      .send({
+        provider: provider._id.toString(),
+        customers: [{ name: "Hotel Customer" }],
+        services: [buildAccommodation(provider._id)],
+      });
+
+    // Booking with car rental only
+    await request(app)
+      .post("/api/v1/booking/create")
+      .set("Authorization", staffHeader)
+      .send({
+        provider: carCo._id.toString(),
+        customers: [{ name: "Car Customer" }],
+        services: [buildCarRental(carCo._id)],
+      });
+
+    const res = await request(app)
+      .get("/api/v1/booking/getAll?serviceType=accommodation")
+      .set("Authorization", staffHeader);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.totalCount).toBe(1);
+  });
+
   it("GET /booking/getAll returns 400 for non-ObjectId provider filter", async () => {
     const res = await request(app)
       .get("/api/v1/booking/getAll?provider=not-valid")
       .set("Authorization", staffHeader);
 
-    // Joi rejects the invalid ObjectId in the query — no MongoDB CastError.
     expect(res.status).toBe(400);
   });
 
-  it("GET /booking/get/:id returns the booking with its payments", async () => {
+  it("GET /booking/get/:id returns the booking with its services and payments", async () => {
     const provider = await createProvider();
     const createRes = await postBooking(staffHeader, provider._id);
     const bookingId = createRes.body.data.booking._id;
@@ -780,6 +802,7 @@ describe("GET booking endpoints", () => {
     expect(res.status).toBe(200);
     expect(res.body.data.booking._id).toBe(bookingId);
     expect(res.body.data.payments).toBeDefined();
+    expect(Array.isArray(res.body.data.booking.services)).toBe(true);
   });
 
   it("GET /booking/get/:id returns 404 for non-existent booking", async () => {
@@ -847,43 +870,42 @@ describe("PATCH /booking/edit/:id", () => {
     expect(updated.totalPaid).toBe(0); // unchanged
   });
 
-it("recalculates financial totals when service sell prices are updated", async () => {
-  const provider = await createProvider({ type: "hotel" });
+  it("recalculates financial totals when service sell prices are updated", async () => {
+    const provider = await createProvider({ type: "hotel" });
 
-  const createRes = await request(app)
-    .post("/api/v1/booking/create")
-    .set("Authorization", staffHeader)
-    .send({
-      provider: provider._id.toString(),
-      customers: [{ name: "Finance Update" }],
-      accommodations: [
-        buildAccommodation(provider._id, { buy: 400, sell: 600 }),
-      ],
-    });
+    const createRes = await request(app)
+      .post("/api/v1/booking/create")
+      .set("Authorization", staffHeader)
+      .send({
+        provider: provider._id.toString(),
+        customers: [{ name: "Finance Update" }],
+        services: [buildAccommodation(provider._id, { buy: 400, sell: 600 })],
+      });
 
-  const bookingId = createRes.body.data.booking._id;
+    const bookingId = createRes.body.data.booking._id;
 
-  const res = await request(app)
-    .patch(`/api/v1/booking/edit/${bookingId}`)
-    .set("Authorization", staffHeader)
-    .send({
-      accommodations: [
-        {
-          // No _id here — Joi rejects unknown keys, and the controller
-          // merges by array index so _id is not needed.
-          hotel: provider._id.toString(),
-          checkIn: "2025-06-01",
-          checkOut: "2025-06-05",
-          buy: 400,
-          sell: 800, // updated sell price
-        },
-      ],
-    });
+    const res = await request(app)
+      .patch(`/api/v1/booking/edit/${bookingId}`)
+      .set("Authorization", staffHeader)
+      .send({
+        services: [
+          {
+            serviceType: "accommodation",
+            provider: provider._id.toString(),
+            buy: 400,
+            sell: 800, // updated sell price
+            details: {
+              checkIn: "2025-06-01",
+              checkOut: "2025-06-05",
+            },
+          },
+        ],
+      });
 
-  expect(res.status).toBe(200);
-  expect(res.body.data.booking.totalToPay).toBe(800);
-  expect(res.body.data.booking.totalProfit).toBe(400);
-});
+    expect(res.status).toBe(200);
+    expect(res.body.data.booking.totalToPay).toBe(800);
+    expect(res.body.data.booking.totalProfit).toBe(400);
+  });
 
   it("returns 404 when updating a non-existent booking", async () => {
     const { default: mongoose } = await import("mongoose");
@@ -898,7 +920,6 @@ it("recalculates financial totals when service sell prices are updated", async (
   });
 
   it("triggers status change notification (mock called) when status changes", async () => {
-    // Use the top-level reference — NOT a re-import.
     mockNotifyStatusChanged.mockClear();
 
     const provider = await createProvider();
@@ -959,8 +980,15 @@ describe("Service management on existing bookings", () => {
       .patch(`/api/v1/booking/${bookingId}/addService`)
       .set("Authorization", staffHeader)
       .send({
-        serviceType: "carRentals",
-        serviceData: buildCarRental(carCo._id, { buy: 200, sell: 320 }),
+        serviceType: "carRental",
+        provider: carCo._id.toString(),
+        buy: 200,
+        sell: 320,
+        details: {
+          brand: "Toyota Camry",
+          pickUp: "2025-06-01",
+          dropOff: "2025-06-05",
+        },
       });
 
     expect(res.status).toBe(200);
@@ -968,7 +996,42 @@ describe("Service management on existing bookings", () => {
     expect(res.body.data.booking.totalToPay).toBeGreaterThan(totalBefore);
   });
 
-  it("removes a service and decrements sub-provider sequence", async () => {
+  it("adds an apartRent service to an existing booking", async () => {
+    const mainProvider = await createProvider({
+      name: "Add Apt Tour",
+      type: "tourism",
+    });
+    const aptProvider = await createProvider({
+      name: "Apt Provider",
+      type: "hotel",
+    });
+
+    const createRes = await postBooking(staffHeader, mainProvider._id);
+    const bookingId = createRes.body.data.booking._id;
+
+    const res = await request(app)
+      .patch(`/api/v1/booking/${bookingId}/addService`)
+      .set("Authorization", staffHeader)
+      .send({
+        serviceType: "apartRent",
+        provider: aptProvider._id.toString(),
+        buy: 350,
+        sell: 500,
+        details: {
+          checkIn: "2025-08-01",
+          checkOut: "2025-08-08",
+          address: "Sweifieh District, Apt 5A",
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.booking.totalToPay).toBe(500);
+    const added = findService(res.body.data.booking, "apartRent");
+    expect(added).toBeDefined();
+    expect(added.duration).toBe(7);
+  });
+
+  it("removes a service by serviceId and updates totals", async () => {
     const mainProvider = await createProvider({
       name: "Remove Service Tour",
       type: "tourism",
@@ -984,11 +1047,12 @@ describe("Service management on existing bookings", () => {
       .send({
         provider: mainProvider._id.toString(),
         customers: [{ name: "Remove Test" }],
-        accommodations: [buildAccommodation(hotel._id)],
+        services: [buildAccommodation(hotel._id)],
       });
 
     const bookingId = createRes.body.data.booking._id;
-    const serviceId = createRes.body.data.booking.accommodations[0]._id;
+    // serviceId is the MongoDB _id of the service subdocument
+    const serviceId = createRes.body.data.booking.services[0]._id;
 
     const hotelBefore = await providerModel.findById(hotel._id);
     expect(hotelBefore.currentSequence).toBe(1);
@@ -996,43 +1060,44 @@ describe("Service management on existing bookings", () => {
     const res = await request(app)
       .patch(`/api/v1/booking/${bookingId}/remove`)
       .set("Authorization", staffHeader)
-      .send({ serviceType: "accommodations", serviceId });
+      .send({ serviceId });
 
     expect(res.status).toBe(200);
+    expect(res.body.data.booking.services).toHaveLength(0);
+    expect(res.body.data.booking.totalToPay).toBe(0);
 
+    // High-water mark is never decremented
     const hotelAfter = await providerModel.findById(hotel._id);
-    expect(hotelAfter.currentSequence).toBe(1); //kazkaz
+    expect(hotelAfter.currentSequence).toBe(1);
   });
 
-  it("does NOT decrement main provider sequence when service with same provider is removed", async () => {
+  it("does NOT decrement main provider sequence when removing a service with same provider", async () => {
     const hotel = await createProvider({
       name: "Same Hotel Remove",
       type: "hotel",
     });
 
-    // Booking where hotel is both main provider and accommodation provider.
     const createRes = await request(app)
       .post("/api/v1/booking/create")
       .set("Authorization", staffHeader)
       .send({
         provider: hotel._id.toString(),
         customers: [{ name: "Same Provider Remove" }],
-        accommodations: [buildAccommodation(hotel._id)],
+        services: [buildAccommodation(hotel._id)],
       });
 
     const bookingId = createRes.body.data.booking._id;
-    const serviceId = createRes.body.data.booking.accommodations[0]._id;
+    const serviceId = createRes.body.data.booking.services[0]._id;
     const sequenceBefore = (await providerModel.findById(hotel._id))
       .currentSequence;
 
     await request(app)
       .patch(`/api/v1/booking/${bookingId}/remove`)
       .set("Authorization", staffHeader)
-      .send({ serviceType: "accommodations", serviceId });
+      .send({ serviceId });
 
-    // Main provider sequence must NOT have been decremented by removeService.
     const hotelAfter = await providerModel.findById(hotel._id);
-    expect(hotelAfter.currentSequence).toBe(sequenceBefore);
+    expect(hotelAfter.currentSequence).toBe(sequenceBefore); // unchanged
   });
 
   it("returns 404 when trying to remove a service that does not exist on the booking", async () => {
@@ -1044,10 +1109,7 @@ describe("Service management on existing bookings", () => {
     const res = await request(app)
       .patch(`/api/v1/booking/${bookingId}/remove`)
       .set("Authorization", staffHeader)
-      .send({
-        serviceType: "accommodations",
-        serviceId: new mongoose.Types.ObjectId().toString(),
-      });
+      .send({ serviceId: new mongoose.Types.ObjectId().toString() });
 
     expect(res.status).toBe(404);
     expect(res.body.message).toMatch(/service not found/i);
@@ -1078,7 +1140,7 @@ describe("Payment recording on a booking", () => {
       .send({
         provider: provider._id.toString(),
         customers: [{ name: "Payment Customer" }],
-        accommodations: [buildAccommodation(provider._id, { sell: 1000 })],
+        services: [buildAccommodation(provider._id, { sell: 1000 })],
       });
 
     const bookingId = createRes.body.data.booking._id;
@@ -1106,7 +1168,7 @@ describe("Payment recording on a booking", () => {
       .send({
         provider: provider._id.toString(),
         customers: [{ name: "Full Pay" }],
-        accommodations: [buildAccommodation(provider._id, { sell: 500 })],
+        services: [buildAccommodation(provider._id, { sell: 500 })],
       });
 
     const bookingId = createRes.body.data.booking._id;
@@ -1133,18 +1195,16 @@ describe("Payment recording on a booking", () => {
       .send({
         provider: provider._id.toString(),
         customers: [{ name: "Already Paid" }],
-        accommodations: [buildAccommodation(provider._id, { sell: 300 })],
+        services: [buildAccommodation(provider._id, { sell: 300 })],
       });
 
     const bookingId = createRes.body.data.booking._id;
 
-    // Pay in full.
     await request(app)
       .post(`/api/v1/booking/${bookingId}/payments`)
       .set("Authorization", staffHeader)
       .send({ amount: 300 });
 
-    // Try to pay again.
     const res = await request(app)
       .post(`/api/v1/booking/${bookingId}/payments`)
       .set("Authorization", staffHeader)
@@ -1166,12 +1226,11 @@ describe("Payment recording on a booking", () => {
       .send({
         provider: provider._id.toString(),
         customers: [{ name: "Delete Pay" }],
-        accommodations: [buildAccommodation(provider._id, { sell: 1000 })],
+        services: [buildAccommodation(provider._id, { sell: 1000 })],
       });
 
     const bookingId = createRes.body.data.booking._id;
 
-    // Add two payments.
     const pay1 = await request(app)
       .post(`/api/v1/booking/${bookingId}/payments`)
       .set("Authorization", staffHeader)
@@ -1184,13 +1243,11 @@ describe("Payment recording on a booking", () => {
 
     const paymentId = pay1.body.data.payment._id;
 
-    // Delete first payment.
     const deleteRes = await request(app)
       .delete(`/api/v1/booking/payments/${paymentId}`)
       .set("Authorization", adminHeader);
 
     expect(deleteRes.status).toBe(200);
-    // Only the 300 payment remains.
     expect(deleteRes.body.data.bookingSummary.totalPaid).toBe(300);
     expect(deleteRes.body.data.bookingSummary.remainingBalance).toBe(700);
     expect(deleteRes.body.data.bookingSummary.paymentStatus).toBe("partial");

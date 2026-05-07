@@ -1,4 +1,5 @@
 import Joi from "joi";
+import { SERVICE_TYPE_KEYS } from "../../config/serviceTypes.js";
 
 const objectId = Joi.string().hex().length(24);
 
@@ -10,55 +11,31 @@ const customerSchema = Joi.object({
   ageType: Joi.string().valid("adult", "child", "infant").default("adult"),
 });
 
-const accommodationSchema = Joi.object({
-  hotel: objectId.required().messages({
-    "any.required": "Hotel ID is required",
-    "string.hex": "Invalid hotel ID format",
-    "string.length": "Invalid hotel ID length",
-  }),
-  checkIn: Joi.date().required().messages({
-    "any.required": "Check-in date is required",
-  }),
-  checkOut: Joi.date().greater(Joi.ref("checkIn")).required().messages({
-    "any.required": "Check-out date is required",
-    "date.greater": "Check-out must be after check-in",
-  }),
-  room: Joi.string().trim().max(50).optional().allow(""),
-  roomType: Joi.string().trim().max(50).optional().allow(""),
-  board: Joi.string().trim().max(50).optional().allow(""),
-  buy: Joi.number().min(0).default(0),
-  sell: Joi.number().min(0).default(0),
-});
-
-const carRentalSchema = Joi.object({
+/**
+ * Generic service schema.
+ *
+ * Joi validates structure and the serviceType enum.
+ * Type-specific field requirements (e.g., checkIn/checkOut for accommodation)
+ * are enforced in the controller via validateServiceDetails(), which can
+ * give richer error messages and runs after the provider existence check.
+ */
+const serviceSchema = Joi.object({
+  serviceType: Joi.string()
+    .valid(...SERVICE_TYPE_KEYS)
+    .required()
+    .messages({
+      "any.required": "serviceType is required",
+      "any.only": `serviceType must be one of: ${SERVICE_TYPE_KEYS.join(", ")}`,
+    }),
   provider: objectId.required().messages({
-    "any.required": "Provider ID is required",
+    "any.required": "Provider ID is required for each service",
     "string.hex": "Invalid provider ID format",
     "string.length": "Invalid provider ID length",
   }),
-  brand: Joi.string().trim().max(100).optional().allow(""),
-  pickUp: Joi.date().required().messages({
-    "any.required": "Pick-up date is required",
-  }),
-  dropOff: Joi.date().greater(Joi.ref("pickUp")).required().messages({
-    "any.required": "Drop-off date is required",
-    "date.greater": "Drop-off must be after pick-up",
-  }),
   buy: Joi.number().min(0).default(0),
   sell: Joi.number().min(0).default(0),
-});
-
-// Renamed from tripSchema / tripsWithDrivers
-const carWithDriverSchema = Joi.object({
-  provider: objectId.required().messages({
-    "any.required": "Provider ID is required",
-    "string.hex": "Invalid provider ID format",
-    "string.length": "Invalid provider ID length",
-  }),
-  driverName: Joi.string().trim().max(100).optional().allow(""),
-  brand: Joi.string().trim().max(100).optional().allow(""),
-  buy: Joi.number().min(0).default(0),
-  sell: Joi.number().min(0).default(0),
+  // details holds all type-specific fields; unknown keys are allowed
+  details: Joi.object().unknown(true).default({}),
 });
 
 const totalPaxSchema = Joi.object({
@@ -82,9 +59,7 @@ export const createBooking = {
       "any.required": "At least one customer is required",
       "array.min": "At least one customer is required",
     }),
-    accommodations: Joi.array().items(accommodationSchema).default([]),
-    carRentals: Joi.array().items(carRentalSchema).default([]),
-    carWithDriver: Joi.array().items(carWithDriverSchema).default([]), // renamed
+    services: Joi.array().items(serviceSchema).default([]),
     totalPax: totalPaxSchema.optional(),
   }),
 };
@@ -98,9 +73,7 @@ export const updateBooking = {
       "completed",
     ),
     customers: Joi.array().items(customerSchema).min(1),
-    accommodations: Joi.array().items(accommodationSchema),
-    carRentals: Joi.array().items(carRentalSchema),
-    carWithDriver: Joi.array().items(carWithDriverSchema), // renamed
+    services: Joi.array().items(serviceSchema),
     totalPax: totalPaxSchema,
   })
     .min(1)
@@ -114,19 +87,7 @@ export const updateBooking = {
 };
 
 export const addService = {
-  body: Joi.object({
-    serviceType: Joi.string()
-      .valid("accommodations", "carRentals", "carWithDriver") // renamed
-      .required()
-      .messages({
-        "any.required": "serviceType is required",
-        "any.only":
-          "serviceType must be accommodations, carRentals, or carWithDriver",
-      }),
-    serviceData: Joi.object().required().messages({
-      "any.required": "serviceData is required",
-    }),
-  }),
+  body: serviceSchema,
   params: Joi.object({
     id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
   }),
@@ -134,9 +95,6 @@ export const addService = {
 
 export const removeService = {
   body: Joi.object({
-    serviceType: Joi.string()
-      .valid("accommodations", "carRentals", "carWithDriver") // renamed
-      .required(),
     serviceId: objectId.required().messages({
       "string.hex": "Invalid service ID",
     }),
@@ -156,6 +114,7 @@ export const getAllBookingsQuery = {
   query: Joi.object({
     bookingID: Joi.number().integer().min(1),
     provider: objectId,
+    serviceType: Joi.string().valid(...SERVICE_TYPE_KEYS),
     status: Joi.string().valid(
       "pending",
       "confirmed",

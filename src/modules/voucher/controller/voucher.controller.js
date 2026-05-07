@@ -1,11 +1,11 @@
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
+import {
+  SERVICE_TYPES,
+  describeService,
+} from "../../../config/serviceTypes.js";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Service Voucher — for the provider (hotel / car company / driver)
-// Contains service details only — NO sell prices.
-// ─────────────────────────────────────────────────────────────────────────────
 export const getServiceVoucher = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
   const { serviceType, serviceIndex } = req.query;
@@ -13,108 +13,56 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
   const booking = await bookingModel
     .findById(bookingId)
     .populate("provider", "name phone address")
-    .populate("accommodations.hotel", "name phone address")
-    .populate("carRentals.provider", "name phone")
-    .populate("carWithDriver.provider", "name phone") // renamed
+    .populate("services.provider", "name phone address")
     .lean();
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  const generateAccommodationVouchers = () =>
-    booking.accommodations?.map((acc, i) => ({
+  let services = booking.services || [];
+
+  // Filter by serviceType if provided
+  if (serviceType) {
+    services = services.filter((s) => s.serviceType === serviceType);
+  }
+
+  // Filter to a specific index if provided
+  if (serviceIndex !== undefined) {
+    const idx = parseInt(serviceIndex);
+    services = services[idx] ? [services[idx]] : [];
+  }
+
+  if (!services.length) {
+    return next(
+      new Error("No services found matching the filter", { cause: 404 }),
+    );
+  }
+
+  const vouchers = services.map((service) => {
+    const typeDef = SERVICE_TYPES[service.serviceType];
+    return {
       voucherType: "SERVICE_VOUCHER",
-      voucherFor: "hotel",
-      voucherNumber: `VCH-${booking.bookingID}-ACC-${acc.serviceNumber || i + 1}`,
+      voucherFor: service.serviceType,
+      voucherLabel: typeDef?.label || service.serviceType,
+      voucherNumber: `VCH-${booking.bookingID}-${typeDef?.voucherPrefix || "SRV"}-${service.serviceNumber}`,
       issueDate: new Date().toISOString(),
-      hotel: {
-        name: acc.hotel?.name || "N/A",
-        phone: acc.hotel?.phone || "",
-        address: acc.hotel?.address || "",
+      provider: {
+        name: service.provider?.name || "N/A",
+        phone: service.provider?.phone || "",
+        address: service.provider?.address || "",
       },
       guests: booking.customers?.map((c) => ({
         name: c.name,
         type: c.ageType || "Adult",
       })),
-      checkIn: acc.checkIn,
-      checkOut: acc.checkOut,
-      duration: acc.duration,
-      roomType: acc.roomType,
-      room: acc.room,
-      board: acc.board,
       totalPax: booking.totalPax,
+      duration: service.duration,
+      durationUnit: typeDef?.durationFields?.unit,
+      description: describeService(service),
+      // All type-specific fields are available under details for frontend rendering
+      details: service.details || {},
       notes: "Kindly provide the mentioned services for the above guests.",
-    })) || [];
-
-  const generateCarVouchers = () =>
-    booking.carRentals?.map((car, i) => ({
-      voucherType: "SERVICE_VOUCHER",
-      voucherFor: "car_rental",
-      voucherNumber: `VCH-${booking.bookingID}-CAR-${car.serviceNumber || i + 1}`,
-      issueDate: new Date().toISOString(),
-      provider: {
-        name: car.provider?.name || "N/A",
-        phone: car.provider?.phone || "",
-      },
-      guests: booking.customers?.map((c) => ({
-        name: c.name,
-        type: c.ageType,
-      })),
-      brand: car.brand,
-      pickUp: car.pickUp,
-      dropOff: car.dropOff,
-      totalPax: booking.totalPax,
-    })) || [];
-
-  // Renamed: generateTripVouchers → generateCarWithDriverVouchers
-  const generateCarWithDriverVouchers = () =>
-    booking.carWithDriver?.map((trip, i) => ({
-      // renamed field
-      voucherType: "SERVICE_VOUCHER",
-      voucherFor: "car_with_driver", // renamed value
-      voucherNumber: `VCH-${booking.bookingID}-CWD-${trip.serviceNumber || i + 1}`, // renamed prefix
-      issueDate: new Date().toISOString(),
-      provider: {
-        name: trip.provider?.name || "N/A",
-        phone: trip.provider?.phone || "",
-      },
-      guests: booking.customers?.map((c) => ({
-        name: c.name,
-        type: c.ageType,
-      })),
-      driverName: trip.driverName,
-      brand: trip.brand,
-      totalPax: booking.totalPax,
-    })) || [];
-
-  let vouchers = [];
-
-  if (!serviceType || serviceType === "accommodations") {
-    const v = generateAccommodationVouchers();
-    vouchers.push(
-      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
-    );
-  }
-  if (!serviceType || serviceType === "carRentals") {
-    const v = generateCarVouchers();
-    vouchers.push(
-      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
-    );
-  }
-  if (!serviceType || serviceType === "carWithDriver") {
-    // renamed
-    const v = generateCarWithDriverVouchers(); // renamed
-    vouchers.push(
-      ...(serviceIndex !== undefined ? [v[parseInt(serviceIndex)]] : v),
-    );
-  }
-
-  vouchers = vouchers.filter(Boolean);
-
-  if (!vouchers.length) {
-    return next(
-      new Error("No services found for this booking", { cause: 404 }),
-    );
-  }
+    };
+  });
 
   return res.status(200).json({
     success: true,
@@ -129,14 +77,6 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Invoice — customer-facing invoice with sell prices
-//
-// When serviceType filter is applied, totals reflect ONLY the filtered service
-// amount to avoid showing a confusing remaining-balance figure that doesn't
-// match the line items on the invoice.
-// Full booking payment status is included separately as fullBooking for reference.
-// ─────────────────────────────────────────────────────────────────────────────
 export const getInvoice = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
   const { serviceType } = req.query;
@@ -144,9 +84,7 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
   const booking = await bookingModel
     .findById(bookingId)
     .populate("provider", "name phone address")
-    .populate("accommodations.hotel", "name")
-    .populate("carRentals.provider", "name")
-    .populate("carWithDriver.provider", "name") // renamed
+    .populate("services.provider", "name")
     .populate("createdBy", "userName")
     .lean();
 
@@ -154,58 +92,34 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
 
   const payments = await paymentModel
     .find({ booking: booking._id })
-    .populate("providerRecipient", "name") // surface direct-payment recipient
+    .populate("providerRecipient", "name")
     .sort({ date: 1 })
     .lean();
 
-  const lineItems = [];
-  let filteredTotal = 0;
-
-  if (!serviceType || serviceType === "accommodations") {
-    booking.accommodations?.forEach((acc) => {
-      lineItems.push({
-        serviceNumber: acc.serviceNumber,
-        type: "Hotel Accommodation",
-        description: `${acc.hotel?.name || "Hotel"} — ${acc.roomType || ""} / ${acc.board || ""} / ${acc.duration || 0} Nights`,
-        checkIn: acc.checkIn,
-        checkOut: acc.checkOut,
-        amount: acc.sell,
-      });
-      filteredTotal += Number(acc.sell) || 0;
-    });
+  let filteredServices = booking.services || [];
+  if (serviceType) {
+    filteredServices = filteredServices.filter(
+      (s) => s.serviceType === serviceType,
+    );
   }
 
-  if (!serviceType || serviceType === "carRentals") {
-    booking.carRentals?.forEach((car) => {
-      lineItems.push({
-        serviceNumber: car.serviceNumber,
-        type: "Car Rental",
-        description: `${car.provider?.name || "Provider"} — ${car.brand || ""}`,
-        pickUp: car.pickUp,
-        dropOff: car.dropOff,
-        amount: car.sell,
-      });
-      filteredTotal += Number(car.sell) || 0;
-    });
-  }
+  const lineItems = filteredServices.map((service) => {
+    const typeDef = SERVICE_TYPES[service.serviceType];
+    return {
+      serviceNumber: service.serviceNumber,
+      type: typeDef?.label || service.serviceType,
+      description: describeService(service),
+      duration: service.duration,
+      durationUnit: typeDef?.durationFields?.unit,
+      amount: service.sell,
+    };
+  });
 
-  if (!serviceType || serviceType === "carWithDriver") {
-    // renamed
-    booking.carWithDriver?.forEach((trip) => {
-      // renamed field
-      lineItems.push({
-        serviceNumber: trip.serviceNumber,
-        type: "Car with Driver", // renamed label
-        description: `${trip.provider?.name || "Provider"} — ${trip.brand || ""} / ${trip.driverName || ""}`,
-        amount: trip.sell,
-      });
-      filteredTotal += Number(trip.sell) || 0;
-    });
-  }
+  const filteredTotal = filteredServices.reduce(
+    (sum, s) => sum + (Number(s.sell) || 0),
+    0,
+  );
 
-  // For a filtered invoice, payments cover the booking as a whole — not
-  // individual services — so we show the filtered subtotal with a note
-  // rather than the full paid/remaining, which would be misleading.
   const filteredTotals = serviceType
     ? {
         subtotal: filteredTotal,
@@ -239,7 +153,6 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
     issuedBy: booking.createdBy?.userName || "N/A",
     lineItems,
     totals: filteredTotals,
-    // Payments shown only on full invoices; surface who received each payment.
     payments: !serviceType
       ? payments.map((p) => ({
           date: p.date,
@@ -260,16 +173,13 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Receipt — payment receipt for a single payment
-// ─────────────────────────────────────────────────────────────────────────────
 export const getReceipt = asyncHandler(async (req, res, next) => {
   const { paymentId } = req.params;
 
   const payment = await paymentModel
     .findById(paymentId)
     .populate("recordedBy", "userName")
-    .populate("providerRecipient", "name") // surface direct-payment recipient
+    .populate("providerRecipient", "name")
     .lean();
 
   if (!payment) return next(new Error("Payment not found", { cause: 404 }));
@@ -287,8 +197,6 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
     issueDate: new Date().toISOString(),
     paymentDate: payment.date,
     receivedFrom: booking.customers?.[0]?.name || "Unknown",
-    // When providerRecipient is set, the customer paid a provider directly.
-    // The receipt should reflect who actually received the money.
     receivedBy: payment.providerRecipient?.name || "Office",
     amount: payment.amount,
     method: payment.method,

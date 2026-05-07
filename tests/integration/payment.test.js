@@ -1,6 +1,6 @@
 /**
  * Integration tests — Payment module
- * Covers add payment, get payments by booking, get all payments, delete payment.
+ * Updated for the unified `services` array schema.
  */
 
 import {
@@ -70,8 +70,11 @@ afterAll(disconnectTestDB);
 const BOOKING_BASE = "/api/v1/booking";
 
 /**
- * Creates a booking with a single accommodation and returns { bookingId, authHeader }.
- * sell price defaults to 1000 so tests can make meaningful partial payments.
+ * Creates a booking with a single accommodation service and returns
+ * { bookingId, bookingNumericId, authHeader }.
+ *
+ * Uses the unified `services` array — buildAccommodation() now returns
+ * a service object with serviceType: "accommodation".
  */
 const createBookingWithService = async (sellPrice = 1000) => {
   const { authHeader } = await createBookingStaffWithToken();
@@ -83,7 +86,8 @@ const createBookingWithService = async (sellPrice = 1000) => {
     .send({
       provider: provider._id.toString(),
       customers: [{ name: "Payment Test Customer", ageType: "adult" }],
-      accommodations: [
+      // ← unified services array (replaces the old `accommodations` key)
+      services: [
         buildAccommodation(provider._id, { sell: sellPrice, buy: 700 }),
       ],
     });
@@ -371,7 +375,6 @@ describe("Payment — DELETE /booking/payments/:paymentId", () => {
     expect(deleteRes.status).toBe(200);
     expect(deleteRes.body.success).toBe(true);
 
-    // Only the 300 payment remains
     const booking = await bookingModel.findById(bookingId);
     expect(booking.totalPaid).toBe(300);
     expect(booking.remainingBalance).toBe(700);

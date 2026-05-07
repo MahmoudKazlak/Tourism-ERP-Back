@@ -15,40 +15,25 @@ import mongoose from "mongoose";
 const computeProviderOwesUs = async (providerId) => {
   const providerObjId = new mongoose.Types.ObjectId(providerId);
 
-  // All bookings that reference this provider in any service role
   const bookings = await mongoose
     .model("Booking")
     .find({
       $or: [
         { provider: providerObjId },
-        { "accommodations.hotel": providerObjId },
-        { "carRentals.provider": providerObjId },
-        { "carWithDriver.provider": providerObjId },
+        { "services.provider": providerObjId },
       ],
     })
     .lean();
 
-  // Σ(buy prices of all services linked to this provider)
   let totalServiceCost = 0;
   for (const booking of bookings) {
-    for (const item of booking.accommodations || []) {
-      if (item.hotel?.toString() === providerId) {
-        totalServiceCost += Number(item.buy) || 0;
-      }
-    }
-    for (const item of booking.carRentals || []) {
-      if (item.provider?.toString() === providerId) {
-        totalServiceCost += Number(item.buy) || 0;
-      }
-    }
-    for (const item of booking.carWithDriver || []) {
-      if (item.provider?.toString() === providerId) {
-        totalServiceCost += Number(item.buy) || 0;
+    for (const service of booking.services || []) {
+      if (service.provider?.toString() === providerId) {
+        totalServiceCost += Number(service.buy) || 0;
       }
     }
   }
 
-  // Σ(ProviderPayment amounts we paid out to this provider)
   const [provPayAgg, directPayAgg, collectionAgg] = await Promise.all([
     mongoose
       .model("ProviderPayment")
@@ -56,12 +41,10 @@ const computeProviderOwesUs = async (providerId) => {
         { $match: { provider: providerObjId } },
         { $group: { _id: null, total: { $sum: "$amount" } } },
       ]),
-    // Σ(Payments where customer paid this provider directly)
     paymentModel.aggregate([
       { $match: { providerRecipient: providerObjId } },
       { $group: { _id: null, total: { $sum: "$amount" } } },
     ]),
-    // Σ(Collections we already received from this provider)
     providerCollectionModel.aggregate([
       { $match: { provider: providerObjId } },
       { $group: { _id: null, total: { $sum: "$amount" } } },
@@ -72,17 +55,13 @@ const computeProviderOwesUs = async (providerId) => {
   const customerDirectPayments = directPayAgg[0]?.total || 0;
   const alreadyCollected = collectionAgg[0]?.total || 0;
 
-  // balance = serviceCost - agencyPaymentsOut - customerDirect + collectionsFromProvider
-  // Negative balance = provider owes us |balance|
   const balance =
     totalServiceCost -
     agencyPaymentsToProvider -
     customerDirectPayments +
     alreadyCollected;
 
-  // Amount provider currently owes us (0 if we owe them, or balanced)
   const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
-
   return { balance, providerOwesUs, alreadyCollected };
 };
 

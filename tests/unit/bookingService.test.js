@@ -1,9 +1,3 @@
-/**
- * Unit tests — bookingService.js
- * Tests calculateBookingTotals() as a pure function (no DB, no Supertest).
- * Tests assignBookingSequences() against the real in-memory MongoDB.
- */
-
 import {
   jest,
   describe,
@@ -14,8 +8,6 @@ import {
   afterAll,
 } from "@jest/globals";
 
-// Register Mongoose schemas so mongoose.model("Booking") / mongoose.model("Provider")
-// resolve without throwing MissingSchemaError when called inside bookingService.
 import "../../DB/model/booking.model.js";
 import "../../DB/model/provider.model.js";
 
@@ -32,14 +24,23 @@ import providerModel from "../../DB/model/provider.model.js";
 import mongoose from "mongoose";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper — minimal document mock
+// Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+const FAKE_PROVIDER_ID = new mongoose.Types.ObjectId();
+
+const svc = (serviceType, buy, sell, detailOverrides = {}) => ({
+  serviceType,
+  provider: FAKE_PROVIDER_ID,
+  buy,
+  sell,
+  profit: 0,
+  details: detailOverrides,
+});
 
 const makeDoc = (overrides = {}) => ({
   isNew: true,
-  accommodations: [],
-  carRentals: [],
-  carWithDriver: [],
+  services: [],
   totalPaid: 0,
   totalToPay: 0,
   totalToBuy: 0,
@@ -57,22 +58,22 @@ const makeDoc = (overrides = {}) => ({
 
 describe("calculateBookingTotals()", () => {
   describe("Financial roll-up", () => {
-    it("sums sell across accommodations to produce correct totalToPay", () => {
+    it("sums sell across services to produce correct totalToPay", () => {
       const doc = makeDoc({
-        accommodations: [
-          { sell: 600, buy: 400, profit: 0 },
-          { sell: 400, buy: 300, profit: 0 },
+        services: [
+          svc("accommodation", 400, 600),
+          svc("accommodation", 300, 400),
         ],
       });
       calculateBookingTotals(doc);
       expect(doc.totalToPay).toBe(1000);
     });
 
-    it("sums buy across accommodations to produce correct totalToBuy", () => {
+    it("sums buy across services to produce correct totalToBuy", () => {
       const doc = makeDoc({
-        accommodations: [
-          { sell: 600, buy: 400, profit: 0 },
-          { sell: 400, buy: 300, profit: 0 },
+        services: [
+          svc("accommodation", 400, 600),
+          svc("accommodation", 300, 400),
         ],
       });
       calculateBookingTotals(doc);
@@ -80,18 +81,18 @@ describe("calculateBookingTotals()", () => {
     });
 
     it("totalProfit equals totalToPay minus totalToBuy", () => {
-      const doc = makeDoc({
-        accommodations: [{ sell: 600, buy: 400, profit: 0 }],
-      });
+      const doc = makeDoc({ services: [svc("accommodation", 400, 600)] });
       calculateBookingTotals(doc);
       expect(doc.totalProfit).toBe(200);
     });
 
-    it("combines accommodations + carRentals + carWithDriver totals", () => {
+    it("combines mixed service types in totals", () => {
       const doc = makeDoc({
-        accommodations: [{ sell: 600, buy: 400, profit: 0 }],
-        carRentals: [{ sell: 320, buy: 200, profit: 0 }],
-        carWithDriver: [{ sell: 150, buy: 100, profit: 0 }],
+        services: [
+          svc("accommodation", 400, 600),
+          svc("carRental", 200, 320),
+          svc("carWithDriver", 100, 150),
+        ],
       });
       calculateBookingTotals(doc);
       expect(doc.totalToPay).toBe(1070);
@@ -99,7 +100,7 @@ describe("calculateBookingTotals()", () => {
       expect(doc.totalProfit).toBe(370);
     });
 
-    it("empty doc with no services produces all-zero totals", () => {
+    it("empty services produces all-zero totals", () => {
       const doc = makeDoc();
       calculateBookingTotals(doc);
       expect(doc.totalToPay).toBe(0);
@@ -108,42 +109,35 @@ describe("calculateBookingTotals()", () => {
       expect(doc.remainingBalance).toBe(0);
     });
 
-    it("single accommodation — totals match that item's buy/sell exactly", () => {
-      const doc = makeDoc({
-        accommodations: [{ sell: 750, buy: 500, profit: 0 }],
-      });
-      calculateBookingTotals(doc);
-      expect(doc.totalToPay).toBe(750);
-      expect(doc.totalToBuy).toBe(500);
-      expect(doc.totalProfit).toBe(250);
-    });
-
     it("calculates per-item profit = sell - buy on each service", () => {
-      const acc = { sell: 600, buy: 400, profit: 0 };
-      const car = { sell: 320, buy: 200, profit: 0 };
-      const trip = { sell: 150, buy: 80, profit: 0 };
-      const doc = makeDoc({
-        accommodations: [acc],
-        carRentals: [car],
-        carWithDriver: [trip],
-      });
+      const acc = svc("accommodation", 400, 600);
+      const car = svc("carRental", 200, 320);
+      const trip = svc("trip", 80, 150);
+      const doc = makeDoc({ services: [acc, car, trip] });
       calculateBookingTotals(doc);
-      expect(doc.accommodations[0].profit).toBe(200);
-      expect(doc.carRentals[0].profit).toBe(120);
-      expect(doc.carWithDriver[0].profit).toBe(70);
+      expect(doc.services[0].profit).toBe(200);
+      expect(doc.services[1].profit).toBe(120);
+      expect(doc.services[2].profit).toBe(70);
     });
 
-    it("handles missing service arrays gracefully — no crash when carRentals is undefined", () => {
+    it("handles empty services array gracefully — no crash", () => {
       const doc = makeDoc();
-      delete doc.carRentals;
-      delete doc.carWithDriver;
       expect(() => calculateBookingTotals(doc)).not.toThrow();
       expect(doc.totalToPay).toBe(0);
     });
 
     it("handles undefined sell/buy values by treating them as 0", () => {
       const doc = makeDoc({
-        accommodations: [{ sell: undefined, buy: undefined, profit: 0 }],
+        services: [
+          {
+            serviceType: "accommodation",
+            provider: FAKE_PROVIDER_ID,
+            sell: undefined,
+            buy: undefined,
+            profit: 0,
+            details: {},
+          },
+        ],
       });
       calculateBookingTotals(doc);
       expect(doc.totalToPay).toBe(0);
@@ -152,7 +146,7 @@ describe("calculateBookingTotals()", () => {
 
     it("sets remainingBalance = totalToPay - totalPaid", () => {
       const doc = makeDoc({
-        accommodations: [{ sell: 1000, buy: 700, profit: 0 }],
+        services: [svc("accommodation", 700, 1000)],
         totalPaid: 350,
       });
       calculateBookingTotals(doc);
@@ -163,7 +157,7 @@ describe("calculateBookingTotals()", () => {
   describe("Payment status derivation", () => {
     it('sets paymentStatus to "unpaid" when totalPaid is 0', () => {
       const doc = makeDoc({
-        accommodations: [{ sell: 500, buy: 300, profit: 0 }],
+        services: [svc("accommodation", 300, 500)],
         totalPaid: 0,
       });
       calculateBookingTotals(doc);
@@ -172,7 +166,7 @@ describe("calculateBookingTotals()", () => {
 
     it('sets paymentStatus to "partial" when 0 < totalPaid < totalToPay', () => {
       const doc = makeDoc({
-        accommodations: [{ sell: 500, buy: 300, profit: 0 }],
+        services: [svc("accommodation", 300, 500)],
         totalPaid: 250,
       });
       calculateBookingTotals(doc);
@@ -181,7 +175,7 @@ describe("calculateBookingTotals()", () => {
 
     it('sets paymentStatus to "paid" when totalPaid equals totalToPay', () => {
       const doc = makeDoc({
-        accommodations: [{ sell: 500, buy: 300, profit: 0 }],
+        services: [svc("accommodation", 300, 500)],
         totalPaid: 500,
       });
       calculateBookingTotals(doc);
@@ -190,7 +184,7 @@ describe("calculateBookingTotals()", () => {
 
     it('sets paymentStatus to "paid" when totalPaid exceeds totalToPay (overpaid)', () => {
       const doc = makeDoc({
-        accommodations: [{ sell: 500, buy: 300, profit: 0 }],
+        services: [svc("accommodation", 300, 500)],
         totalPaid: 600,
       });
       calculateBookingTotals(doc);
@@ -198,65 +192,49 @@ describe("calculateBookingTotals()", () => {
     });
   });
 
-  describe("Hotel duration auto-calculation", () => {
-    it("calculates duration in nights from checkIn to checkOut", () => {
+  describe("Duration auto-calculation (durationFields)", () => {
+    it("calculates duration in nights for accommodation", () => {
       const doc = makeDoc({
-        accommodations: [
-          {
+        services: [
+          svc("accommodation", 320, 400, {
             checkIn: new Date("2025-06-01"),
             checkOut: new Date("2025-06-05"),
-            sell: 400,
-            buy: 320,
-            profit: 0,
-          },
+          }),
         ],
       });
       calculateBookingTotals(doc);
-      expect(doc.accommodations[0].duration).toBe(4);
+      expect(doc.services[0].duration).toBe(4);
     });
 
-    it("calculates duration correctly for a 1-night stay", () => {
+    it("calculates duration in days for carRental", () => {
       const doc = makeDoc({
-        accommodations: [
-          {
-            checkIn: new Date("2025-06-01"),
-            checkOut: new Date("2025-06-02"),
-            sell: 100,
-            buy: 80,
-            profit: 0,
-          },
+        services: [
+          svc("carRental", 200, 320, {
+            pickUp: new Date("2025-06-01"),
+            dropOff: new Date("2025-06-03"),
+          }),
         ],
       });
       calculateBookingTotals(doc);
-      expect(doc.accommodations[0].duration).toBe(1);
+      expect(doc.services[0].duration).toBe(2);
     });
 
-    it("skips duration calculation when checkIn or checkOut is missing", () => {
+    it("skips duration calculation when date fields are missing", () => {
       const doc = makeDoc({
-        accommodations: [
-          { checkIn: new Date("2025-06-01"), sell: 100, buy: 80, profit: 0 },
+        services: [
+          svc("accommodation", 80, 100, { checkIn: new Date("2025-06-01") }),
         ],
       });
       calculateBookingTotals(doc);
-      expect(doc.accommodations[0].duration).toBeUndefined();
+      expect(doc.services[0].duration).toBeUndefined();
     });
 
-    it("sets totalToPay correctly for a multi-night stay", () => {
+    it("does not set duration for service types without durationFields (trip)", () => {
       const doc = makeDoc({
-        accommodations: [
-          {
-            checkIn: new Date("2025-06-01"),
-            checkOut: new Date("2025-06-08"), // 7 nights
-            sell: 700,
-            buy: 490,
-            profit: 0,
-          },
-        ],
+        services: [svc("trip", 150, 250, { destination: "Petra" })],
       });
       calculateBookingTotals(doc);
-      expect(doc.accommodations[0].duration).toBe(7);
-      expect(doc.totalToPay).toBe(700);
-      expect(doc.totalProfit).toBe(210);
+      expect(doc.services[0].duration).toBeUndefined();
     });
   });
 });
@@ -274,9 +252,7 @@ describe("assignBookingSequences()", () => {
     isNew: true,
     bookingID: null,
     provider: providerId,
-    accommodations: [],
-    carRentals: [],
-    carWithDriver: [],
+    services: [],
     _id: new mongoose.Types.ObjectId(),
     isModified: (field) =>
       field === "provider" && !!overrides._providerModified,
@@ -286,7 +262,7 @@ describe("assignBookingSequences()", () => {
 
   const createTestProvider = (overrides = {}) =>
     providerModel.create({
-      name: `Provider ${Date.now()}`,
+      name: `Provider ${Date.now()}_${Math.random()}`,
       type: "hotel",
       currentSequence: 0,
       totalBookings: 0,
@@ -324,32 +300,46 @@ describe("assignBookingSequences()", () => {
   it("assigns serviceNumber = bookingID when service provider equals main provider", async () => {
     const provider = await createTestProvider();
     const doc = makeSeqDoc(provider._id, {
-      accommodations: [
-        { hotel: provider._id, serviceNumber: null, sell: 500, buy: 400 },
+      services: [
+        {
+          serviceType: "accommodation",
+          provider: provider._id,
+          serviceNumber: null,
+          sell: 500,
+          buy: 400,
+          details: {},
+        },
       ],
     });
     await assignBookingSequences(doc);
-    expect(doc.accommodations[0].serviceNumber).toBe(doc.bookingID);
+    expect(doc.services[0].serviceNumber).toBe(doc.bookingID);
   });
 
   it("increments sub-provider sequence when service uses a different provider", async () => {
     const mainProvider = await createTestProvider({
       type: "tourism",
-      name: "Tour Op",
+      name: `Tour_${Date.now()}`,
     });
     const carProvider = await createTestProvider({
       type: "car_rental",
-      name: "Car Co",
+      name: `Car_${Date.now()}`,
     });
     const doc = makeSeqDoc(mainProvider._id, {
-      carRentals: [
-        { provider: carProvider._id, serviceNumber: null, sell: 300, buy: 200 },
+      services: [
+        {
+          serviceType: "carRental",
+          provider: carProvider._id,
+          serviceNumber: null,
+          sell: 300,
+          buy: 200,
+          details: {},
+        },
       ],
     });
     await assignBookingSequences(doc);
     const updatedCar = await providerModel.findById(carProvider._id);
     expect(updatedCar.currentSequence).toBe(1);
-    expect(doc.carRentals[0].serviceNumber).toBe(1);
+    expect(doc.services[0].serviceNumber).toBe(1);
   });
 
   it("does NOT re-assign serviceNumber when serviceNumber is already set (existing service)", async () => {
@@ -360,36 +350,34 @@ describe("assignBookingSequences()", () => {
     const doc = makeSeqDoc(provider._id, {
       isNew: false,
       bookingID: 5,
-      accommodations: [
+      services: [
         {
           _id: new mongoose.Types.ObjectId(),
-          hotel: provider._id,
-          serviceNumber: 5,
+          serviceType: "accommodation",
+          provider: provider._id,
+          serviceNumber: 5, // already assigned
           sell: 500,
           buy: 400,
+          details: {},
         },
       ],
     });
     await assignBookingSequences(doc);
     const after = await providerModel.findById(provider._id);
-    expect(after.currentSequence).toBe(5);
-    expect(doc.accommodations[0].serviceNumber).toBe(5);
+    expect(after.currentSequence).toBe(5); // unchanged
+    expect(doc.services[0].serviceNumber).toBe(5); // preserved
   });
 
-  it("uses null check (not falsy) so serviceNumber = 0 is preserved — FIX [1]", () => {
+  it("uses null check (not falsy) so serviceNumber = 0 is preserved", () => {
     const item = { serviceNumber: 0 };
-    // The fix: item.serviceNumber == null → false → correctly skips re-assignment
-    // The old bug: !item.serviceNumber → true → wrongly re-assigned 0
     expect(item.serviceNumber == null).toBe(false);
     expect(!item.serviceNumber).toBe(true);
   });
 
-  it("calls markModified on all three service arrays after processing", async () => {
+  it("calls markModified on the services array after processing", async () => {
     const provider = await createTestProvider();
     const doc = makeSeqDoc(provider._id);
     await assignBookingSequences(doc);
-    expect(doc.markModified).toHaveBeenCalledWith("accommodations");
-    expect(doc.markModified).toHaveBeenCalledWith("carRentals");
-    expect(doc.markModified).toHaveBeenCalledWith("carWithDriver");
+    expect(doc.markModified).toHaveBeenCalledWith("services");
   });
 });

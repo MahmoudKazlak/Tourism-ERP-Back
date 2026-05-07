@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { SERVICE_TYPES } from "../config/serviceTypes.js";
 import {
   applyProviderSummaryDelta,
   computeServiceDeltas,
@@ -8,77 +9,13 @@ const getProvider = () => mongoose.model("Provider");
 const getBooking = () => mongoose.model("Booking");
 
 /**
- * Pre-save logic to capture old state for delta diffing
- */
-export const handleBookingPreSave = async (doc) => {
-  doc._wasNew = doc.isNew;
-  if (!doc.isNew) {
-    const oldDoc = await getBooking().findById(doc._id).lean();
-    doc._oldServiceDeltas = oldDoc ? computeServiceDeltas(oldDoc) : new Map();
-  }
-};
-
-/**
- * Post-save logic to update provider summaries
- */
-// src/services/bookingService.js
-
-export const handleBookingPostSave = async (doc) => {
-  try {
-    const newDeltas = computeServiceDeltas(doc);
-
-    if (doc._wasNew) {
-      for (const [pid, delta] of newDeltas) {
-        await applyProviderSummaryDelta(pid, {
-          totalBuy: delta.buy,  // الاسم المطابق لـ buildSummaryPipeline
-          totalSell: delta.sell, // الاسم المطابق لـ buildSummaryPipeline
-        });
-      }
-    } else if (doc._oldServiceDeltas) {
-      const allProviderIds = new Set([
-        ...newDeltas.keys(),
-        ...doc._oldServiceDeltas.keys(),
-      ]);
-
-      for (const pid of allProviderIds) {
-        const oldD = doc._oldServiceDeltas.get(pid) || { buy: 0, sell: 0 };
-        const newD = newDeltas.get(pid) || { buy: 0, sell: 0 };
-        
-        const diffBuy = newD.buy - oldD.buy;
-        const diffSell = newD.sell - oldD.sell;
-
-        if (diffBuy !== 0 || diffSell !== 0) {
-          await applyProviderSummaryDelta(pid, {
-            totalBuy: diffBuy,
-            totalSell: diffSell,
-          });
-        }
-      }
-    }
-  } catch (err) {
-    console.error("❌ Provider summary sync failed:", err.message);
-  }
-};
-
-/**
- * Delete logic to reverse provider summaries
- */
-export const handleBookingDelete = async (doc) => {
-  try {
-    const deltas = computeServiceDeltas(doc);
-    for (const [pid, delta] of deltas) {
-      await applyProviderSummaryDelta(pid, {
-        totalBuy: -delta.buy,
-        totalSell: -delta.sell,
-      });
-    }
-  } catch (err) {
-    console.error("❌ Provider summary sync failed (Delete):", err.message);
-  }
-};
-
-/**
- * Original Sequence logic (unchanged but cleaned)
+ * Assigns bookingID and serviceNumbers to a new or updated booking document.
+ *
+ * Rules:
+ *  - New booking: increment mainProvider.currentSequence → bookingID
+ *  - Per service with no serviceNumber yet:
+ *      same provider as booking.provider → serviceNumber = bookingID
+ *      different provider               → increment that provider's sequence
  */
 export const assignBookingSequences = async (doc) => {
   const Provider = getProvider();
@@ -107,58 +44,58 @@ export const assignBookingSequences = async (doc) => {
     }
   }
 
-  const processServices = async (fieldName, providerKey) => {
-    const services = doc[fieldName];
-    if (!services || services.length === 0) return;
+  const services = doc.services || [];
+  for (let i = 0; i < services.length; i++) {
+    const service = services[i];
+    if (!service.provider) continue;
+    if (service.serviceNumber != null) continue; // already assigned — preserve
 
-    for (let i = 0; i < services.length; i++) {
-      const item = services[i];
-      const currentProviderId = item[providerKey]?.toString();
-      if (!currentProviderId) continue;
-      const isMainProvider = currentProviderId === doc.provider.toString();
+    const isMainProvider =
+      service.provider.toString() === doc.provider.toString();
 
-      if (item.serviceNumber == null) {
-        if (isMainProvider) {
-          doc[fieldName][i].serviceNumber = doc.bookingID;
-        } else {
-          const otherProvider = await Provider.findByIdAndUpdate(
-            currentProviderId,
-            { $inc: { currentSequence: 1 } },
-            { new: true },
-          );
-          doc[fieldName][i].serviceNumber = otherProvider.currentSequence;
-        }
+    if (isMainProvider) {
+      doc.services[i].serviceNumber = doc.bookingID;
+    } else {
+      const otherProvider = await Provider.findByIdAndUpdate(
+        service.provider,
+        { $inc: { currentSequence: 1 } },
+        { new: true },
+      );
+      if (!otherProvider) {
+        throw new Error(
+          `Service provider ${service.provider} not found during sequence assignment`,
+        );
       }
+      doc.services[i].serviceNumber = otherProvider.currentSequence;
     }
-  };
+  }
 
-  await processServices("accommodations", "hotel");
-  await processServices("carRentals", "provider");
-  await processServices("carWithDriver", "provider");
+  doc.markModified("services");
 };
 
 /**
- * Original Totals logic
+ * Recalculates all financial totals from the services array.
+ * Also auto-calculates duration for service types that define durationFields.
  */
 export const calculateBookingTotals = (doc) => {
-  doc.accommodations?.forEach((acc) => {
-    if (acc.checkIn && acc.checkOut) {
-      acc.duration = Math.ceil(
-        (new Date(acc.checkOut) - new Date(acc.checkIn)) /
-          (1000 * 60 * 60 * 24),
-      );
+  // Auto-calculate duration for services whose type defines date range fields
+  (doc.services || []).forEach((service) => {
+    const typeDef = SERVICE_TYPES[service.serviceType];
+    if (typeDef?.durationFields && service.details) {
+      const fromVal = service.details[typeDef.durationFields.from];
+      const toVal = service.details[typeDef.durationFields.to];
+      if (fromVal && toVal) {
+        service.duration = Math.ceil(
+          (new Date(toVal) - new Date(fromVal)) / (1000 * 60 * 60 * 24),
+        );
+      }
     }
   });
 
   let totalSell = 0;
   let totalBuy = 0;
-  const allServices = [
-    ...(doc.accommodations || []),
-    ...(doc.carRentals || []),
-    ...(doc.carWithDriver || []),
-  ];
 
-  allServices.forEach((service) => {
+  (doc.services || []).forEach((service) => {
     service.profit = (Number(service.sell) || 0) - (Number(service.buy) || 0);
     totalSell += Number(service.sell) || 0;
     totalBuy += Number(service.buy) || 0;
@@ -173,3 +110,6 @@ export const calculateBookingTotals = (doc) => {
   else if (doc.totalPaid >= doc.totalToPay) doc.paymentStatus = "paid";
   else doc.paymentStatus = "partial";
 };
+
+// ── Kept for backward-compatibility with booking.model.js hooks ───────────────
+export { computeServiceDeltas, applyProviderSummaryDelta };

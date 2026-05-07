@@ -60,17 +60,15 @@ const syncBookingPayments = async (bookingId, session = null) => {
  * Returns the set of provider IDs directly referenced by a booking.
  * Used to validate that a direct payment recipient is linked to the booking.
  */
+/**
+ * Returns the set of provider IDs directly referenced by a booking.
+ * Scans the unified services array plus the main booking provider.
+ */
 const getLinkedProviderIds = (booking) => {
   return new Set([
     booking.provider.toString(),
-    ...(booking.accommodations || [])
-      .map((a) => a.hotel?.toString())
-      .filter(Boolean),
-    ...(booking.carRentals || [])
-      .map((c) => c.provider?.toString())
-      .filter(Boolean),
-    ...(booking.carWithDriver || [])
-      .map((t) => t.provider?.toString())
+    ...(booking.services || [])
+      .map((s) => s.provider?.toString())
       .filter(Boolean),
   ]);
 };

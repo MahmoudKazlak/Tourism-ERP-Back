@@ -5,6 +5,7 @@ import paymentModel from "../../../../DB/model/payment.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { notifyBookingStatusChanged } from "../../../services/notification.js";
 import { pagination } from "../../../services/pagination.js";
+import { SERVICE_TYPES } from "../../../config/serviceTypes.js";
 import mongoose from "mongoose";
 
 const PROTECTED_BOOKING_FIELDS = [
@@ -20,27 +21,52 @@ const PROTECTED_BOOKING_FIELDS = [
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Confirms every sub-service provider ID exists in the DB.
- * Returns an Error (to pass to next()) or null when all are valid.
+ * Validates type-specific required fields inside service.details.
+ * Returns an Error (to pass to next()) or null when valid.
  */
-const validateSubProviders = async (data) => {
-  const subProviderIds = [
-    ...(data.accommodations || []).map((a) => a.hotel),
-    ...(data.carRentals || []).map((c) => c.provider),
-    ...(data.carWithDriver || []).map((t) => t.provider), // renamed
-  ].filter(Boolean);
+const validateServiceDetails = (service) => {
+  const { serviceType, details = {} } = service;
+  const typeDef = SERVICE_TYPES[serviceType];
+  if (!typeDef) return null; // unknown types are caught by Joi
 
-  if (subProviderIds.length === 0) return null;
+  if (typeDef.durationFields) {
+    const { from, to } = typeDef.durationFields;
+    if (!details[from] || !details[to]) {
+      const err = new Error(
+        `Service type "${serviceType}" requires details.${from} and details.${to}`,
+      );
+      err.cause = 400;
+      return err;
+    }
+    if (new Date(details[to]) <= new Date(details[from])) {
+      const err = new Error(
+        `details.${to} must be after details.${from} for service type "${serviceType}"`,
+      );
+      err.cause = 400;
+      return err;
+    }
+  }
 
-  const uniqueIds = [...new Set(subProviderIds.map(String))];
+  return null;
+};
+
+/**
+ * Confirms every service provider ID exists in the DB.
+ * Returns an Error or null when all are valid.
+ */
+const validateSubProviders = async (services = []) => {
+  if (services.length === 0) return null;
+
+  const uniqueIds = [
+    ...new Set(services.map((s) => s.provider?.toString()).filter(Boolean)),
+  ];
   const foundCount = await providerModel.countDocuments({
     _id: { $in: uniqueIds },
   });
 
   if (foundCount !== uniqueIds.length) {
     const err = new Error(
-      "One or more service providers (hotel, car rental, or car-with-driver company) " +
-        "do not exist. Verify all provider IDs before submitting.",
+      "One or more service providers do not exist. Verify all provider IDs before submitting.",
     );
     err.cause = 404;
     return err;
@@ -59,18 +85,12 @@ export const createBooking = asyncHandler(async (req, res, next) => {
   if (!providerExists)
     return next(new Error("Main Provider not found", { cause: 404 }));
 
-  const subProviderError = await validateSubProviders(data);
+  const subProviderError = await validateSubProviders(data.services);
   if (subProviderError) return next(subProviderError);
 
-  if (data.accommodations) {
-    data.accommodations.forEach((acc) => {
-      if (acc.checkIn && acc.checkOut) {
-        acc.duration = Math.ceil(
-          (new Date(acc.checkOut) - new Date(acc.checkIn)) /
-            (1000 * 60 * 60 * 24),
-        );
-      }
-    });
+  for (const service of data.services || []) {
+    const detailError = validateServiceDetails(service);
+    if (detailError) return next(detailError);
   }
 
   if (data.totalPax) {
@@ -109,6 +129,7 @@ export const getAllBookings = asyncHandler(async (req, res) => {
   const {
     bookingID,
     provider,
+    serviceType,
     status,
     paymentStatus,
     customerName,
@@ -126,6 +147,7 @@ export const getAllBookings = asyncHandler(async (req, res) => {
 
   if (bookingID) query.bookingID = parseInt(bookingID);
   if (provider) query.provider = provider;
+  if (serviceType) query["services.serviceType"] = serviceType;
   if (status) query.status = status;
   if (paymentStatus) query.paymentStatus = paymentStatus;
   if (customerName)
@@ -163,6 +185,7 @@ export const getAllBookings = asyncHandler(async (req, res) => {
       .find(query)
       .populate("provider", "name type")
       .populate("createdBy", "userName")
+      .populate("services.provider", "name type")
       .limit(limit)
       .skip(skip)
       .sort(sort),
@@ -187,17 +210,17 @@ export const getAllBookings = asyncHandler(async (req, res) => {
 // Get booking by ID
 // ─────────────────────────────────────────────────────────────────────────────
 export const getBookingById = asyncHandler(async (req, res, next) => {
-  const booking = await bookingModel.findById(req.params.id).populate(
-    // renamed: carWithDriver.provider
-    "provider accommodations.hotel carRentals.provider carWithDriver.provider createdBy",
-  );
+  const booking = await bookingModel
+    .findById(req.params.id)
+    .populate("provider createdBy")
+    .populate("services.provider", "name type phone address");
 
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
   const payments = await paymentModel
     .find({ booking: booking._id })
     .populate("recordedBy", "userName")
-    .populate("providerRecipient", "name") // surface direct-payment recipient
+    .populate("providerRecipient", "name")
     .sort({ date: -1 });
 
   return res.status(200).json({
@@ -221,26 +244,26 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
   const oldStatus = booking.status;
-  const serviceArrays = ["accommodations", "carRentals", "carWithDriver"]; // renamed
 
   Object.keys(data).forEach((key) => {
     if (PROTECTED_BOOKING_FIELDS.includes(key)) return;
 
-    if (serviceArrays.includes(key) && Array.isArray(data[key])) {
-      booking[key] = data[key].map((newItem, index) => {
-        const oldItem = booking[key][index];
+    if (key === "services" && Array.isArray(data.services)) {
+      // Merge by index — preserve serviceNumber on existing items
+      booking.services = data.services.map((newItem, index) => {
+        const oldItem = booking.services[index];
         if (oldItem) {
           return {
             ...oldItem.toObject(),
             ...newItem,
             _id: oldItem._id,
-            serviceNumber: newItem.serviceNumber || oldItem.serviceNumber,
+            serviceNumber: newItem.serviceNumber ?? oldItem.serviceNumber,
           };
         }
         return newItem;
       });
     } else if (key === "totalPax") {
-      booking.totalPax = { ...booking.totalPax.toObject(), ...data[key] };
+      booking.totalPax = { ...booking.totalPax?.toObject(), ...data[key] };
     } else {
       booking[key] = data[key];
     }
@@ -286,37 +309,35 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 export const addServiceToBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
-  const { serviceType, serviceData } = req.body;
-
-  const validServiceTypes = ["accommodations", "carRentals", "carWithDriver"]; // renamed
-  if (!validServiceTypes.includes(serviceType)) {
-    return next(new Error("Invalid service type", { cause: 400 }));
-  }
+  const { serviceType, provider, buy, sell, details } = req.body;
 
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  const providerKey = serviceType === "accommodations" ? "hotel" : "provider";
-  const serviceProviderId = serviceData[providerKey];
-
-  if (serviceProviderId) {
-    const exists = await providerModel
-      .findById(serviceProviderId)
-      .select("_id");
-    if (!exists) {
-      return next(
-        new Error(`Service provider ${serviceProviderId} does not exist.`, {
-          cause: 404,
-        }),
-      );
-    }
+  const providerDoc = await providerModel.findById(provider).select("_id");
+  if (!providerDoc) {
+    return next(
+      new Error(`Provider ${provider} does not exist.`, { cause: 404 }),
+    );
   }
 
-  booking[serviceType].push(serviceData);
-  booking.markModified(serviceType);
+  const detailError = validateServiceDetails({
+    serviceType,
+    details: details || {},
+  });
+  if (detailError) return next(detailError);
+
+  booking.services.push({
+    serviceType,
+    provider,
+    buy: buy || 0,
+    sell: sell || 0,
+    details: details || {},
+  });
+  booking.markModified("services");
   await booking.save();
 
-  const addedService = booking[serviceType][booking[serviceType].length - 1];
+  const addedService = booking.services[booking.services.length - 1];
 
   await logModel.create({
     user: req.user._id,
@@ -341,34 +362,29 @@ export const addServiceToBooking = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
-  const { serviceType, serviceId } = req.body;
+  const { serviceId } = req.body;
 
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  const serviceItem = booking[serviceType].find(
+  const serviceItem = booking.services.find(
     (item) => item._id.toString() === serviceId,
   );
   if (!serviceItem) return next(new Error("Service not found", { cause: 404 }));
 
-  const pKey = serviceType === "accommodations" ? "hotel" : "provider";
-  const providerId = serviceItem[pKey]?.toString();
-
   // currentSequence is a high-water mark — never decrement on remove.
-  // Issued service numbers are permanent to avoid duplicate-key collisions.
-
   await logModel.create({
     user: req.user._id,
     action: "REMOVE_SERVICE",
     details: {
       bookingID: booking.bookingID,
-      serviceType,
+      serviceType: serviceItem.serviceType,
       serviceNumber: serviceItem.serviceNumber,
-      providerId,
+      providerId: serviceItem.provider,
     },
   });
 
-  booking[serviceType] = booking[serviceType].filter(
+  booking.services = booking.services.filter(
     (item) => item._id.toString() !== serviceId,
   );
   await booking.save();
@@ -389,10 +405,7 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  const Provider = mongoose.model("Provider");
-
-  // Decrement stats only — currentSequence (the high-water mark) is never touched.
-  await Provider.findByIdAndUpdate(booking.provider, {
+  await mongoose.model("Provider").findByIdAndUpdate(booking.provider, {
     $inc: { totalBookings: -1 },
   });
 

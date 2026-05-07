@@ -2,6 +2,10 @@ import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import providerModel from "../../../../DB/model/provider.model.js";
 import userModel from "../../../../DB/model/user.model.js";
+import {
+  SERVICE_TYPES,
+  SERVICE_TYPE_KEYS,
+} from "../../../config/serviceTypes.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Period builder
@@ -155,8 +159,15 @@ const growth = (curr, prev) =>
 // Internal: extract all service lines from a set of bookings, grouped by
 // provider ID.  Returns Map<pid:string, ServiceEntry>.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// buildDateRanges, createdAtFilter, growth — unchanged, keep as-is from original
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: extract all service lines from a set of bookings, grouped by
+// provider ID.  Returns Map<pid:string, ServiceEntry>.
+// ─────────────────────────────────────────────────────────────────────────────
 const buildServicesMap = (bookings) => {
-  const map = new Map(); // pid → { services[], _bookingIds Set, periodStats }
+  const map = new Map();
 
   const ensure = (pid) => {
     if (!map.has(pid)) {
@@ -184,71 +195,40 @@ const buildServicesMap = (bookings) => {
       bookingDate: bk.createdAt,
     };
 
-    const addService = (pid, extra, buy, sell) => {
-      if (!pid) return;
+    for (const service of bk.services || []) {
+      if (!service.provider) continue;
+      const pid = service.provider.toString();
       const entry = ensure(pid);
-      entry.services.push({ ...meta, buy, sell, profit: sell - buy, ...extra });
+      const typeDef = SERVICE_TYPES[service.serviceType];
+      const buy = Number(service.buy) || 0;
+      const sell = Number(service.sell) || 0;
+
+      entry.services.push({
+        ...meta,
+        serviceType: service.serviceType,
+        serviceLabel: typeDef?.label || service.serviceType,
+        serviceNumber: service.serviceNumber,
+        buy,
+        sell,
+        profit: sell - buy,
+        duration: service.duration,
+        details: service.details || {},
+      });
+
       entry.periodStats.totalBuy += buy;
       entry.periodStats.totalSell += sell;
       entry.periodStats.servicesCount += 1;
+
       if (!entry._bookingIds.has(bk._id.toString())) {
         entry._bookingIds.add(bk._id.toString());
         entry.periodStats.bookingsCount += 1;
       }
-    };
-
-    for (const item of bk.accommodations || []) {
-      addService(
-        item.hotel?.toString(),
-        {
-          serviceType: "accommodation",
-          serviceNumber: item.serviceNumber,
-          checkIn: item.checkIn,
-          checkOut: item.checkOut,
-          duration: item.duration,
-          roomType: item.roomType,
-          room: item.room,
-          board: item.board,
-        },
-        Number(item.buy) || 0,
-        Number(item.sell) || 0,
-      );
-    }
-
-    for (const item of bk.carRentals || []) {
-      addService(
-        item.provider?.toString(),
-        {
-          serviceType: "carRental",
-          serviceNumber: item.serviceNumber,
-          brand: item.brand,
-          pickUp: item.pickUp,
-          dropOff: item.dropOff,
-        },
-        Number(item.buy) || 0,
-        Number(item.sell) || 0,
-      );
-    }
-
-    for (const item of bk.carWithDriver || []) {
-      addService(
-        item.provider?.toString(),
-        {
-          serviceType: "carWithDriver",
-          serviceNumber: item.serviceNumber,
-          driverName: item.driverName,
-          brand: item.brand,
-        },
-        Number(item.buy) || 0,
-        Number(item.sell) || 0,
-      );
     }
   }
 
   return map;
 };
 
-/** Shape one provider entry (with allTimeSummary). */
 const shapeProviderFull = (doc, entry) => {
   const stats = entry?.periodStats ?? {
     totalBuy: 0,
@@ -276,7 +256,6 @@ const shapeProviderFull = (doc, entry) => {
   };
 };
 
-/** Shape one provider entry (without allTimeSummary — for active-services endpoint). */
 const shapeProviderActive = (doc, entry) => {
   const stats = entry.periodStats;
   return {
@@ -298,15 +277,11 @@ const shapeProviderActive = (doc, entry) => {
   };
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Endpoint 1 — ALL providers (even those with no services in the period)
-// GET /api/v1/view-board/providers?period=today
-//
-// Response sections:
-//   period | dateRange | summary | overall | providers | byStatus |
-//   byPaymentStatus | serviceTypeBreakdown | counts | metrics
-// ─────────────────────────────────────────────────────────────────────────────
+// Keep buildDateRanges, createdAtFilter, growth exactly as in the original file.
+// Only paste the two endpoint handlers below, which reference buildServicesMap.
+
 export const getAllProviders = asyncHandler(async (req, res) => {
+  // ... (same structure as original, but update the select fields and serviceTypeBreakdown)
   const period = req.query.period || "today";
   const { current, previous } = buildDateRanges(period);
   const curFilter = createdAtFilter(current);
@@ -323,7 +298,6 @@ export const getAllProviders = asyncHandler(async (req, res) => {
     totalBookings,
     curBookings,
   ] = await Promise.all([
-    // Current-period booking aggregates
     bookingModel.aggregate([
       { $match: curFilter },
       {
@@ -338,8 +312,6 @@ export const getAllProviders = asyncHandler(async (req, res) => {
         },
       },
     ]),
-
-    // Previous-period (for growth)
     prevFilter
       ? bookingModel.aggregate([
           { $match: prevFilter },
@@ -353,8 +325,6 @@ export const getAllProviders = asyncHandler(async (req, res) => {
           },
         ])
       : Promise.resolve([]),
-
-    // All-time overall (never filtered)
     bookingModel.aggregate([
       {
         $group: {
@@ -366,30 +336,20 @@ export const getAllProviders = asyncHandler(async (req, res) => {
         },
       },
     ]),
-
     bookingModel.aggregate([
       { $match: curFilter },
       { $group: { _id: "$status", count: { $sum: 1 } } },
     ]),
-
     bookingModel.aggregate([
       { $match: curFilter },
       { $group: { _id: "$paymentStatus", count: { $sum: 1 } } },
     ]),
-
-    // ALL provider documents (regardless of bookings)
     providerModel.find({}).select("_id name type phone address summary").lean(),
-
     userModel.countDocuments(),
     bookingModel.countDocuments(),
-
-    // Period bookings — for service-line extraction
     bookingModel
       .find(curFilter)
-      .select(
-        "bookingID status paymentStatus customers createdAt " +
-          "accommodations carRentals carWithDriver",
-      )
+      .select("bookingID status paymentStatus customers createdAt services")
       .lean(),
   ]);
 
@@ -409,15 +369,12 @@ export const getAllProviders = asyncHandler(async (req, res) => {
     totalPending: 0,
   };
 
-  // Build service map from period bookings
   const servicesMap = buildServicesMap(curBookings);
 
-  // Service-type totals across the period
-  const serviceTypeBreakdown = {
-    accommodation: 0,
-    carRental: 0,
-    carWithDriver: 0,
-  };
+  // Dynamic breakdown from registry — no hardcoding
+  const serviceTypeBreakdown = Object.fromEntries(
+    SERVICE_TYPE_KEYS.map((k) => [k, 0]),
+  );
   for (const entry of servicesMap.values()) {
     for (const s of entry.services) {
       if (serviceTypeBreakdown[s.serviceType] !== undefined) {
@@ -426,7 +383,6 @@ export const getAllProviders = asyncHandler(async (req, res) => {
     }
   }
 
-  // Merge every provider doc with its (possibly empty) service map entry
   const providers = allProviderDocs
     .map((doc) => shapeProviderFull(doc, servicesMap.get(doc._id.toString())))
     .sort((a, b) => b.periodStats.totalSell - a.periodStats.totalSell);
@@ -439,7 +395,6 @@ export const getAllProviders = asyncHandler(async (req, res) => {
       dateRange: current
         ? { from: current.from.toISOString(), to: current.to.toISOString() }
         : { from: "all-time", to: "all-time" },
-
       summary: {
         bookingsCount: cur.count,
         revenue: cur.revenue,
@@ -451,30 +406,25 @@ export const getAllProviders = asyncHandler(async (req, res) => {
         bookingsGrowth: growth(cur.count, prev.count),
         profitGrowth: growth(cur.profit, prev.profit),
       },
-
       overall: {
         totalRevenue: ov.totalRevenue,
         totalProfit: ov.totalProfit,
         totalCollected: ov.totalCollected,
         totalPending: ov.totalPending,
       },
-
       providers,
-
       byStatus: Object.fromEntries(byStatus.map((b) => [b._id, b.count])),
       byPaymentStatus: Object.fromEntries(
         byPaymentStatus.map((b) => [b._id, b.count]),
       ),
       serviceTypeBreakdown,
-
       counts: {
         totalProviders: allProviderDocs.length,
-        activeProviders: servicesMap.size, // providers with ≥1 service this period
+        activeProviders: servicesMap.size,
         users: usersCount,
-        totalBookings, // all-time
+        totalBookings,
         periodBookings: cur.count,
       },
-
       metrics: {
         avgBookingValue:
           cur.count > 0 ? +(cur.revenue / cur.count).toFixed(2) : 0,
@@ -493,14 +443,6 @@ export const getAllProviders = asyncHandler(async (req, res) => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Endpoint 2 — ONLY providers that have services within the period
-// GET /api/v1/view-board/active-services?period=today
-//
-// Response sections:
-//   period | dateRange | providers | counts | metrics
-//   (no overall, no byStatus/byPaymentStatus, no allTimeSummary on providers)
-// ─────────────────────────────────────────────────────────────────────────────
 export const getActiveServices = asyncHandler(async (req, res) => {
   const period = req.query.period || "today";
   const { current, previous } = buildDateRanges(period);
@@ -509,16 +451,10 @@ export const getActiveServices = asyncHandler(async (req, res) => {
 
   const [curBookings, prevStats, usersCount, totalBookings] = await Promise.all(
     [
-      // Full booking docs for the period (service extraction)
       bookingModel
         .find(curFilter)
-        .select(
-          "bookingID status paymentStatus customers createdAt " +
-            "accommodations carRentals carWithDriver",
-        )
+        .select("bookingID status paymentStatus customers createdAt services")
         .lean(),
-
-      // Previous-period summary (for growth)
       prevFilter
         ? bookingModel.aggregate([
             { $match: prevFilter },
@@ -532,7 +468,6 @@ export const getActiveServices = asyncHandler(async (req, res) => {
             },
           ])
         : Promise.resolve([]),
-
       userModel.countDocuments(),
       bookingModel.countDocuments(),
     ],
@@ -568,7 +503,6 @@ export const getActiveServices = asyncHandler(async (req, res) => {
     });
   }
 
-  // Fetch only the provider docs that appear in this period
   const activeProviderIds = [...servicesMap.keys()];
   const providerDocs = await providerModel
     .find({ _id: { $in: activeProviderIds } })
@@ -586,7 +520,6 @@ export const getActiveServices = asyncHandler(async (req, res) => {
     .filter(Boolean)
     .sort((a, b) => b.periodStats.totalSell - a.periodStats.totalSell);
 
-  // Roll-up totals across all active providers for this period
   const totals = providers.reduce(
     (acc, p) => {
       acc.revenue += p.periodStats.totalSell;
@@ -609,9 +542,7 @@ export const getActiveServices = asyncHandler(async (req, res) => {
       dateRange: current
         ? { from: current.from.toISOString(), to: current.to.toISOString() }
         : { from: "all-time", to: "all-time" },
-
       providers,
-
       counts: {
         activeProviders: providers.length,
         periodBookings: totals.bookingsCount,
@@ -619,7 +550,6 @@ export const getActiveServices = asyncHandler(async (req, res) => {
         users: usersCount,
         totalBookings,
       },
-
       metrics: {
         totalRevenue: totals.revenue,
         totalCost: totals.cost,

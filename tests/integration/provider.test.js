@@ -1,5 +1,6 @@
 /**
  * Integration tests — Provider module
+ * Updated for the unified `services` array schema.
  * Covers create, getAll, getById, update, delete providers.
  * Validates role-based access and the "cannot delete linked provider" business rule.
  */
@@ -79,44 +80,48 @@ const validProviderPayload = (overrides = {}) => ({
 });
 
 /**
- * Creates a booking linking the given provider, making it undeletable.
- * Returns the booking response body.
+ * Creates a booking that links the given provider so it cannot be deleted.
+ *
+ * serviceType values:
+ *   "main"          — provider is the top-level booking.provider
+ *   "accommodation" — provider is a service with serviceType: "accommodation"
+ *   "carRental"     — provider is a service with serviceType: "carRental"
+ *   "carWithDriver" — provider is a service with serviceType: "carWithDriver"
  */
 const createBookingLinkingProvider = async (
   providerId,
   adminHeader,
   serviceType = "main",
 ) => {
-  const provider = providerId;
-
   const body = {
-    provider: provider.toString(),
+    provider: providerId.toString(),
     customers: [{ name: "Linked Customer" }],
   };
 
   if (serviceType === "accommodation") {
-    // Use a separate main provider and link the target as accommodation hotel
     const mainProvider = await createProvider({
       name: `Main ${Date.now()}`,
       type: "tourism",
     });
     body.provider = mainProvider._id.toString();
-    body.accommodations = [buildAccommodation(providerId)];
+    // ← unified services array with serviceType discriminator
+    body.services = [buildAccommodation(providerId)];
   } else if (serviceType === "carRental") {
     const mainProvider = await createProvider({
       name: `Main ${Date.now()}`,
       type: "tourism",
     });
     body.provider = mainProvider._id.toString();
-    body.carRentals = [buildCarRental(providerId)];
-  } else if (serviceType === "trip") {
+    body.services = [buildCarRental(providerId)];
+  } else if (serviceType === "carWithDriver") {
     const mainProvider = await createProvider({
       name: `Main ${Date.now()}`,
       type: "tourism",
     });
     body.provider = mainProvider._id.toString();
-    body.carWithDriver = [buildCarWithDriver(providerId)];
+    body.services = [buildCarWithDriver(providerId)];
   }
+  // "main" case: body.provider is already set to providerId — no services needed
 
   return request(app)
     .post("/api/v1/booking/create")
@@ -164,11 +169,10 @@ describe("Provider — POST /create", () => {
   });
 
   it("returns 400 when name is missing", async () => {
-    const { name: _omit, ...payload } = validProviderPayload();
     const res = await request(app)
       .post(`${BASE}/create`)
       .set("Authorization", adminHeader)
-      .send({ type: "hotel" }); // no name
+      .send({ type: "hotel" });
 
     expect(res.status).toBe(400);
   });
@@ -177,7 +181,7 @@ describe("Provider — POST /create", () => {
     const res = await request(app)
       .post(`${BASE}/create`)
       .set("Authorization", adminHeader)
-      .send({ name: "No Type Provider" }); // no type
+      .send({ name: "No Type Provider" });
 
     expect(res.status).toBe(400);
   });
@@ -399,7 +403,7 @@ describe("Provider — DELETE /delete/:id", () => {
     ({ authHeader: adminHeader } = await createAdminWithToken());
   });
 
-  it("returns 200 and removes provider from DB", async () => {
+  it("returns 200 and removes provider from DB when not linked to any booking", async () => {
     const provider = await createProvider({ name: "Deletable Hotel" });
 
     const res = await request(app)
@@ -413,7 +417,7 @@ describe("Provider — DELETE /delete/:id", () => {
     expect(found).toBeNull();
   });
 
-  it("returns 400 when provider is the main booking provider", async () => {
+  it("returns 400 when provider is the main booking.provider", async () => {
     const provider = await createProvider({ name: "Main Linked Hotel" });
 
     await createBookingLinkingProvider(provider._id, adminHeader, "main");
@@ -426,7 +430,7 @@ describe("Provider — DELETE /delete/:id", () => {
     expect(res.body.success).toBe(false);
   });
 
-  it("returns 400 when provider is linked as accommodations.hotel", async () => {
+  it("returns 400 when provider is linked as a service with serviceType: accommodation", async () => {
     const hotel = await createProvider({ name: "Acc Hotel Linked" });
 
     await createBookingLinkingProvider(hotel._id, adminHeader, "accommodation");
@@ -438,7 +442,7 @@ describe("Provider — DELETE /delete/:id", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 400 when provider is linked as carRentals.provider", async () => {
+  it("returns 400 when provider is linked as a service with serviceType: carRental", async () => {
     const carCo = await createProvider({
       name: "Car Co Linked",
       type: "car_rental",
@@ -453,13 +457,17 @@ describe("Provider — DELETE /delete/:id", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 400 when provider is linked as carWithDriver.provider", async () => {
+  it("returns 400 when provider is linked as a service with serviceType: carWithDriver", async () => {
     const driverCo = await createProvider({
       name: "Driver Co Linked",
       type: "driver_company",
     });
 
-    await createBookingLinkingProvider(driverCo._id, adminHeader, "trip");
+    await createBookingLinkingProvider(
+      driverCo._id,
+      adminHeader,
+      "carWithDriver",
+    );
 
     const res = await request(app)
       .delete(`${BASE}/delete/${driverCo._id}`)
