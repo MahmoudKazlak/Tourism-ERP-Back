@@ -7,11 +7,20 @@ import { endpoint } from "../indexEndpoint.js";
 
 const router = Router();
 
-// Static routes أولاً
+// ── Static routes first ───────────────────────────────────────────────────────
+
 router.get(
   "/payments/all",
   auth(endpoint.accounting_only),
   paymentController.getAllPayments,
+);
+
+// Admin can edit any payment field (amount, date, method, notes, providerRecipient)
+router.patch(
+  "/payments/:paymentId",
+  auth(endpoint.AdminOnly),
+  validation(validators.editPayment),
+  paymentController.editPayment,
 );
 
 router.delete(
@@ -21,7 +30,8 @@ router.delete(
   paymentController.deletePayment,
 );
 
-// Dynamic routes بعدها
+// ── Dynamic routes after ──────────────────────────────────────────────────────
+
 router.post(
   "/:id/payments",
   auth(endpoint.booking_manage),

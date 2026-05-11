@@ -338,3 +338,139 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edit payment (Admin only)
+//
+// Editable fields: amount, date, method, notes, providerRecipient.
+//
+// When amount changes   → booking totals are re-synced.
+// When providerRecipient changes → provider summary deltas are reversed/applied.
+//
+// Provider summary update strategy (same as add/delete):
+//   Done POST-COMMIT, outside the transaction, so a failed summary update
+//   never rolls back an otherwise valid payment edit.
+// ─────────────────────────────────────────────────────────────────────────────
+export const editPayment = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+  const { amount, date, method, notes, providerRecipient } = req.body;
+
+  // Fetch before transaction so we have the old state for delta diffing
+  const payment = await paymentModel.findById(paymentId);
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  const oldAmount = payment.amount;
+  const oldRecipient = payment.providerRecipient?.toString() ?? null;
+  const newRecipient =
+    providerRecipient !== undefined
+      ? providerRecipient === null
+        ? null
+        : providerRecipient.toString()
+      : oldRecipient;
+
+  // Validate the new providerRecipient exists if one is being set
+  if (providerRecipient && providerRecipient !== null) {
+    const providerDoc = await providerModel
+      .findById(providerRecipient)
+      .select("_id");
+    if (!providerDoc) {
+      return next(new Error("Provider not found", { cause: 404 }));
+    }
+
+    // Confirm the provider is linked to the booking
+    const booking = await bookingModel.findById(payment.booking).lean();
+    if (booking) {
+      const linkedIds = getLinkedProviderIds(booking);
+      if (!linkedIds.has(providerRecipient.toString())) {
+        return next(
+          new Error(
+            "The specified provider is not linked to this booking. " +
+              "Direct payments can only be recorded for providers referenced in the booking's services.",
+            { cause: 400 },
+          ),
+        );
+      }
+    }
+  }
+
+  const newAmount = amount !== undefined ? Number(amount) : oldAmount;
+  const amountChanged = newAmount !== oldAmount;
+  const recipientChanged = newRecipient !== oldRecipient;
+
+  const result = await withTransaction(async (session) => {
+    // Apply field updates
+    if (amount !== undefined) payment.amount = newAmount;
+    if (date !== undefined) payment.date = date;
+    if (method !== undefined) payment.method = method;
+    if (notes !== undefined) payment.notes = notes;
+    if (providerRecipient !== undefined)
+      payment.providerRecipient = providerRecipient ?? null;
+
+    await payment.save({ session });
+
+    // Re-sync booking totals only if amount changed
+    let bookingSummary = null;
+    if (amountChanged) {
+      bookingSummary = await syncBookingPayments(payment.booking, session);
+    }
+
+    await logModel.create(
+      [
+        {
+          user: req.user._id,
+          action: "EDIT_PAYMENT",
+          details: {
+            paymentId,
+            bookingID: payment.bookingID,
+            changes: {
+              ...(amountChanged && { amount: { from: oldAmount, to: newAmount } }),
+              ...(recipientChanged && {
+                providerRecipient: { from: oldRecipient, to: newRecipient },
+              }),
+              ...(method !== undefined && { method }),
+              ...(date !== undefined && { date }),
+              ...(notes !== undefined && { notes }),
+            },
+          },
+        },
+      ],
+      { session },
+    );
+
+    return { payment, bookingSummary };
+  });
+
+  // ── Post-commit: reconcile provider summary deltas ────────────────────────
+  //
+  // Four cases for providerRecipient changes:
+  //   old=null, new=null   → nothing to do
+  //   old=X,    new=null   → reverse old amount on X
+  //   old=null, new=Y      → apply new amount on Y
+  //   old=X,    new=Y      → reverse old amount on X, apply new amount on Y
+  //   old=X,    new=X, amount changed → reverse old, apply new on same provider
+
+  if (recipientChanged) {
+    if (oldRecipient) {
+      await applyProviderSummaryDelta(oldRecipient, {
+        totalCustomersPaidDirect: -oldAmount,
+      });
+    }
+    if (newRecipient) {
+      await applyProviderSummaryDelta(newRecipient, {
+        totalCustomersPaidDirect: newAmount,
+      });
+    }
+  } else if (amountChanged && newRecipient) {
+    // Same recipient, different amount: push only the diff
+    await applyProviderSummaryDelta(newRecipient, {
+      totalCustomersPaidDirect: newAmount - oldAmount,
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: "Payment updated successfully",
+    data: result,
+    errors: null,
+  });
+});
