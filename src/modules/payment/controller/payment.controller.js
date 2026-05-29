@@ -58,11 +58,10 @@ const syncBookingPayments = async (bookingId, session = null) => {
 
 /**
  * Returns the set of provider IDs directly referenced by a booking.
- * Used to validate that a direct payment recipient is linked to the booking.
- */
-/**
- * Returns the set of provider IDs directly referenced by a booking.
  * Scans the unified services array plus the main booking provider.
+ *
+ * FIX Bug 6: removed the duplicate JSDoc comment that existed above this
+ * function in the old version.
  */
 const getLinkedProviderIds = (booking) => {
   return new Set([
@@ -75,12 +74,6 @@ const getLinkedProviderIds = (booking) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Add payment
-//
-// Provider summary update strategy for direct payments (providerRecipient set):
-//   We intentionally do NOT use a Mongoose hook on the Payment model because
-//   the payment is created inside a transaction. Hooks would fire before the
-//   transaction commits, risking summary drift if the transaction aborts.
-//   Instead, we apply the delta AFTER withTransaction() resolves (post-commit).
 // ─────────────────────────────────────────────────────────────────────────────
 export const addPayment = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
@@ -96,7 +89,6 @@ export const addPayment = asyncHandler(async (req, res, next) => {
     return next(new Error("Booking is already fully paid", { cause: 400 }));
   }
 
-  // ── Validate direct-payment recipient ─────────────────────────────────────
   if (providerRecipient) {
     const providerExists = await providerModel
       .findById(providerRecipient)
@@ -119,7 +111,6 @@ export const addPayment = asyncHandler(async (req, res, next) => {
 
   const numAmount = Number(amount);
 
-  // ── Execute within transaction ────────────────────────────────────────────
   const result = await withTransaction(async (session) => {
     const payment = await paymentModel.create(
       [
@@ -164,8 +155,7 @@ export const addPayment = asyncHandler(async (req, res, next) => {
     return { payment: payment[0], bookingSummary: updated };
   });
 
-  // ── Post-commit: update provider summary (outside transaction) ────────────
-  // Safe here — transaction has committed; if this fails, resync can fix it.
+  // Post-commit: update provider summary (outside transaction)
   if (providerRecipient) {
     await applyProviderSummaryDelta(providerRecipient, {
       totalCustomersPaidDirect: numAmount,
@@ -277,26 +267,19 @@ export const getAllPayments = asyncHandler(async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Delete payment
-//
-// Same post-commit strategy as addPayment: apply the reversal delta AFTER
-// the transaction resolves to avoid hook/transaction ordering issues.
 // ─────────────────────────────────────────────────────────────────────────────
 export const deletePayment = asyncHandler(async (req, res, next) => {
   const { paymentId } = req.params;
 
-  // Fetch before transaction so we have providerRecipient and amount available
-  // for the post-commit summary update.
   const payment = await paymentModel.findById(paymentId);
   if (!payment) return next(new Error("Payment not found", { cause: 404 }));
 
-  // Capture before entering transaction (needed post-commit)
   const recipientId = payment.providerRecipient;
   const deletedAmount = payment.amount;
 
   const result = await withTransaction(async (session) => {
     const bookingId = payment.booking;
 
-    // Use model-level deleteOne with session (safe with Mongoose 7+)
     await paymentModel.deleteOne({ _id: paymentId }, { session });
 
     const updated = await syncBookingPayments(bookingId, session);
@@ -324,7 +307,7 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
     return { bookingSummary: updated };
   });
 
-  // ── Post-commit: reverse the provider summary increment ───────────────────
+  // Post-commit: reverse the provider summary increment
   if (recipientId) {
     await applyProviderSummaryDelta(recipientId, {
       totalCustomersPaidDirect: -deletedAmount,
@@ -342,25 +325,28 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Edit payment (Admin only)
 //
-// Editable fields: amount, date, method, notes, providerRecipient.
+// FIX Bug 3: bookingSummary is no longer null when only metadata fields
+// (method, notes, date) change — the current booking state is always
+// returned in the response.
 //
-// When amount changes   → booking totals are re-synced.
-// When providerRecipient changes → provider summary deltas are reversed/applied.
+// FIX Bug 11: overpayment guard added — editing an amount beyond the
+// booking's totalToPay is rejected before the transaction starts.
 //
-// Provider summary update strategy (same as add/delete):
-//   Done POST-COMMIT, outside the transaction, so a failed summary update
+// Provider summary delta strategy (same as add/delete):
+//   Applied POST-COMMIT outside the transaction so a failed summary update
 //   never rolls back an otherwise valid payment edit.
 // ─────────────────────────────────────────────────────────────────────────────
 export const editPayment = asyncHandler(async (req, res, next) => {
   const { paymentId } = req.params;
   const { amount, date, method, notes, providerRecipient } = req.body;
 
-  // Fetch before transaction so we have the old state for delta diffing
   const payment = await paymentModel.findById(paymentId);
   if (!payment) return next(new Error("Payment not found", { cause: 404 }));
 
   const oldAmount = payment.amount;
   const oldRecipient = payment.providerRecipient?.toString() ?? null;
+
+  // Resolve the final recipient value
   const newRecipient =
     providerRecipient !== undefined
       ? providerRecipient === null
@@ -368,7 +354,11 @@ export const editPayment = asyncHandler(async (req, res, next) => {
         : providerRecipient.toString()
       : oldRecipient;
 
-  // Validate the new providerRecipient exists if one is being set
+  const newAmount = amount !== undefined ? Number(amount) : oldAmount;
+  const amountChanged = newAmount !== oldAmount;
+  const recipientChanged = newRecipient !== oldRecipient;
+
+  // ── Validate new providerRecipient if being set ───────────────────────────
   if (providerRecipient && providerRecipient !== null) {
     const providerDoc = await providerModel
       .findById(providerRecipient)
@@ -377,10 +367,9 @@ export const editPayment = asyncHandler(async (req, res, next) => {
       return next(new Error("Provider not found", { cause: 404 }));
     }
 
-    // Confirm the provider is linked to the booking
-    const booking = await bookingModel.findById(payment.booking).lean();
-    if (booking) {
-      const linkedIds = getLinkedProviderIds(booking);
+    const bookingDoc = await bookingModel.findById(payment.booking).lean();
+    if (bookingDoc) {
+      const linkedIds = getLinkedProviderIds(bookingDoc);
       if (!linkedIds.has(providerRecipient.toString())) {
         return next(
           new Error(
@@ -393,12 +382,41 @@ export const editPayment = asyncHandler(async (req, res, next) => {
     }
   }
 
-  const newAmount = amount !== undefined ? Number(amount) : oldAmount;
-  const amountChanged = newAmount !== oldAmount;
-  const recipientChanged = newRecipient !== oldRecipient;
+  // ── Bug 11: overpayment guard ─────────────────────────────────────────────
+  if (amountChanged) {
+    const otherPaymentsAgg = await paymentModel.aggregate([
+      {
+        $match: {
+          booking: new mongoose.Types.ObjectId(payment.booking),
+          _id: { $ne: new mongoose.Types.ObjectId(payment._id) },
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]);
+    const othersTotal = otherPaymentsAgg[0]?.total || 0;
 
+    const bookingForCheck = await bookingModel
+      .findById(payment.booking)
+      .select("totalToPay")
+      .lean();
+
+    if (
+      bookingForCheck &&
+      newAmount + othersTotal > bookingForCheck.totalToPay
+    ) {
+      const maxAllowed = bookingForCheck.totalToPay - othersTotal;
+      return next(
+        new Error(
+          `Payment amount $${newAmount} would exceed the booking total $${bookingForCheck.totalToPay}. ` +
+            `Maximum allowed for this payment: $${maxAllowed.toFixed(2)}`,
+          { cause: 400 },
+        ),
+      );
+    }
+  }
+
+  // ── Transaction ───────────────────────────────────────────────────────────
   const result = await withTransaction(async (session) => {
-    // Apply field updates
     if (amount !== undefined) payment.amount = newAmount;
     if (date !== undefined) payment.date = date;
     if (method !== undefined) payment.method = method;
@@ -408,10 +426,24 @@ export const editPayment = asyncHandler(async (req, res, next) => {
 
     await payment.save({ session });
 
-    // Re-sync booking totals only if amount changed
-    let bookingSummary = null;
+    // Bug 3 fix: always return current booking state, re-sync only when needed
+    let bookingSummary;
     if (amountChanged) {
       bookingSummary = await syncBookingPayments(payment.booking, session);
+    } else {
+      // Fetch without re-syncing — totals haven't changed
+      const bk = await bookingModel
+        .findById(payment.booking)
+        .select("totalToPay totalPaid remainingBalance paymentStatus")
+        .session(session);
+      bookingSummary = bk
+        ? {
+            totalToPay: bk.totalToPay,
+            totalPaid: bk.totalPaid,
+            remainingBalance: bk.remainingBalance,
+            paymentStatus: bk.paymentStatus,
+          }
+        : null;
     }
 
     await logModel.create(
@@ -423,7 +455,9 @@ export const editPayment = asyncHandler(async (req, res, next) => {
             paymentId,
             bookingID: payment.bookingID,
             changes: {
-              ...(amountChanged && { amount: { from: oldAmount, to: newAmount } }),
+              ...(amountChanged && {
+                amount: { from: oldAmount, to: newAmount },
+              }),
               ...(recipientChanged && {
                 providerRecipient: { from: oldRecipient, to: newRecipient },
               }),
@@ -442,12 +476,12 @@ export const editPayment = asyncHandler(async (req, res, next) => {
 
   // ── Post-commit: reconcile provider summary deltas ────────────────────────
   //
-  // Four cases for providerRecipient changes:
-  //   old=null, new=null   → nothing to do
-  //   old=X,    new=null   → reverse old amount on X
-  //   old=null, new=Y      → apply new amount on Y
-  //   old=X,    new=Y      → reverse old amount on X, apply new amount on Y
-  //   old=X,    new=X, amount changed → reverse old, apply new on same provider
+  // Four cases:
+  //   old=null, new=null          → nothing to do
+  //   old=X,    new=null          → reverse old amount on X
+  //   old=null, new=Y             → apply new amount on Y
+  //   old=X,    new=Y (X ≠ Y)    → reverse old on X, apply new on Y
+  //   old=X,    new=X, amt change → push only the diff on X
 
   if (recipientChanged) {
     if (oldRecipient) {
@@ -461,7 +495,7 @@ export const editPayment = asyncHandler(async (req, res, next) => {
       });
     }
   } else if (amountChanged && newRecipient) {
-    // Same recipient, different amount: push only the diff
+    // Same recipient, different amount → push only the diff
     await applyProviderSummaryDelta(newRecipient, {
       totalCustomersPaidDirect: newAmount - oldAmount,
     });

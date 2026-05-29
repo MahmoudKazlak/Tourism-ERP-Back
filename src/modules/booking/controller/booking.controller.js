@@ -233,6 +233,9 @@ export const getBookingById = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Update booking
+// FIX Bug 2: validateSubProviders + validateServiceDetails are now called
+// for any incoming services array, closing the validation gap that existed
+// when updating vs creating a booking.
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
@@ -242,6 +245,17 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
     .findById(id)
     .populate("createdBy", "userName email");
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  // ── Bug 2 fix: validate services before merging ───────────────────────────
+  if (data.services && Array.isArray(data.services)) {
+    const subProviderError = await validateSubProviders(data.services);
+    if (subProviderError) return next(subProviderError);
+
+    for (const service of data.services) {
+      const detailError = validateServiceDetails(service);
+      if (detailError) return next(detailError);
+    }
+  }
 
   const oldStatus = booking.status;
 
@@ -432,27 +446,31 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Change Booking Status
+// FIX Bug 8: validation now runs BEFORE writing to DB.
+// Old code called findByIdAndUpdate first, then checked the guard — meaning
+// the DB could already hold status:"completed" before the 400 fired.
 // ─────────────────────────────────────────────────────────────────────────────
 export const editStatus = asyncHandler(async (req, res, next) => {
   const { newStatus } = req.body;
   if (!newStatus)
-    return next(new Error("Enter the new status", { cause: 404 }));
+    return next(new Error("Enter the new status", { cause: 400 }));
 
-  const booking = await bookingModel.findByIdAndUpdate(
-    req.params.id,
-    { status: newStatus },
-    { new: true, runValidators: true },
-  );
-
+  // Fetch first so we can validate before touching the DB
+  const booking = await bookingModel.findById(req.params.id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  if (newStatus === "completed" && booking.paymentStatus !== "paid")
+  // Guard runs BEFORE the write
+  if (newStatus === "completed" && booking.paymentStatus !== "paid") {
     return next(
       new Error(
         "Can't mark booking as completed while there is a remaining balance",
         { cause: 400 },
       ),
     );
+  }
+
+  booking.status = newStatus;
+  await booking.save();
 
   return res.status(200).json({
     success: true,

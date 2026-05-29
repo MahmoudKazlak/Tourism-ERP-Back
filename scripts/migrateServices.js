@@ -6,9 +6,10 @@
  * Usage:
  *   node scripts/migrateServices.js
  *
- * Safe to run multiple times — skips bookings that already have
- * the new schema (detected by the presence of booking.services
- * with serviceType fields).
+ * FIX Bug 9: the skip condition now correctly identifies already-migrated
+ * bookings by checking for the ABSENCE of old arrays, not just the presence
+ * of a non-empty services array. A booking with services:[] (migrated,
+ * no services) was previously not skipped and would be processed again.
  */
 import mongoose from "mongoose";
 import dotenv from "dotenv";
@@ -26,12 +27,20 @@ let skipped = 0;
 let errors = 0;
 
 for await (const doc of cursor) {
-  // Skip if already migrated (has a services array with serviceType)
-  if (
+  // Bug 9 fix: a booking is already on the new schema when it has NO old
+  // named arrays. The previous check (services.length > 0) would re-process
+  // bookings that were migrated but had zero services.
+  const hasOldArrays =
+    (Array.isArray(doc.accommodations) && doc.accommodations.length > 0) ||
+    (Array.isArray(doc.carRentals) && doc.carRentals.length > 0) ||
+    (Array.isArray(doc.carWithDriver) && doc.carWithDriver.length > 0);
+
+  const alreadyMigrated =
     Array.isArray(doc.services) &&
-    doc.services.length > 0 &&
-    doc.services[0].serviceType
-  ) {
+    (doc.services.length === 0 || doc.services[0]?.serviceType) &&
+    !hasOldArrays;
+
+  if (alreadyMigrated) {
     skipped++;
     continue;
   }

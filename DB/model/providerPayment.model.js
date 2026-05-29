@@ -4,11 +4,11 @@ import { applyProviderSummaryDelta } from "../../src/services/providerSummarySer
 /**
  * Records money paid OUT to a provider (hotel, car company, etc.).
  *
- * This is the liability side of the ledger:
- *   - paymentModel  → money received FROM customers
- *   - providerPaymentModel → money paid TO providers
- *
- * Hooks here keep Provider.summary.totalWeHavePaid in sync automatically.
+ * Hook design:
+ *   post-save fires on BOTH create and update. We capture isNew in pre-save
+ *   (_wasNew) and skip the summary increment on updates — edits apply only
+ *   the net diff via applyProviderSummaryDelta in the controller directly.
+ *   This prevents double-counting when editProviderPayment saves the doc.
  */
 const providerPaymentSchema = new mongoose.Schema(
   {
@@ -38,7 +38,6 @@ const providerPaymentSchema = new mongoose.Schema(
       trim: true,
       maxlength: [300, "Notes too long"],
     },
-    // External reference: invoice number, wire transfer ID, cheque number, etc.
     reference: {
       type: String,
       trim: true,
@@ -55,8 +54,16 @@ const providerPaymentSchema = new mongoose.Schema(
 
 providerPaymentSchema.index({ provider: 1, date: -1 });
 
-// ── post-save: increment totalWeHavePaid ─────────────────────────────────────
+// ── pre-save: capture isNew BEFORE Mongoose flips it to false ────────────────
+providerPaymentSchema.pre("save", function () {
+  this._wasNew = this.isNew;
+});
+
+// ── post-save: only increment summary on document CREATION ───────────────────
+// Updates are handled explicitly in editProviderPayment with a net diff delta
+// to avoid double-counting the full amount on every save.
 providerPaymentSchema.post("save", async function () {
+  if (!this._wasNew) return; // skip updates
   try {
     await applyProviderSummaryDelta(this.provider, {
       totalWeHavePaid: this.amount,
@@ -70,7 +77,6 @@ providerPaymentSchema.post("save", async function () {
 });
 
 // ── post-deleteOne: reverse the increment ────────────────────────────────────
-// Triggered only by doc.deleteOne() — the controller uses this form.
 providerPaymentSchema.post(
   "deleteOne",
   { document: true, query: false },

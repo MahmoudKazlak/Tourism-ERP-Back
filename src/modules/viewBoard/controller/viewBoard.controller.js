@@ -9,14 +9,6 @@ import {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Period builder
-//
-// Accepted ?period= values:
-//   today | yesterday | last3days | last4days | last5days | last6days |
-//   thisweek | thismonth | last3months | last6months | lastyear | all
-//
-// Returns:
-//   current  — { from: Date, to: Date } window for the requested period
-//   previous — equivalent prior window for growth comparisons (null for "all")
 // ─────────────────────────────────────────────────────────────────────────────
 const buildDateRanges = (period = "today") => {
   const now = new Date();
@@ -39,7 +31,6 @@ const buildDateRanges = (period = "today") => {
   let current, previous;
 
   switch (period) {
-    // ── Day-level periods ───────────────────────────────────────────────────
     case "today": {
       const yd = daysAgo(1);
       current = { from: today, to: todayClose };
@@ -54,7 +45,7 @@ const buildDateRanges = (period = "today") => {
       break;
     }
     case "last3days": {
-      const start = dayStart(daysAgo(2)); // today − 2 → 3 days total
+      const start = dayStart(daysAgo(2));
       const prev = dayStart(daysAgo(5));
       const prevE = dayEnd(daysAgo(3));
       current = { from: start, to: todayClose };
@@ -85,10 +76,8 @@ const buildDateRanges = (period = "today") => {
       previous = { from: prev, to: prevE };
       break;
     }
-
-    // ── Week / month / multi-month ───────────────────────────────────────────
     case "thisweek": {
-      const dow = (now.getDay() + 6) % 7; // Mon = 0
+      const dow = (now.getDay() + 6) % 7;
       const weekStart = dayStart(daysAgo(dow));
       const prevEnd = new Date(weekStart.getTime() - 1);
       const prevStart = dayStart(daysAgo(dow + 7));
@@ -136,7 +125,6 @@ const buildDateRanges = (period = "today") => {
       previous = { from: prevStart, to: prevEnd };
       break;
     }
-
     case "all":
     default:
       current = null;
@@ -147,24 +135,19 @@ const buildDateRanges = (period = "today") => {
   return { current, previous };
 };
 
-/** Converts a range object to a Mongoose $match filter on createdAt. */
 const createdAtFilter = (range) =>
   range ? { createdAt: { $gte: range.from, $lte: range.to } } : {};
 
-/** Growth percentage string, or null when previous is zero/absent. */
 const growth = (curr, prev) =>
   prev > 0 ? `${(((curr - prev) / prev) * 100).toFixed(1)}%` : null;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal: extract all service lines from a set of bookings, grouped by
-// provider ID.  Returns Map<pid:string, ServiceEntry>.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// buildDateRanges, createdAtFilter, growth — unchanged, keep as-is from original
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal: extract all service lines from a set of bookings, grouped by
-// provider ID.  Returns Map<pid:string, ServiceEntry>.
+// buildServicesMap
+//
+// FIX Bug 1: `totalPaid` is now tracked per provider entry so that
+// `collectionRate` in getActiveServices can be computed correctly.
+// The booking select in getActiveServices was also updated to include
+// `totalPaid` so the data is available here.
 // ─────────────────────────────────────────────────────────────────────────────
 const buildServicesMap = (bookings) => {
   const map = new Map();
@@ -177,6 +160,7 @@ const buildServicesMap = (bookings) => {
         periodStats: {
           totalBuy: 0,
           totalSell: 0,
+          totalPaid: 0, // Bug 1 fix: track collected amount per provider
           bookingsCount: 0,
           servicesCount: 0,
         },
@@ -222,6 +206,8 @@ const buildServicesMap = (bookings) => {
       if (!entry._bookingIds.has(bk._id.toString())) {
         entry._bookingIds.add(bk._id.toString());
         entry.periodStats.bookingsCount += 1;
+        // Accumulate totalPaid per unique booking visit
+        entry.periodStats.totalPaid += Number(bk.totalPaid) || 0;
       }
     }
   }
@@ -233,6 +219,7 @@ const shapeProviderFull = (doc, entry) => {
   const stats = entry?.periodStats ?? {
     totalBuy: 0,
     totalSell: 0,
+    totalPaid: 0,
     bookingsCount: 0,
     servicesCount: 0,
   };
@@ -247,6 +234,7 @@ const shapeProviderFull = (doc, entry) => {
       totalBuy: stats.totalBuy,
       totalSell: stats.totalSell,
       totalProfit: stats.totalSell - stats.totalBuy,
+      totalPaid: stats.totalPaid,
       bookingsCount: stats.bookingsCount,
       servicesCount: stats.servicesCount,
     },
@@ -268,6 +256,7 @@ const shapeProviderActive = (doc, entry) => {
       totalBuy: stats.totalBuy,
       totalSell: stats.totalSell,
       totalProfit: stats.totalSell - stats.totalBuy,
+      totalPaid: stats.totalPaid,
       bookingsCount: stats.bookingsCount,
       servicesCount: stats.servicesCount,
     },
@@ -277,11 +266,10 @@ const shapeProviderActive = (doc, entry) => {
   };
 };
 
-// Keep buildDateRanges, createdAtFilter, growth exactly as in the original file.
-// Only paste the two endpoint handlers below, which reference buildServicesMap.
-
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/v1/view-board/providers
+// ─────────────────────────────────────────────────────────────────────────────
 export const getAllProviders = asyncHandler(async (req, res) => {
-  // ... (same structure as original, but update the select fields and serviceTypeBreakdown)
   const period = req.query.period || "today";
   const { current, previous } = buildDateRanges(period);
   const curFilter = createdAtFilter(current);
@@ -349,7 +337,9 @@ export const getAllProviders = asyncHandler(async (req, res) => {
     bookingModel.countDocuments(),
     bookingModel
       .find(curFilter)
-      .select("bookingID status paymentStatus customers createdAt services")
+      .select(
+        "bookingID status paymentStatus customers createdAt services totalPaid",
+      )
       .lean(),
   ]);
 
@@ -443,6 +433,14 @@ export const getAllProviders = asyncHandler(async (req, res) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/v1/view-board/active-services
+//
+// FIX Bug 1: collectionRate was always "100.0%" because the formula was
+// `(totals.revenue / totals.revenue) * 100`. It now uses `totals.totalPaid`
+// which is accumulated per-booking in buildServicesMap. The booking select
+// was updated to include `totalPaid` to make this possible.
+// ─────────────────────────────────────────────────────────────────────────────
 export const getActiveServices = asyncHandler(async (req, res) => {
   const period = req.query.period || "today";
   const { current, previous } = buildDateRanges(period);
@@ -453,7 +451,10 @@ export const getActiveServices = asyncHandler(async (req, res) => {
     [
       bookingModel
         .find(curFilter)
-        .select("bookingID status paymentStatus customers createdAt services")
+        // Bug 1 fix: include totalPaid so buildServicesMap can compute collectionRate
+        .select(
+          "bookingID status paymentStatus customers createdAt services totalPaid",
+        )
         .lean(),
       prevFilter
         ? bookingModel.aggregate([
@@ -525,11 +526,19 @@ export const getActiveServices = asyncHandler(async (req, res) => {
       acc.revenue += p.periodStats.totalSell;
       acc.cost += p.periodStats.totalBuy;
       acc.profit += p.periodStats.totalProfit;
+      acc.totalPaid += p.periodStats.totalPaid;
       acc.bookingsCount += p.periodStats.bookingsCount;
       acc.servicesCount += p.periodStats.servicesCount;
       return acc;
     },
-    { revenue: 0, cost: 0, profit: 0, bookingsCount: 0, servicesCount: 0 },
+    {
+      revenue: 0,
+      cost: 0,
+      profit: 0,
+      totalPaid: 0,
+      bookingsCount: 0,
+      servicesCount: 0,
+    },
   );
 
   const prev = prevStats[0] || { count: 0, revenue: 0, profit: 0 };
@@ -554,6 +563,7 @@ export const getActiveServices = asyncHandler(async (req, res) => {
         totalRevenue: totals.revenue,
         totalCost: totals.cost,
         totalProfit: totals.profit,
+        totalCollected: totals.totalPaid,
         avgBookingValue:
           totals.bookingsCount > 0
             ? +(totals.revenue / totals.bookingsCount).toFixed(2)
@@ -562,9 +572,10 @@ export const getActiveServices = asyncHandler(async (req, res) => {
           totals.bookingsCount > 0
             ? +(totals.profit / totals.bookingsCount).toFixed(2)
             : 0,
+        // Bug 1 fix: now uses actual totalPaid instead of revenue/revenue
         collectionRate:
           totals.revenue > 0
-            ? `${((totals.revenue / totals.revenue) * 100).toFixed(1)}%`
+            ? `${((totals.totalPaid / totals.revenue) * 100).toFixed(1)}%`
             : "0%",
         profitMargin:
           totals.revenue > 0

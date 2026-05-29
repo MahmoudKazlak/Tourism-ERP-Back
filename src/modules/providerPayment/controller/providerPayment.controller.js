@@ -4,6 +4,7 @@ import providerModel from "../../../../DB/model/provider.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
 import { notifyProviderPaymentRecorded } from "../../../services/notification.js";
+import { applyProviderSummaryDelta } from "../../../services/providerSummaryService.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Record a payment made TO a provider
@@ -38,7 +39,6 @@ export const createProviderPayment = asyncHandler(async (req, res, next) => {
     },
   });
 
-  // Feature [6]: Email notification — best-effort.
   await notifyProviderPaymentRecorded(
     provider,
     payment,
@@ -78,19 +78,24 @@ export const getProviderPayments = asyncHandler(async (req, res, next) => {
 
   const { limit, skip } = pagination(page, size);
 
-  const [payments, totalCount, totalAmountResult] = await Promise.all([
-    providerPaymentModel
-      .find(query)
-      .populate("recordedBy", "userName")
-      .sort({ date: -1 })
-      .limit(limit)
-      .skip(skip),
-    providerPaymentModel.countDocuments(query),
-    providerPaymentModel.aggregate([
-      { $match: { provider: provider._id } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-  ]);
+  const [payments, totalCount, filteredTotalResult, allTimeTotalResult] =
+    await Promise.all([
+      providerPaymentModel
+        .find(query)
+        .populate("recordedBy", "userName")
+        .sort({ date: -1 })
+        .limit(limit)
+        .skip(skip),
+      providerPaymentModel.countDocuments(query),
+      providerPaymentModel.aggregate([
+        { $match: query },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+      providerPaymentModel.aggregate([
+        { $match: { provider: provider._id } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+    ]);
 
   return res.status(200).json({
     success: true,
@@ -99,9 +104,75 @@ export const getProviderPayments = asyncHandler(async (req, res, next) => {
       provider: { id: provider._id, name: provider.name, type: provider.type },
       totalCount,
       totalPages: Math.ceil(totalCount / limit),
-      totalPaidToProvider: totalAmountResult[0]?.total || 0,
+      totalPaidToProvider: filteredTotalResult[0]?.total || 0,
+      allTimeTotalPaidToProvider: allTimeTotalResult[0]?.total || 0,
+      isFiltered: Boolean(fromDate || toDate),
       payments,
     },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: Edit a provider payment (Admin only)
+// PATCH /api/v1/provider-payment/:paymentId
+//
+// Editable fields: amount, date, method, notes, reference.
+// When amount changes the provider summary delta is corrected post-save.
+// ─────────────────────────────────────────────────────────────────────────────
+export const editProviderPayment = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+  const { amount, date, method, notes, reference } = req.body;
+
+  const payment = await providerPaymentModel
+    .findById(paymentId)
+    .populate("provider", "name");
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  const oldAmount = payment.amount;
+  const newAmount = amount !== undefined ? Number(amount) : oldAmount;
+  const amountChanged = newAmount !== oldAmount;
+
+  // Apply field updates
+  if (amount !== undefined) payment.amount = newAmount;
+  if (date !== undefined) payment.date = date;
+  if (method !== undefined) payment.method = method;
+  if (notes !== undefined) payment.notes = notes;
+  if (reference !== undefined) payment.reference = reference;
+
+  // Temporarily bypass the post-save hook that would double-apply the delta.
+  // We apply only the DIFF manually after saving.
+  payment._skipSummaryHook = true;
+  await payment.save();
+
+  // Apply the net delta to provider summary (only the change, not the full amount)
+  if (amountChanged) {
+    await applyProviderSummaryDelta(payment.provider._id, {
+      totalWeHavePaid: newAmount - oldAmount,
+    });
+  }
+
+  await logModel.create({
+    user: req.user._id,
+    action: "EDIT_PROVIDER_PAYMENT",
+    details: {
+      paymentId,
+      providerId: payment.provider._id,
+      providerName: payment.provider.name,
+      changes: {
+        ...(amountChanged && { amount: { from: oldAmount, to: newAmount } }),
+        ...(method !== undefined && { method }),
+        ...(date !== undefined && { date }),
+        ...(notes !== undefined && { notes }),
+        ...(reference !== undefined && { reference }),
+      },
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Provider payment updated successfully",
+    data: { payment },
     errors: null,
   });
 });
@@ -140,7 +211,7 @@ export const deleteProviderPayment = asyncHandler(async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Get all provider payments — for accounting overview
+// Get all provider payments — accounting overview
 // GET /api/v1/provider-payment/all
 // ─────────────────────────────────────────────────────────────────────────────
 export const getAllProviderPayments = asyncHandler(async (req, res) => {

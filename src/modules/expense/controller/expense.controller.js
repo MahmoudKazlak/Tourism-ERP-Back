@@ -4,7 +4,10 @@ import paymentModel from "../../../../DB/model/payment.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
 
-// إضافة مصروف
+// ─────────────────────────────────────────────────────────────────────────────
+// Create expense
+// POST /api/v1/expense
+// ─────────────────────────────────────────────────────────────────────────────
 export const createExpense = asyncHandler(async (req, res, next) => {
   const { category, amount, date, description, method, reference } = req.body;
 
@@ -32,7 +35,10 @@ export const createExpense = asyncHandler(async (req, res, next) => {
   });
 });
 
-// جلب المصاريف مع فلترة وتجميع
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all expenses with filtering and aggregation
+// GET /api/v1/expense
+// ─────────────────────────────────────────────────────────────────────────────
 export const getAllExpenses = asyncHandler(async (req, res) => {
   const { category, fromDate, toDate, page, size } = req.query;
 
@@ -58,7 +64,6 @@ export const getAllExpenses = asyncHandler(async (req, res) => {
       .limit(limit)
       .skip(skip),
     expenseModel.countDocuments(query),
-    // تجميع حسب الفئة
     expenseModel.aggregate([
       { $match: query },
       {
@@ -80,6 +85,7 @@ export const getAllExpenses = asyncHandler(async (req, res) => {
     data: {
       totalCount,
       totalPages: Math.ceil(totalCount / limit),
+      page: parseInt(page) || 1,
       grandTotal,
       byCategory: Object.fromEntries(
         totalByCategory.map((c) => [c._id, { total: c.total, count: c.count }]),
@@ -90,7 +96,29 @@ export const getAllExpenses = asyncHandler(async (req, res) => {
   });
 });
 
-// تعديل مصروف
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: Get single expense by ID
+// GET /api/v1/expense/:id
+// ─────────────────────────────────────────────────────────────────────────────
+export const getExpenseById = asyncHandler(async (req, res, next) => {
+  const expense = await expenseModel
+    .findById(req.params.id)
+    .populate("recordedBy", "userName email");
+
+  if (!expense) return next(new Error("Expense not found", { cause: 404 }));
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: { expense },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Update expense (admin only)
+// PATCH /api/v1/expense/:id
+// ─────────────────────────────────────────────────────────────────────────────
 export const updateExpense = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
@@ -115,7 +143,10 @@ export const updateExpense = asyncHandler(async (req, res, next) => {
   });
 });
 
-// حذف مصروف
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete expense (admin only)
+// DELETE /api/v1/expense/:id
+// ─────────────────────────────────────────────────────────────────────────────
 export const deleteExpense = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const expense = await expenseModel.findByIdAndDelete(id);
@@ -139,12 +170,11 @@ export const deleteExpense = asyncHandler(async (req, res, next) => {
   });
 });
 
-// ─────────────────────────────────────────────
-// إغلاق الصندوق اليومي
-// يحسب: الكاش الموجود = إجمالي دفعات الكاش - إجمالي مصاريف الكاش
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Daily cash closing report
+// GET /api/v1/expense/cash-closing?date=YYYY-MM-DD
+// ─────────────────────────────────────────────────────────────────────────────
 export const getDailyCashClosing = asyncHandler(async (req, res) => {
-  // التاريخ: اليوم أو تاريخ محدد
   const targetDate = req.query.date ? new Date(req.query.date) : new Date();
 
   const dayStart = new Date(targetDate);
@@ -156,23 +186,26 @@ export const getDailyCashClosing = asyncHandler(async (req, res) => {
 
   const [cashPayments, cashExpenses, allPayments, allExpenses] =
     await Promise.all([
-      // دفعات الكاش اليوم (من الزبائن)
       paymentModel.aggregate([
         { $match: { method: "cash", date: dateFilter } },
         {
-          $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } },
+          $group: {
+            _id: null,
+            total: { $sum: "$amount" },
+            count: { $sum: 1 },
+          },
         },
       ]),
-
-      // مصاريف الكاش اليوم
       expenseModel.aggregate([
         { $match: { method: "cash", date: dateFilter } },
         {
-          $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } },
+          $group: {
+            _id: null,
+            total: { $sum: "$amount" },
+            count: { $sum: 1 },
+          },
         },
       ]),
-
-      // كل وسائل الدفع اليوم
       paymentModel.aggregate([
         { $match: { date: dateFilter } },
         {
@@ -183,8 +216,6 @@ export const getDailyCashClosing = asyncHandler(async (req, res) => {
           },
         },
       ]),
-
-      // كل المصاريف اليوم
       expenseModel.aggregate([
         { $match: { date: dateFilter } },
         {
@@ -216,8 +247,8 @@ export const getDailyCashClosing = asyncHandler(async (req, res) => {
         inDrawer: cashInDrawer,
         label:
           cashInDrawer >= 0
-            ? `في الدرج ${cashInDrawer}`
-            : `عجز كاش ${Math.abs(cashInDrawer)}`,
+            ? `Cash in drawer: ${cashInDrawer}`
+            : `Cash deficit: ${Math.abs(cashInDrawer)}`,
       },
       allIncome: {
         total: totalCollectedToday,
@@ -234,8 +265,8 @@ export const getDailyCashClosing = asyncHandler(async (req, res) => {
       netForDay,
       netLabel:
         netForDay >= 0
-          ? `صافي ربح اليوم: ${netForDay}`
-          : `خسارة اليوم: ${Math.abs(netForDay)}`,
+          ? `Net profit today: ${netForDay}`
+          : `Net loss today: ${Math.abs(netForDay)}`,
     },
     errors: null,
   });

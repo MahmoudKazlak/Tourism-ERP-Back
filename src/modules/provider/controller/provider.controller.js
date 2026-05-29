@@ -5,6 +5,10 @@ import mongoose from "mongoose";
 import { pagination } from "../../../services/pagination.js";
 import { resyncProviderSummary } from "../../../services/providerSummaryService.js";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Create provider
+// POST /api/v1/provider/create
+// ─────────────────────────────────────────────────────────────────────────────
 export const createProvider = asyncHandler(async (req, res, next) => {
   const { name, type, phone, address } = req.body;
 
@@ -34,10 +38,13 @@ export const createProvider = asyncHandler(async (req, res, next) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete provider
+// DELETE /api/v1/provider/delete/:id
+// ─────────────────────────────────────────────────────────────────────────────
 export const deleteProvider = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
-  // Check if this provider is referenced anywhere in the bookings collection
   const hasBookings = await mongoose.model("Booking").findOne({
     $or: [{ provider: id }, { "services.provider": id }],
   });
@@ -69,11 +76,22 @@ export const deleteProvider = asyncHandler(async (req, res, next) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all providers (paginated + filtered)
+// GET /api/v1/provider/getAll
+//
+// Query params:
+//   type   — filter by provider type (hotel, car_rental, etc.)
+//   name   — partial name search (case-insensitive)  ← NEW
+//   page, size
+// ─────────────────────────────────────────────────────────────────────────────
 export const getAllProviders = asyncHandler(async (req, res, next) => {
-  const { type, page, size } = req.query;
+  const { type, name, page, size } = req.query;
 
   const query = {};
   if (type) query.type = type;
+  // Bug fix: allow partial name search for dropdowns / autocomplete
+  if (name) query.name = { $regex: name.trim(), $options: "i" };
 
   const { limit, skip } = pagination(page, size || 50);
 
@@ -96,6 +114,10 @@ export const getAllProviders = asyncHandler(async (req, res, next) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Get provider by ID
+// GET /api/v1/provider/get/:id
+// ─────────────────────────────────────────────────────────────────────────────
 export const getProviderById = asyncHandler(async (req, res, next) => {
   const provider = await providerModel.findById(req.params.id);
   if (!provider) return next(new Error("Provider not found", { cause: 404 }));
@@ -108,13 +130,17 @@ export const getProviderById = asyncHandler(async (req, res, next) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Update provider
+// PATCH /api/v1/provider/update/:id
+//
+// Bug 5 fix: duplicate name check excludes the current document.
+// ─────────────────────────────────────────────────────────────────────────────
 export const updateProvider = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const update = {};
 
   for (const [key, value] of Object.entries(req.body)) {
-    // Prevent overwriting internal counters managed by the booking logic.
-    // Also prevent direct writes to summary — use the resync endpoint instead.
     if (
       key !== "_id" &&
       key !== "currentSequence" &&
@@ -123,6 +149,22 @@ export const updateProvider = asyncHandler(async (req, res, next) => {
       value != null
     ) {
       update[key] = value;
+    }
+  }
+
+  // Prevent renaming to an already-taken name
+  if (update.name) {
+    const duplicate = await providerModel.findOne({
+      name: update.name,
+      _id: { $ne: id },
+    });
+    if (duplicate) {
+      return next(
+        new Error(
+          `Provider name "${update.name}" is already taken by another provider.`,
+          { cause: 400 },
+        ),
+      );
     }
   }
 
@@ -148,15 +190,8 @@ export const updateProvider = asyncHandler(async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Resync a provider's financial summary from scratch
+// Resync a single provider summary
 // POST /api/v1/provider/:id/resync
-//
-// Use this when:
-//   - Migrating existing providers to the new summary system
-//   - Recovering from suspected data drift
-//   - After bulk data imports that bypassed normal Mongoose hooks
-//
-// Safe to call multiple times — fully idempotent.
 // ─────────────────────────────────────────────────────────────────────────────
 export const resyncProvider = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
@@ -181,11 +216,8 @@ export const resyncProvider = asyncHandler(async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Resync ALL providers — bulk migration utility
+// Resync ALL providers
 // POST /api/v1/provider/resync-all
-//
-// Iterates every provider and rebuilds their summary.
-// Intended for one-time migration after deploying the summary feature.
 // ─────────────────────────────────────────────────────────────────────────────
 export const resyncAllProviders = asyncHandler(async (req, res, next) => {
   const providers = await providerModel.find({}).select("_id name").lean();

@@ -7,16 +7,24 @@ import { endpoint } from "../indexEndpoint.js";
 
 const router = Router();
 
-// Static routes before dynamic ones.
+// Static routes before dynamic ones
 
-// GET /api/v1/provider-payment/all — all provider payments (accounting overview)
+// GET /api/v1/provider-payment/all
 router.get(
   "/all",
   auth(endpoint.accounting_only),
   providerPaymentController.getAllProviderPayments,
 );
 
-// DELETE /api/v1/provider-payment/:paymentId — remove a specific payment
+// NEW: PATCH /api/v1/provider-payment/:paymentId  — edit a provider payment
+router.patch(
+  "/:paymentId",
+  auth(endpoint.AdminOnly),
+  validation(validators.editProviderPayment),
+  providerPaymentController.editProviderPayment,
+);
+
+// DELETE /api/v1/provider-payment/:paymentId
 router.delete(
   "/:paymentId",
   auth(endpoint.AdminOnly),
@@ -24,7 +32,7 @@ router.delete(
   providerPaymentController.deleteProviderPayment,
 );
 
-// POST /api/v1/provider-payment/:providerId — record a payment to a provider
+// POST /api/v1/provider-payment/:providerId
 router.post(
   "/:providerId",
   auth(endpoint.accounting_only),
@@ -32,7 +40,7 @@ router.post(
   providerPaymentController.createProviderPayment,
 );
 
-// GET /api/v1/provider-payment/:providerId — list payments for a provider
+// GET /api/v1/provider-payment/:providerId
 router.get(
   "/:providerId",
   auth(endpoint.accounting_only),

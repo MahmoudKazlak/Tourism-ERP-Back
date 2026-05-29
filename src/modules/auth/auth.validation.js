@@ -32,8 +32,6 @@ export const createUser = {
     }),
 };
 
-// FIX [3]: updateUser previously had no Joi validation — any field value
-// (including garbage) passed straight through to user[key] = value.
 export const updateUser = {
   body: Joi.object({
     userName: Joi.string().min(3).max(25).messages({
@@ -71,6 +69,48 @@ export const updateUser = {
   })
     .min(1)
     .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    id: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid user ID",
+      "string.length": "Invalid user ID",
+    }),
+  }),
+};
+
+// ── NEW: self-service update (non-admin users updating their own profile) ────
+// Allows only safe personal fields — never role, blocked, or email.
+export const updateSelf = {
+  body: Joi.object({
+    userName: Joi.string().min(3).max(25).messages({
+      "string.min": "Username must be at least 3 characters",
+    }),
+    phone: Joi.string()
+      .pattern(/^\+?[\d\s\-().]{7,20}$/)
+      .allow("")
+      .messages({
+        "string.pattern.base": "Invalid phone number format",
+      }),
+    password: Joi.string().pattern(passwordPattern).messages({
+      "string.pattern.base": passwordMessage,
+    }),
+    cPassword: Joi.string()
+      .valid(Joi.ref("password"))
+      .when("password", {
+        is: Joi.exist(),
+        then: Joi.required(),
+        otherwise: Joi.forbidden(),
+      })
+      .messages({
+        "any.only": "Passwords do not match",
+        "any.required": "Confirm password is required when changing password",
+      }),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+};
+
+// ── NEW: user ID param only ───────────────────────────────────────────────────
+export const userIdParam = {
   params: Joi.object({
     id: Joi.string().hex().length(24).required().messages({
       "string.hex": "Invalid user ID",

@@ -8,9 +8,6 @@ import mongoose from "mongoose";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: compute how much a provider currently owes our agency
-//
-// This is what Hotel A still needs to pay us AFTER we apply any prior
-// collections. Used to warn the user if they try to over-collect.
 // ─────────────────────────────────────────────────────────────────────────────
 const computeProviderOwesUs = async (providerId) => {
   const providerObjId = new mongoose.Types.ObjectId(providerId);
@@ -76,8 +73,6 @@ export const createProviderCollection = asyncHandler(async (req, res, next) => {
   const provider = await providerModel.findById(providerId);
   if (!provider) return next(new Error("Provider not found", { cause: 404 }));
 
-  // Warn if this provider doesn't actually owe us anything.
-  // We allow the record anyway (edge cases exist) but flag it clearly.
   const { balance } = await computeProviderOwesUs(providerId);
   const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
 
@@ -148,6 +143,10 @@ export const createProviderCollection = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Get all collections from a specific provider (paginated)
 // GET /api/v1/provider-collection/:providerId
+//
+// FIX Bug 4: the "total" aggregate now uses the same date-filtered query as
+// the paginated list, so the two figures are always consistent.
+// An allTimeTotalCollected field is included for reference.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getProviderCollections = asyncHandler(async (req, res, next) => {
   const { providerId } = req.params;
@@ -156,6 +155,7 @@ export const getProviderCollections = asyncHandler(async (req, res, next) => {
   const provider = await providerModel.findById(providerId).lean();
   if (!provider) return next(new Error("Provider not found", { cause: 404 }));
 
+  // Build query — shared by list, count, and filtered total
   const query = { provider: providerId };
   if (fromDate || toDate) {
     query.date = {};
@@ -169,24 +169,33 @@ export const getProviderCollections = asyncHandler(async (req, res, next) => {
 
   const { limit, skip } = pagination(page, size);
 
-  const [collections, totalCount, totalAmountResult] = await Promise.all([
-    providerCollectionModel
-      .find(query)
-      .populate("recordedBy", "userName")
-      .populate("booking", "bookingID customers")
-      .sort({ date: -1 })
-      .limit(limit)
-      .skip(skip),
-    providerCollectionModel.countDocuments(query),
-    providerCollectionModel.aggregate([
-      { $match: { provider: new mongoose.Types.ObjectId(providerId) } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-  ]);
+  const [collections, totalCount, filteredTotalResult, allTimeTotalResult] =
+    await Promise.all([
+      providerCollectionModel
+        .find(query)
+        .populate("recordedBy", "userName")
+        .populate("booking", "bookingID customers")
+        .sort({ date: -1 })
+        .limit(limit)
+        .skip(skip),
+      providerCollectionModel.countDocuments(query),
 
-  // Include current outstanding balance for context
+      // Filtered total — consistent with the paginated list
+      providerCollectionModel.aggregate([
+        { $match: query },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+
+      // All-time total — always the full lifetime sum for this provider
+      providerCollectionModel.aggregate([
+        { $match: { provider: new mongoose.Types.ObjectId(providerId) } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+    ]);
+
   const { balance } = await computeProviderOwesUs(providerId);
   const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
+  const isFiltered = Boolean(fromDate || toDate);
 
   return res.status(200).json({
     success: true,
@@ -195,7 +204,9 @@ export const getProviderCollections = asyncHandler(async (req, res, next) => {
       provider: { id: provider._id, name: provider.name, type: provider.type },
       totalCount,
       totalPages: Math.ceil(totalCount / limit),
-      totalCollected: totalAmountResult[0]?.total || 0,
+      totalCollected: filteredTotalResult[0]?.total || 0,
+      allTimeTotalCollected: allTimeTotalResult[0]?.total || 0,
+      isFiltered,
       currentOutstandingBalance: providerOwesUs,
       collections,
     },

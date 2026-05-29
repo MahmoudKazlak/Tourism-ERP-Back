@@ -7,22 +7,18 @@ import logModel from "../../../../DB/model/log.model.js";
 import refreshTokenModel from "../../../../DB/model/refreshToken.model.js";
 import { nanoid } from "nanoid";
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import { pagination } from "../../../services/pagination.js";
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 const ACCESS_TOKEN_EXPIRY = process.env.ACCESS_TOKEN_EXPIRY || "1h";
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
 
-/** Creates a signed JWT access token. */
 const signAccessToken = (userId) =>
   jwt.sign({ id: userId }, process.env.SIGNINTOKEN, {
     expiresIn: ACCESS_TOKEN_EXPIRY,
   });
 
-/**
- * Creates a raw refresh token, stores its SHA-256 hash in the DB,
- * and returns the raw token (sent to the client once, never stored raw).
- */
 const createRefreshToken = async (userId, req) => {
   const raw = crypto.randomBytes(40).toString("hex");
   const hash = crypto.createHash("sha256").update(raw).digest("hex");
@@ -49,13 +45,6 @@ export const signIn = asyncHandler(async (req, res, next) => {
   if (!user)
     return next(new Error("Invalid login credentials", { cause: 400 }));
 
-  // FIX: Check blocked BEFORE comparing the password.
-  // Reasons:
-  //   1. Correctness — the test expects 403 for a blocked user with valid
-  //      credentials. The old order returned 400 when something caused
-  //      comparePassword to be skipped or fail early.
-  //   2. Security — we should not reveal whether a blocked account's
-  //      password is correct or not; fail immediately with 403.
   if (user.blocked) {
     return res
       .status(403)
@@ -88,7 +77,6 @@ export const signIn = asyncHandler(async (req, res, next) => {
   });
 });
 
-// Feature [4]: Issue a new access token using a valid refresh token.
 export const refreshToken = asyncHandler(async (req, res, next) => {
   const { refreshToken: rawToken } = req.body;
   if (!rawToken)
@@ -126,7 +114,6 @@ export const refreshToken = asyncHandler(async (req, res, next) => {
   });
 });
 
-// Feature [4]: Invalidate a refresh token on logout.
 export const logout = asyncHandler(async (req, res, next) => {
   const { refreshToken: rawToken } = req.body;
   if (rawToken) {
@@ -142,12 +129,78 @@ export const logout = asyncHandler(async (req, res, next) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: Get current authenticated user's profile
+// GET /api/v1/auth/me  — all roles
+// ─────────────────────────────────────────────────────────────────────────────
+export const getMe = asyncHandler(async (req, res, next) => {
+  // req.user is already populated by the auth middleware with
+  // _id, role, blocked, email, userName — fetch full doc for image field
+  const user = await userModel
+    .findById(req.user._id)
+    .select("-password -passwordResetToken -passwordResetExpiry");
+
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  return res.status(200).json({
+    success: true,
+    message: "Profile retrieved successfully",
+    data: { user },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: Self-service profile update (any authenticated user)
+// PATCH /api/v1/auth/me
+// Allows: userName, phone, password — never role, blocked, email.
+// ─────────────────────────────────────────────────────────────────────────────
+export const updateSelf = asyncHandler(async (req, res, next) => {
+  const user = await userModel.findById(req.user._id);
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  const allowedFields = ["userName", "phone", "password"];
+  for (const key of allowedFields) {
+    if (req.body[key] != null) {
+      user[key] = req.body[key];
+    }
+  }
+
+  await user.save(); // pre-save hook hashes password if changed
+
+  await logModel.create({
+    user: req.user._id,
+    action: "UPDATE_SELF_PROFILE",
+    details: {
+      updatedFields: Object.keys(req.body).filter(
+        (k) => allowedFields.includes(k) && k !== "password",
+      ),
+      passwordChanged: Boolean(req.body.password),
+    },
+  });
+
+  const safeUser = user.toObject();
+  delete safeUser.password;
+  delete safeUser.passwordResetToken;
+  delete safeUser.passwordResetExpiry;
+
+  return res.status(200).json({
+    success: true,
+    message: "Profile updated successfully",
+    data: { user: safeUser },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Send password-reset OTP
+// Bug 10 fix: OTP stored as SHA-256 hash, never plaintext.
+// ─────────────────────────────────────────────────────────────────────────────
 export const sendCode = asyncHandler(async (req, res, next) => {
   const { email } = req.body;
 
   const user = await userModel.findOne({ email }).select("_id email");
   if (!user) {
-    // Do not reveal whether the email exists (security best practice).
     return res.status(200).json({
       success: true,
       message: "If this email exists, a reset code has been sent.",
@@ -157,7 +210,8 @@ export const sendCode = asyncHandler(async (req, res, next) => {
   }
 
   const code = nanoid(8);
-  const expiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+  const codeHash = crypto.createHash("sha256").update(code).digest("hex");
+  const expiry = new Date(Date.now() + 60 * 60 * 1000);
 
   await sendEmail(
     email,
@@ -168,11 +222,9 @@ export const sendCode = asyncHandler(async (req, res, next) => {
 
   await userModel.updateOne(
     { _id: user._id },
-    { passwordResetToken: code, passwordResetExpiry: expiry },
+    { passwordResetToken: codeHash, passwordResetExpiry: expiry },
   );
 
-  // The JWT here only identifies which user the OTP belongs to.
-  // It does NOT grant any access — the OTP + this JWT together are required.
   const token = jwt.sign({ id: user._id }, process.env.FORGOTPASSWORDTOKEN, {
     expiresIn: "1h",
   });
@@ -185,6 +237,10 @@ export const sendCode = asyncHandler(async (req, res, next) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Reset password using OTP
+// Bug 10 fix: hashes incoming OTP before DB comparison.
+// ─────────────────────────────────────────────────────────────────────────────
 export const forgotPassword = asyncHandler(async (req, res, next) => {
   const { otp, email, newPassword } = req.body;
 
@@ -200,9 +256,11 @@ export const forgotPassword = asyncHandler(async (req, res, next) => {
     return next(new Error("Invalid request", { cause: 400 }));
   }
 
+  const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+
   const user = await userModel.findOne({
     email,
-    passwordResetToken: otp,
+    passwordResetToken: otpHash,
     _id: decoded.id,
   });
 
@@ -216,7 +274,6 @@ export const forgotPassword = asyncHandler(async (req, res, next) => {
     );
   }
 
-  // pre('save') hashes the password — no manual bcrypt.hash() needed.
   user.password = newPassword;
   user.passwordResetToken = null;
   user.passwordResetExpiry = null;
@@ -230,6 +287,9 @@ export const forgotPassword = asyncHandler(async (req, res, next) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Create user (admin only)
+// ─────────────────────────────────────────────────────────────────────────────
 export const createUser = asyncHandler(async (req, res, next) => {
   const { userName, email, password, role } = req.body;
 
@@ -261,10 +321,12 @@ export const createUser = asyncHandler(async (req, res, next) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Update user (admin only — can change any field including role/blocked)
+// ─────────────────────────────────────────────────────────────────────────────
 export const updateUser = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
-  // These fields must never be set through this endpoint.
   const protectedFields = [
     "_id",
     "passwordResetToken",
@@ -316,26 +378,84 @@ export const updateUser = asyncHandler(async (req, res, next) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all users (admin only)
+// Bug fix: now returns consistent pagination shape matching all other list
+// endpoints — { totalCount, totalPages, page, users } instead of { count, users }.
+// ─────────────────────────────────────────────────────────────────────────────
 export const getAllUsers = asyncHandler(async (req, res, next) => {
-  const { role, blocked } = req.query;
+  const { role, blocked, page, size } = req.query;
+
   const query = {};
   if (role) query.role = role;
   if (blocked !== undefined) query.blocked = blocked === "true";
 
-  const users = await userModel
-    .find(query)
-    .select("-password -passwordResetToken -passwordResetExpiry")
-    .sort({ createdAt: -1 });
+  const { limit, skip } = pagination(page, size);
+
+  const [users, totalCount] = await Promise.all([
+    userModel
+      .find(query)
+      .select("-password -passwordResetToken -passwordResetExpiry")
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .skip(skip),
+    userModel.countDocuments(query),
+  ]);
 
   return res.status(200).json({
     success: true,
     message: "Data retrieved successfully",
-    data: { count: users.length, users },
+    data: {
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      page: parseInt(page) || 1,
+      users,
+    },
     errors: null,
   });
 });
 
-// Feature [5]: Upload a user's profile image to Cloudinary.
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: Delete user (admin only)
+// Prevents self-deletion. Invalidates all refresh tokens for the deleted user.
+// ─────────────────────────────────────────────────────────────────────────────
+export const deleteUser = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+
+  if (id === req.user._id.toString()) {
+    return next(
+      new Error("You cannot delete your own account", { cause: 400 }),
+    );
+  }
+
+  const user = await userModel.findByIdAndDelete(id);
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  // Revoke all active sessions for the deleted user
+  await refreshTokenModel.deleteMany({ user: id });
+
+  await logModel.create({
+    user: req.user._id,
+    action: "DELETE_USER",
+    details: {
+      userId: id,
+      userName: user.userName,
+      email: user.email,
+      role: user.role,
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "User deleted successfully",
+    data: null,
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Upload user profile image (admin only)
+// ─────────────────────────────────────────────────────────────────────────────
 export const uploadUserImage = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
@@ -346,7 +466,6 @@ export const uploadUserImage = asyncHandler(async (req, res, next) => {
   const user = await userModel.findById(id);
   if (!user) return next(new Error("User not found", { cause: 404 }));
 
-  // Delete the old Cloudinary image if one exists.
   if (user.imagePublicId) {
     await deleteImage(user.imagePublicId).catch((e) =>
       console.warn("⚠️  Could not delete old Cloudinary image:", e.message),
@@ -369,6 +488,29 @@ export const uploadUserImage = asyncHandler(async (req, res, next) => {
     success: true,
     message: "Profile image uploaded successfully",
     data: { imageUrl: result.secure_url },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: Logout from all devices (any authenticated user)
+// POST /api/v1/auth/logout-all
+// Deletes every refresh token for the current user — forces re-login on all
+// devices. Useful after a password change or suspected account compromise.
+// ─────────────────────────────────────────────────────────────────────────────
+export const logoutAll = asyncHandler(async (req, res, next) => {
+  const deleted = await refreshTokenModel.deleteMany({ user: req.user._id });
+
+  await logModel.create({
+    user: req.user._id,
+    action: "LOGOUT_ALL_SESSIONS",
+    details: { sessionsRevoked: deleted.deletedCount },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: `Logged out from all devices. ${deleted.deletedCount} session(s) revoked.`,
+    data: { sessionsRevoked: deleted.deletedCount },
     errors: null,
   });
 });

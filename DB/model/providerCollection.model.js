@@ -4,25 +4,9 @@ import { applyProviderSummaryDelta } from "../../src/services/providerSummarySer
 /**
  * Records money received FROM a provider who collected on our agency's behalf.
  *
- * Context & accounting role
- * ─────────────────────────
- * When a customer pays a provider (e.g. Hotel A) the full booking amount
- * instead of paying our office, Hotel A is holding funds that partly belong
- * to us (the profit / amounts owed to other providers we must distribute).
- *
- * That event is recorded on the Payment model with providerRecipient = HotelA,
- * which makes Hotel A's balance negative (they owe us money).
- *
- * THIS model records the reverse: Hotel A paying us back that receivable.
- *
- * Statement formula impact
- * ────────────────────────
- *   balance = Σ(service buy costs)            ← we owe provider
- *           − Σ(ProviderPayment.amount)        ← we paid provider
- *           − Σ(Payment[providerRecipient=X])  ← customer paid provider
- *           + Σ(ProviderCollection.amount)     ← recovering receivable
- *
- * Hooks here keep Provider.summary.totalCollectedFromProvider in sync.
+ * Hook design (same pattern as providerPayment.model.js):
+ *   pre-save captures isNew → post-save only increments on creation.
+ *   This prevents double-counting if the document is ever re-saved.
  */
 const providerCollectionSchema = new mongoose.Schema(
   {
@@ -52,10 +36,6 @@ const providerCollectionSchema = new mongoose.Schema(
       trim: true,
       maxlength: [300, "Notes too long"],
     },
-    /**
-     * Optional: which booking triggered this collection.
-     * Not required because a single collection may settle multiple bookings.
-     */
     booking: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Booking",
@@ -77,8 +57,14 @@ const providerCollectionSchema = new mongoose.Schema(
 
 providerCollectionSchema.index({ provider: 1, date: -1 });
 
-// ── post-save: increment totalCollectedFromProvider ──────────────────────────
+// ── pre-save: capture isNew BEFORE Mongoose flips it to false ────────────────
+providerCollectionSchema.pre("save", function () {
+  this._wasNew = this.isNew;
+});
+
+// ── post-save: only increment on document CREATION ───────────────────────────
 providerCollectionSchema.post("save", async function () {
+  if (!this._wasNew) return; // skip updates
   try {
     await applyProviderSummaryDelta(this.provider, {
       totalCollectedFromProvider: this.amount,

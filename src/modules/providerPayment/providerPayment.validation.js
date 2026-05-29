@@ -26,6 +26,28 @@ export const createProviderPayment = {
   }),
 };
 
+// NEW: edit a provider payment
+export const editProviderPayment = {
+  body: Joi.object({
+    amount: Joi.number().positive().messages({
+      "number.positive": "Amount must be greater than 0",
+    }),
+    date: Joi.date().max("now").messages({
+      "date.max": "Payment date cannot be in the future",
+    }),
+    method: Joi.string().valid("cash", "bank_transfer", "check", "other"),
+    notes: Joi.string().trim().max(300).allow(""),
+    reference: Joi.string().trim().max(100).allow(""),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    paymentId: Joi.string().hex().length(24).required().messages({
+      "string.hex": "Invalid payment ID",
+    }),
+  }),
+};
+
 export const deleteProviderPayment = {
   params: Joi.object({
     paymentId: Joi.string().hex().length(24).required().messages({

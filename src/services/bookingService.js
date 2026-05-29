@@ -111,5 +111,7 @@ export const calculateBookingTotals = (doc) => {
   else doc.paymentStatus = "partial";
 };
 
-// ── Kept for backward-compatibility with booking.model.js hooks ───────────────
-export { computeServiceDeltas, applyProviderSummaryDelta };
+// NOTE (Bug 7 fix): the dead re-export of computeServiceDeltas and
+// applyProviderSummaryDelta has been removed. booking.model.js imports
+// them directly from providerSummaryService.js — re-exporting here was
+// unused and misleading.
