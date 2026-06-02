@@ -5,6 +5,8 @@ import {
   SERVICE_TYPES,
   describeService,
 } from "../../../config/serviceTypes.js";
+import { buildInvoiceData } from "../../../services/invoiceService.js";
+import { createInvoicePdfDocument } from "../../../services/invoicePdfService.js";
 
 export const getServiceVoucher = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
@@ -81,96 +83,39 @@ export const getInvoice = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
   const { serviceType } = req.query;
 
-  const booking = await bookingModel
-    .findById(bookingId)
-    .populate("provider", "name phone address")
-    .populate("services.provider", "name")
-    .populate("createdBy", "userName")
-    .lean();
-
-  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
-
-  const payments = await paymentModel
-    .find({ booking: booking._id })
-    .populate("providerRecipient", "name")
-    .sort({ date: 1 })
-    .lean();
-
-  let filteredServices = booking.services || [];
-  if (serviceType) {
-    filteredServices = filteredServices.filter(
-      (s) => s.serviceType === serviceType,
-    );
-  }
-
-  const lineItems = filteredServices.map((service) => {
-    const typeDef = SERVICE_TYPES[service.serviceType];
-    return {
-      serviceNumber: service.serviceNumber,
-      type: typeDef?.label || service.serviceType,
-      description: describeService(service),
-      duration: service.duration,
-      durationUnit: typeDef?.durationFields?.unit,
-      amount: service.sell,
-    };
-  });
-
-  const filteredTotal = filteredServices.reduce(
-    (sum, s) => sum + (Number(s.sell) || 0),
-    0,
-  );
-
-  const filteredTotals = serviceType
-    ? {
-        subtotal: filteredTotal,
-        note: "Payment totals below reflect the full booking — individual service payments are not tracked separately.",
-        fullBooking: {
-          totalToPay: booking.totalToPay,
-          totalPaid: booking.totalPaid,
-          remainingBalance: booking.remainingBalance,
-          paymentStatus: booking.paymentStatus,
-        },
-      }
-    : {
-        subtotal: booking.totalToPay,
-        totalToPay: booking.totalToPay,
-        totalPaid: booking.totalPaid,
-        remainingBalance: booking.remainingBalance,
-        paymentStatus: booking.paymentStatus,
-      };
-
-  const invoice = {
-    invoiceType: serviceType
-      ? `PARTIAL INVOICE - ${serviceType.toUpperCase()}`
-      : "FULL INVOICE",
-    invoiceNumber: `INV-${booking.bookingID}-${Date.now().toString().slice(-4)}`,
-    issueDate: new Date().toISOString(),
-    booking: { id: booking._id, bookingID: booking.bookingID },
-    billTo: {
-      names: booking.customers?.map((c) => c.name) || [],
-      pax: booking.totalPax,
-    },
-    issuedBy: booking.createdBy?.userName || "N/A",
-    lineItems,
-    totals: filteredTotals,
-    payments: !serviceType
-      ? payments.map((p) => ({
-          date: p.date,
-          amount: p.amount,
-          method: p.method,
-          paidTo: p.providerRecipient?.name || "Office",
-        }))
-      : [],
-  };
+  const invoice = await buildInvoiceData(bookingId, { serviceType });
+  if (!invoice) return next(new Error("Booking not found", { cause: 404 }));
 
   return res.status(200).json({
     success: true,
     message: serviceType
       ? `Partial invoice for ${serviceType} generated`
       : "Full invoice generated",
-    data: invoice,
+    data: {
+      ...invoice,
+      issueDate: invoice.issueDate.toISOString(),
+    },
     errors: null,
   });
+});
+
+export const downloadInvoicePdf = asyncHandler(async (req, res, next) => {
+  const { bookingId } = req.params;
+  const { serviceType } = req.query;
+
+  const invoice = await buildInvoiceData(bookingId, { serviceType });
+  if (!invoice) return next(new Error("Booking not found", { cause: 404 }));
+
+  const filename = `${invoice.invoiceNumber}.pdf`;
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Cache-Control", "no-store");
+
+  const doc = createInvoicePdfDocument(invoice);
+  doc.on("error", (err) => next(err));
+  doc.pipe(res);
+  doc.end();
 });
 
 export const getReceipt = asyncHandler(async (req, res, next) => {

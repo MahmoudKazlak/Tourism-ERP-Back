@@ -29,7 +29,9 @@
     "mongoose": "^9.1.2",
     "multer": "^2.0.2",
     "nanoid": "^5.1.6",
-    "nodemailer": "^7.0.12"
+    "nodemailer": "^7.0.12",
+    "pdfkit": "^0.18.0",
+    "svg-to-pdfkit": "^0.1.8"
   },
   "devDependencies": {
     "jest": "^29.7.0",

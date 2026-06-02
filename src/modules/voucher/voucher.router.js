@@ -21,6 +21,14 @@ router.get(
   voucherController.getInvoice,
 );
 
+// Invoice PDF — binary stream for download
+// GET /api/v1/voucher/invoice/:bookingId/pdf
+router.get(
+  "/invoice/:bookingId/pdf",
+  auth(endpoint.booking_view),
+  voucherController.downloadInvoicePdf,
+);
+
 // Receipt — سند قبض لدفعة محددة
 // GET /api/v1/voucher/receipt/:paymentId
 router.get(
