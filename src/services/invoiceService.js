@@ -1,9 +1,9 @@
 import bookingModel from "../../DB/model/booking.model.js";
 import paymentModel from "../../DB/model/payment.model.js";
 import {
-  SERVICE_TYPES,
   describeService,
 } from "../config/serviceTypes.js";
+import { getMergedServiceTypes } from "./serviceTypeRegistry.js";
 
 /**
  * Builds structured invoice payload for JSON responses and PDF generation.
@@ -43,7 +43,7 @@ export const buildInvoiceData = async (bookingId, { serviceType } = {}) => {
   }
 
   const lineItems = filteredServices.map((service) => {
-    const typeDef = SERVICE_TYPES[service.serviceType];
+    const typeDef = getMergedServiceTypes()[service.serviceType];
     return {
       serviceNumber: service.serviceNumber,
       type: typeDef?.label || service.serviceType,

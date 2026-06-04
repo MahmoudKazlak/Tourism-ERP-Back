@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { seedAdmin } from "./adminSeed.js";
+import { refreshServiceTypeRegistry } from "../src/services/serviceTypeRegistry.js";
 
 const connectDB = async () => {
   return await mongoose
@@ -7,6 +8,7 @@ const connectDB = async () => {
     .then(async (res) => {
       console.log("connectDb");
       await seedAdmin();
+      await refreshServiceTypeRegistry();
     })
     .catch((err) => {
       console.log("faild to connect", err);

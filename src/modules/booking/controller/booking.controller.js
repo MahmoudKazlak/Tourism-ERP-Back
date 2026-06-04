@@ -5,7 +5,7 @@ import paymentModel from "../../../../DB/model/payment.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { notifyBookingStatusChanged } from "../../../services/notification.js";
 import { pagination } from "../../../services/pagination.js";
-import { SERVICE_TYPES } from "../../../config/serviceTypes.js";
+import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
 import mongoose from "mongoose";
 
 const PROTECTED_BOOKING_FIELDS = [
@@ -26,8 +26,12 @@ const PROTECTED_BOOKING_FIELDS = [
  */
 const validateServiceDetails = (service) => {
   const { serviceType, details = {} } = service;
-  const typeDef = SERVICE_TYPES[serviceType];
-  if (!typeDef) return null; // unknown types are caught by Joi
+  const typeDef = getMergedServiceTypes()[serviceType];
+  if (!typeDef) {
+    const err = new Error(`Unknown service type "${serviceType}"`);
+    err.cause = 400;
+    return err;
+  }
 
   if (typeDef.durationFields) {
     const { from, to } = typeDef.durationFields;
@@ -41,6 +45,16 @@ const validateServiceDetails = (service) => {
     if (new Date(details[to]) <= new Date(details[from])) {
       const err = new Error(
         `details.${to} must be after details.${from} for service type "${serviceType}"`,
+      );
+      err.cause = 400;
+      return err;
+    }
+  }
+
+  for (const field of typeDef.detailFields ?? []) {
+    if (field.required && (details[field.key] == null || details[field.key] === "")) {
+      const err = new Error(
+        `Service type "${serviceType}" requires details.${field.key}`,
       );
       err.cause = 400;
       return err;

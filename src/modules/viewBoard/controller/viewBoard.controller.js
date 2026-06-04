@@ -4,8 +4,11 @@ import providerModel from "../../../../DB/model/provider.model.js";
 import userModel from "../../../../DB/model/user.model.js";
 import {
   SERVICE_TYPES,
-  SERVICE_TYPE_KEYS,
 } from "../../../config/serviceTypes.js";
+import {
+  getMergedServiceTypeKeys,
+  getMergedServiceTypes,
+} from "../../../services/serviceTypeRegistry.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Period builder
@@ -183,7 +186,7 @@ const buildServicesMap = (bookings) => {
       if (!service.provider) continue;
       const pid = service.provider.toString();
       const entry = ensure(pid);
-      const typeDef = SERVICE_TYPES[service.serviceType];
+      const typeDef = getMergedServiceTypes()[service.serviceType];
       const buy = Number(service.buy) || 0;
       const sell = Number(service.sell) || 0;
 
@@ -363,7 +366,7 @@ export const getAllProviders = asyncHandler(async (req, res) => {
 
   // Dynamic breakdown from registry — no hardcoding
   const serviceTypeBreakdown = Object.fromEntries(
-    SERVICE_TYPE_KEYS.map((k) => [k, 0]),
+    getMergedServiceTypeKeys().map((k) => [k, 0]),
   );
   for (const entry of servicesMap.values()) {
     for (const s of entry.services) {

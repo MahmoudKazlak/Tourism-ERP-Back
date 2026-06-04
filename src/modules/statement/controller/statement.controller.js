@@ -6,9 +6,9 @@ import providerModel from "../../../../DB/model/provider.model.js";
 import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
 import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
 import {
-  SERVICE_TYPES,
   describeService,
 } from "../../../config/serviceTypes.js";
+import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
 import { pagination } from "../../../services/pagination.js";
 
 const buildLedger = async (providerId, dateFilter) => {
@@ -66,7 +66,7 @@ const buildLedger = async (providerId, dateFilter) => {
         service.provider?._id?.toString() || service.provider?.toString();
       if (pid !== providerId) continue;
 
-      const typeDef = SERVICE_TYPES[service.serviceType];
+      const typeDef = getMergedServiceTypes()[service.serviceType];
       serviceLines.push({
         ...meta,
         type: "SERVICE_DEBIT",

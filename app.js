@@ -135,6 +135,11 @@ app.use(
   generalLimiter,
   indexRouter.providerCollectionRouter,
 );
+app.use(
+  `${baseUrl}/service-types`,
+  generalLimiter,
+  indexRouter.serviceTypeRouter,
+);
 
 // ── Error handlers ────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

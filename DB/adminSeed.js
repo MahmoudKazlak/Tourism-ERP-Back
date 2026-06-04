@@ -1,5 +1,7 @@
-import logModel from "./model/log.model.js";
-import userModel from "./model/user.model.js";
+import logModel    from "./model/log.model.js";
+import userModel    from "./model/user.model.js";
+import counterModel from "./model/counter.model.js";
+import bookingModel from "./model/booking.model.js";
 
 export const seedAdmin = async () => {
   try {
@@ -24,7 +26,27 @@ export const seedAdmin = async () => {
       console.log("✅ Initial Admin created: admin@system.com / Admin@123");
       console.log("⚠️  Change the password immediately after first login!");
     }
+
+    // ── Booking counter initialisation ────────────────────────────────────────
+    // Find the highest bookingID currently in the database so the global counter
+    // starts above any existing records. Uses $max so it never moves backwards.
+    const topBooking = await bookingModel
+      .findOne({}, { bookingID: 1 })
+      .sort({ bookingID: -1 })
+      .lean();
+
+    const currentMax = topBooking?.bookingID ?? 0;
+
+    await counterModel.findOneAndUpdate(
+      { _id: "booking" },
+      { $max: { seq: currentMax } }, // only sets if new value is larger
+      { upsert: true },
+    );
+
+    if (currentMax > 0) {
+      console.log(`ℹ️  Booking counter initialised to ${currentMax} (existing max ID).`);
+    }
   } catch (error) {
-    console.error("❌ Error seeding admin:", error);
+    console.error("❌ Error in seed:", error);
   }
 };

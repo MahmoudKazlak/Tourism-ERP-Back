@@ -2,10 +2,13 @@ import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
 import { validation } from "../../middleware/validation.js";
 import * as bookingController from "./controller/booking.controller.js";
+import { getAllServices }       from "./controller/services.controller.js";
 import * as validators from "./booking.validation.js";
 import { endpoint } from "../indexEndpoint.js";
 
 const router = Router();
+
+// ── Static routes first (before any /:id) ────────────────────────────────────
 
 router.post(
   "/create",
@@ -14,13 +17,19 @@ router.post(
   bookingController.createBooking,
 );
 
-// Feature [3] + Fix [5]: Added query validation (catches invalid ObjectIds
-// before they reach MongoDB and cause a CastError 500).
 router.get(
   "/getAll",
   auth(endpoint.booking_view),
   validation(validators.getAllBookingsQuery),
   bookingController.getAllBookings,
+);
+
+// NEW: flattened service line-items across all bookings
+// Must be before /:id so Express doesn't treat "all-services" as an id param.
+router.get(
+  "/all-services",
+  auth(endpoint.booking_view),
+  getAllServices,
 );
 
 router.get(

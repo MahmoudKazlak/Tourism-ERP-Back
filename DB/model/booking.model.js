@@ -7,7 +7,7 @@ import {
   applyProviderSummaryDelta,
   computeServiceDeltas,
 } from "../../src/services/providerSummaryService.js";
-import { SERVICE_TYPE_KEYS } from "../../src/config/serviceTypes.js";
+import { getMergedServiceTypeKeys } from "../../src/services/serviceTypeRegistry.js";
 
 const bookingSchema = new mongoose.Schema(
   {
@@ -46,15 +46,20 @@ const bookingSchema = new mongoose.Schema(
      * serviceType drives all processing logic via the SERVICE_TYPES registry.
      * details holds every type-specific field (checkIn/checkOut, brand, etc.).
      *
-     * To support a new service type, add it to src/config/serviceTypes.js.
-     * No schema or controller changes are required.
+     * Built-in types live in src/config/serviceTypes.js; office-defined
+     * types are stored in OfficeServiceType and merged at runtime.
      */
     services: [
       {
         serviceType: {
           type: String,
           required: true,
-          enum: SERVICE_TYPE_KEYS,
+          validate: {
+            validator(v) {
+              return getMergedServiceTypeKeys().includes(v);
+            },
+            message: "Invalid service type",
+          },
         },
         serviceNumber: Number,
         provider: {

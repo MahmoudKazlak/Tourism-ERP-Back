@@ -1,5 +1,7 @@
 import Joi from "joi";
-import { SERVICE_TYPE_KEYS } from "../../config/serviceTypes.js";
+import { getMergedServiceTypeKeys } from "../../services/serviceTypeRegistry.js";
+
+const serviceTypeKeys = () => getMergedServiceTypeKeys();
 
 const objectId = Joi.string().hex().length(24);
 
@@ -21,11 +23,11 @@ const customerSchema = Joi.object({
  */
 const serviceSchema = Joi.object({
   serviceType: Joi.string()
-    .valid(...SERVICE_TYPE_KEYS)
+    .valid(...serviceTypeKeys())
     .required()
     .messages({
       "any.required": "serviceType is required",
-      "any.only": `serviceType must be one of: ${SERVICE_TYPE_KEYS.join(", ")}`,
+      "any.only": `serviceType must be one of: ${serviceTypeKeys().join(", ")}`,
     }),
   provider: objectId.required().messages({
     "any.required": "Provider ID is required for each service",
@@ -114,7 +116,7 @@ export const getAllBookingsQuery = {
   query: Joi.object({
     bookingID: Joi.number().integer().min(1),
     provider: objectId,
-    serviceType: Joi.string().valid(...SERVICE_TYPE_KEYS),
+    serviceType: Joi.string().valid(...serviceTypeKeys()),
     status: Joi.string().valid(
       "pending",
       "confirmed",

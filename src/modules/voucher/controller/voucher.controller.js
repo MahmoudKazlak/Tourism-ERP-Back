@@ -2,9 +2,9 @@ import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 import {
-  SERVICE_TYPES,
   describeService,
 } from "../../../config/serviceTypes.js";
+import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
 import { buildInvoiceData } from "../../../services/invoiceService.js";
 import { createInvoicePdfDocument } from "../../../services/invoicePdfService.js";
 
@@ -40,7 +40,7 @@ export const getServiceVoucher = asyncHandler(async (req, res, next) => {
   }
 
   const vouchers = services.map((service) => {
-    const typeDef = SERVICE_TYPES[service.serviceType];
+    const typeDef = getMergedServiceTypes()[service.serviceType];
     return {
       voucherType: "SERVICE_VOUCHER",
       voucherFor: service.serviceType,

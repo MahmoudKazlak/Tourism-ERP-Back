@@ -10,6 +10,7 @@ import expenseRouter from "./expense/expense.router.js";
 import providerPaymentRouter from "./providerPayment/providerPayment.router.js";
 import providerCollectionRouter from "./providerCollection/providerCollection.router.js";
 import reportRouter from "./report/report.router.js";
+import serviceTypeRouter from "./serviceType/serviceType.router.js";
 
 export {
   authRouter,
@@ -24,4 +25,5 @@ export {
   providerPaymentRouter,
   providerCollectionRouter,
   reportRouter,
+  serviceTypeRouter,
 };
