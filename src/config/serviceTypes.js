@@ -58,7 +58,7 @@ export const SERVICE_TYPE_KEYS = Object.keys(SERVICE_TYPES);
  */
 export const describeService = (service) => {
   const d = service.details || {};
-  const typeDef = SERVICE_TYPES[service.serviceType]; // builtins only; office types use generic branch
+  const typeDef = SERVICE_TYPES[service.serviceType];
 
   switch (service.serviceType) {
     case "accommodation":

@@ -3,9 +3,6 @@ import bookingModel from "../../../../DB/model/booking.model.js";
 import providerModel from "../../../../DB/model/provider.model.js";
 import userModel from "../../../../DB/model/user.model.js";
 import {
-  SERVICE_TYPES,
-} from "../../../config/serviceTypes.js";
-import {
   getMergedServiceTypeKeys,
   getMergedServiceTypes,
 } from "../../../services/serviceTypeRegistry.js";
