@@ -48,12 +48,29 @@ const truncate = (text, max = 42) => {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 };
 
-const getBrandProfile = () => ({
-  brandName: process.env.BRAND_NAME || "Kazlak",
-  officeName: process.env.COMPANY_NAME || "HayfaTur",
-  address: process.env.COMPANY_ADDRESS || "",
-  phone: process.env.COMPANY_PHONE || "",
-  email: process.env.COMPANY_EMAIL || "",
+/**
+ * Builds the brand/office profile used throughout the PDF.
+ *
+ * Priority order for every field:
+ *   1. Value from the OfficeSettings DB document (passed in by the controller)
+ *   2. Environment variable fallback
+ *   3. Hardcoded default
+ *
+ * The controller pre-fetches the logo URL into a Buffer (`logoBuffer`) so
+ * this function — and the PDF builder it feeds — can stay synchronous.
+ *
+ * @param {object|null} officeSettings - Lean OfficeSettings document from DB,
+ *   optionally extended with a `logoBuffer: Buffer` field by the controller.
+ */
+const buildProfile = (officeSettings = null) => ({
+  brandName:   process.env.BRAND_NAME    || "Kazlak",
+  officeName:  officeSettings?.name      || process.env.COMPANY_NAME    || "My Office",
+  address:     officeSettings?.address   || process.env.COMPANY_ADDRESS || "",
+  phone:       officeSettings?.phone     || process.env.COMPANY_PHONE   || "",
+  email:       officeSettings?.email     || process.env.COMPANY_EMAIL   || "",
+  // Pre-fetched image buffer from the controller — null when no logo is set
+  // or when the fetch failed (PDF generates fine without it).
+  logoBuffer:  officeSettings?.logoBuffer ?? null,
 });
 
 /** Write text at fixed coordinates without triggering auto page breaks. */
@@ -361,7 +378,10 @@ const drawAppBrandBlock = (doc, profile, invoiceType) => {
   return y;
 };
 
-/** Customer-facing travel agency — clearly separated below app brand. */
+/**
+ * Customer-facing travel agency block — clearly separated below app brand.
+ * Renders the office logo (if a buffer was pre-fetched) then name/contact.
+ */
 const drawOfficeBlock = (doc, profile, startY) => {
   let y = startY + 6;
 
@@ -380,6 +400,18 @@ const drawOfficeBlock = (doc, profile, startY) => {
     fillColor: COLORS.muted,
   });
   y += 11;
+
+  // ── Office logo (optional) ─────────────────────────────────────────────────
+  // The buffer was pre-fetched from Cloudinary by the controller before the
+  // synchronous PDF pipeline started. Skip silently if unavailable.
+  if (profile.logoBuffer) {
+    try {
+      doc.image(profile.logoBuffer, MARGIN, y, { height: 28, fit: [80, 28] });
+      y += 36;
+    } catch (_) {
+      // Invalid or unsupported image — continue without it
+    }
+  }
 
   fixedText(doc, profile.officeName, MARGIN, y, {
     font: "Helvetica-Bold",
@@ -425,8 +457,16 @@ const drawBrandHeader = (doc, profile, invoiceType) => {
   return drawOfficeBlock(doc, profile, brandEndY);
 };
 
-export const createInvoicePdfDocument = (invoice) => {
-  const profile = getBrandProfile();
+/**
+ * Builds a PDFKit document for an invoice.
+ *
+ * @param {object} invoice - Invoice data object from buildInvoiceData()
+ * @param {object|null} officeSettings - Lean OfficeSettings document from DB,
+ *   optionally extended with `logoBuffer: Buffer` by the controller.
+ *   Pass null to fall back to env-var defaults.
+ */
+export const createInvoicePdfDocument = (invoice, officeSettings = null) => {
+  const profile = buildProfile(officeSettings);
   const doc = new PDFDocument({
     size: "A4",
     margin: MARGIN,
@@ -507,9 +547,9 @@ export const createInvoicePdfDocument = (invoice) => {
   return doc;
 };
 
-export const generateInvoicePdfBuffer = (invoice) =>
+export const generateInvoicePdfBuffer = (invoice, officeSettings = null) =>
   new Promise((resolve, reject) => {
-    const doc = createInvoicePdfDocument(invoice);
+    const doc = createInvoicePdfDocument(invoice, officeSettings);
     const chunks = [];
 
     doc.on("data", (chunk) => chunks.push(chunk));

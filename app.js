@@ -60,7 +60,7 @@ app.use(express.json({ limit: "10kb" }));
 
 /**
  * Auth endpoints — strict, prevents brute-force login attempts.
- * 20 requests per 15 minutes per IP.
+ * 100 requests per 15 minutes per IP.
  */
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -139,6 +139,11 @@ app.use(
   `${baseUrl}/service-types`,
   generalLimiter,
   indexRouter.serviceTypeRouter,
+);
+app.use(
+  `${baseUrl}/office-settings`,
+  generalLimiter,
+  indexRouter.officeSettingsRouter,
 );
 
 // ── Error handlers ────────────────────────────────────────────────────────────

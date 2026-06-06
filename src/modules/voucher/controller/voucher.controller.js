@@ -1,12 +1,11 @@
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
-import {
-  describeService,
-} from "../../../config/serviceTypes.js";
+import { describeService } from "../../../config/serviceTypes.js";
 import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
 import { buildInvoiceData } from "../../../services/invoiceService.js";
 import { createInvoicePdfDocument } from "../../../services/invoicePdfService.js";
+import officeSettingsModel from "../../../../DB/model/officeSettings.model.js";
 
 export const getServiceVoucher = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
@@ -103,8 +102,29 @@ export const downloadInvoicePdf = asyncHandler(async (req, res, next) => {
   const { bookingId } = req.params;
   const { serviceType } = req.query;
 
-  const invoice = await buildInvoiceData(bookingId, { serviceType });
+  // Fetch invoice data and office settings in parallel
+  const [invoice, officeSettings] = await Promise.all([
+    buildInvoiceData(bookingId, { serviceType }),
+    officeSettingsModel.findOne().lean(),
+  ]);
+
   if (!invoice) return next(new Error("Booking not found", { cause: 404 }));
+
+  // Pre-fetch the office logo so the synchronous PDF builder can embed it.
+  // Uses the built-in fetch (Node 18+). Failure is non-critical — the PDF
+  // generates normally without a logo if the fetch times out or fails.
+  let logoBuffer = null;
+  if (officeSettings?.logoUrl) {
+    try {
+      const response = await fetch(officeSettings.logoUrl);
+      if (response.ok) {
+        const arrayBuffer = await response.arrayBuffer();
+        logoBuffer = Buffer.from(arrayBuffer);
+      }
+    } catch (e) {
+      console.warn("⚠️  Could not fetch office logo for PDF:", e.message);
+    }
+  }
 
   const filename = `${invoice.invoiceNumber}.pdf`;
 
@@ -112,7 +132,9 @@ export const downloadInvoicePdf = asyncHandler(async (req, res, next) => {
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   res.setHeader("Cache-Control", "no-store");
 
-  const doc = createInvoicePdfDocument(invoice);
+  // Pass the DB settings + pre-fetched logo buffer into the PDF builder.
+  // The builder remains synchronous — no async inside PDFKit callbacks.
+  const doc = createInvoicePdfDocument(invoice, { ...officeSettings, logoBuffer });
   doc.on("error", (err) => next(err));
   doc.pipe(res);
   doc.end();

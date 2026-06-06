@@ -1,8 +1,6 @@
 import Joi from "joi";
 import { getMergedServiceTypeKeys } from "../../services/serviceTypeRegistry.js";
 
-const serviceTypeKeys = () => getMergedServiceTypeKeys();
-
 const objectId = Joi.string().hex().length(24);
 
 const customerSchema = Joi.object({
@@ -14,21 +12,58 @@ const customerSchema = Joi.object({
 });
 
 /**
- * Generic service schema.
+ * Custom Joi validator for serviceType.
  *
- * Joi validates structure and the serviceType enum.
- * Type-specific field requirements (e.g., checkIn/checkOut for accommodation)
- * are enforced in the controller via validateServiceDetails(), which can
- * give richer error messages and runs after the provider existence check.
+ * Why .custom() instead of .valid(...keys):
+ *   .valid(...keys) is evaluated ONCE at module load — it freezes the list of
+ *   known types at startup. Any custom type added at runtime updates the
+ *   in-memory registry but the frozen Joi schema still rejects it.
+ *
+ *   .custom() runs the check on every request, reading the current merged
+ *   registry each time, so newly added office service types are accepted
+ *   immediately without a server restart.
  */
+const serviceTypeValidator = Joi.string()
+  .trim()
+  .min(1)
+  .custom((value, helpers) => {
+    if (!getMergedServiceTypeKeys().includes(value)) {
+      const validKeys = getMergedServiceTypeKeys().join(", ");
+      return helpers.error("serviceType.invalid", { validKeys });
+    }
+    return value;
+  })
+  .required()
+  .messages({
+    "serviceType.invalid":
+      "Invalid serviceType '{{#value}}'. Must be one of: {{#validKeys}}",
+    "any.required": "serviceType is required",
+    "string.empty": "serviceType is required",
+  });
+
+/**
+ * Same dynamic check for the ?serviceType query filter.
+ * Optional — accepts undefined (no filter).
+ */
+const serviceTypeQueryValidator = Joi.string()
+  .trim()
+  .min(1)
+  .custom((value, helpers) => {
+    if (!getMergedServiceTypeKeys().includes(value)) {
+      return helpers.error("serviceType.invalid", {
+        validKeys: getMergedServiceTypeKeys().join(", "),
+      });
+    }
+    return value;
+  })
+  .optional()
+  .messages({
+    "serviceType.invalid":
+      "Invalid serviceType filter '{{#value}}'. Must be one of: {{#validKeys}}",
+  });
+
 const serviceSchema = Joi.object({
-  serviceType: Joi.string()
-    .valid(...serviceTypeKeys())
-    .required()
-    .messages({
-      "any.required": "serviceType is required",
-      "any.only": `serviceType must be one of: ${serviceTypeKeys().join(", ")}`,
-    }),
+  serviceType: serviceTypeValidator,
   provider: objectId.required().messages({
     "any.required": "Provider ID is required for each service",
     "string.hex": "Invalid provider ID format",
@@ -114,34 +149,24 @@ export const bookingIdParam = {
 
 export const getAllBookingsQuery = {
   query: Joi.object({
-    bookingID: Joi.number().integer().min(1),
-    provider: objectId,
-    serviceType: Joi.string().valid(...serviceTypeKeys()),
-    status: Joi.string().valid(
-      "pending",
-      "confirmed",
-      "cancelled",
-      "completed",
-    ),
+    bookingID:     Joi.number().integer().min(1),
+    provider:      objectId,
+    serviceType:   serviceTypeQueryValidator,  // dynamic — accepts any registered type
+    status:        Joi.string().valid("pending", "confirmed", "cancelled", "completed"),
     paymentStatus: Joi.string().valid("unpaid", "partial", "paid"),
-    customerName: Joi.string().trim().min(1).max(100),
-    fromDate: Joi.date(),
-    toDate: Joi.date().when("fromDate", {
+    customerName:  Joi.string().trim().min(1).max(100),
+    fromDate:      Joi.date(),
+    toDate:        Joi.date().when("fromDate", {
       is: Joi.exist(),
       then: Joi.date().min(Joi.ref("fromDate")).messages({
         "date.min": "toDate must be after fromDate",
       }),
     }),
-    minAmount: Joi.number().min(0),
-    maxAmount: Joi.number().min(0),
-    sortBy: Joi.string().valid(
-      "createdAt",
-      "bookingID",
-      "totalToPay",
-      "totalProfit",
-    ),
-    sortOrder: Joi.string().valid("asc", "desc"),
-    page: Joi.number().integer().min(1).default(1),
-    size: Joi.number().integer().min(1).max(100).default(10),
+    minAmount:  Joi.number().min(0),
+    maxAmount:  Joi.number().min(0),
+    sortBy:     Joi.string().valid("createdAt", "bookingID", "totalToPay", "totalProfit"),
+    sortOrder:  Joi.string().valid("asc", "desc"),
+    page:       Joi.number().integer().min(1).default(1),
+    size:       Joi.number().integer().min(1).max(100).default(10),
   }),
 };
