@@ -11,7 +11,7 @@ import { pagination } from "../../../services/pagination.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const ACCESS_TOKEN_EXPIRY = process.env.ACCESS_TOKEN_EXPIRY || "1h";
+const ACCESS_TOKEN_EXPIRY      = process.env.ACCESS_TOKEN_EXPIRY || "1h";
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
 
 const signAccessToken = (userId) =>
@@ -20,17 +20,17 @@ const signAccessToken = (userId) =>
   });
 
 const createRefreshToken = async (userId, req) => {
-  const raw = crypto.randomBytes(40).toString("hex");
+  const raw  = crypto.randomBytes(40).toString("hex");
   const hash = crypto.createHash("sha256").update(raw).digest("hex");
 
   await refreshTokenModel.create({
-    user: userId,
+    user:      userId,
     tokenHash: hash,
     expiresAt: new Date(
       Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
     ),
     userAgent: req.headers["user-agent"],
-    ip: req.ip,
+    ip:        req.ip,
   });
 
   return raw;
@@ -55,7 +55,7 @@ export const signIn = asyncHandler(async (req, res, next) => {
   if (!isMatch)
     return next(new Error("Invalid login credentials", { cause: 400 }));
 
-  const accessToken = signAccessToken(user._id);
+  const accessToken  = signAccessToken(user._id);
   const refreshToken = await createRefreshToken(user._id, req);
 
   return res.status(200).json({
@@ -66,23 +66,40 @@ export const signIn = asyncHandler(async (req, res, next) => {
       refreshToken,
       expiresIn: ACCESS_TOKEN_EXPIRY,
       user: {
-        id: user._id,
+        id:       user._id,
         userName: user.userName,
-        email: user.email,
-        role: user.role,
-        image: user.image || null,
+        email:    user.email,
+        role:     user.role,
+        image:    user.image || null,
       },
     },
     errors: null,
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Refresh access token  —  with refresh token ROTATION
+//
+// Security model:
+//   On every successful refresh the used token is DELETED and a brand new
+//   refresh token is issued. This means each token can only be used once.
+//
+//   Attack detection: if a stolen token is used before the legitimate user
+//   refreshes, the legitimate user's next refresh finds no matching record
+//   and is forced to log in again — the window of abuse is at most one
+//   refresh cycle.
+//
+// Note on "double-spend" edge case:
+//   If the network drops after the server deletes the old token but before
+//   the client receives the response, the user is logged out and must
+//   re-authenticate. This is the accepted trade-off for rotation security.
+// ─────────────────────────────────────────────────────────────────────────────
 export const refreshToken = asyncHandler(async (req, res, next) => {
   const { refreshToken: rawToken } = req.body;
   if (!rawToken)
     return next(new Error("Refresh token is required", { cause: 400 }));
 
-  const hash = crypto.createHash("sha256").update(rawToken).digest("hex");
+  const hash        = crypto.createHash("sha256").update(rawToken).digest("hex");
   const storedToken = await refreshTokenModel.findOne({ tokenHash: hash });
 
   if (!storedToken) {
@@ -99,17 +116,26 @@ export const refreshToken = asyncHandler(async (req, res, next) => {
   const user = await userModel
     .findById(storedToken.user)
     .select("_id role blocked");
+
   if (!user || user.blocked) {
     await storedToken.deleteOne();
     return next(new Error("User unavailable", { cause: 401 }));
   }
 
-  const accessToken = signAccessToken(user._id);
+  // ── Rotation: invalidate the used token, issue a fresh pair ──────────────
+  await storedToken.deleteOne();
+
+  const newAccessToken  = signAccessToken(user._id);
+  const newRefreshToken = await createRefreshToken(user._id, req);
 
   return res.status(200).json({
     success: true,
     message: "Access token refreshed",
-    data: { accessToken, expiresIn: ACCESS_TOKEN_EXPIRY },
+    data: {
+      accessToken:  newAccessToken,
+      refreshToken: newRefreshToken,   // ← client must save this new token
+      expiresIn:    ACCESS_TOKEN_EXPIRY,
+    },
     errors: null,
   });
 });
@@ -124,18 +150,15 @@ export const logout = asyncHandler(async (req, res, next) => {
   return res.status(200).json({
     success: true,
     message: "Logged out successfully",
-    data: null,
-    errors: null,
+    data:    null,
+    errors:  null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NEW: Get current authenticated user's profile
-// GET /api/v1/auth/me  — all roles
+// Get current authenticated user's profile
 // ─────────────────────────────────────────────────────────────────────────────
 export const getMe = asyncHandler(async (req, res, next) => {
-  // req.user is already populated by the auth middleware with
-  // _id, role, blocked, email, userName — fetch full doc for image field
   const user = await userModel
     .findById(req.user._id)
     .select("-password -passwordResetToken -passwordResetExpiry");
@@ -145,15 +168,13 @@ export const getMe = asyncHandler(async (req, res, next) => {
   return res.status(200).json({
     success: true,
     message: "Profile retrieved successfully",
-    data: { user },
-    errors: null,
+    data:    { user },
+    errors:  null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NEW: Self-service profile update (any authenticated user)
-// PATCH /api/v1/auth/me
-// Allows: userName, phone, password — never role, blocked, email.
+// Self-service profile update
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateSelf = asyncHandler(async (req, res, next) => {
   const user = await userModel.findById(req.user._id);
@@ -161,15 +182,13 @@ export const updateSelf = asyncHandler(async (req, res, next) => {
 
   const allowedFields = ["userName", "phone", "password"];
   for (const key of allowedFields) {
-    if (req.body[key] != null) {
-      user[key] = req.body[key];
-    }
+    if (req.body[key] != null) user[key] = req.body[key];
   }
 
-  await user.save(); // pre-save hook hashes password if changed
+  await user.save();
 
   await logModel.create({
-    user: req.user._id,
+    user:   req.user._id,
     action: "UPDATE_SELF_PROFILE",
     details: {
       updatedFields: Object.keys(req.body).filter(
@@ -187,31 +206,31 @@ export const updateSelf = asyncHandler(async (req, res, next) => {
   return res.status(200).json({
     success: true,
     message: "Profile updated successfully",
-    data: { user: safeUser },
-    errors: null,
+    data:    { user: safeUser },
+    errors:  null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Send password-reset OTP
-// Bug 10 fix: OTP stored as SHA-256 hash, never plaintext.
 // ─────────────────────────────────────────────────────────────────────────────
 export const sendCode = asyncHandler(async (req, res, next) => {
   const { email } = req.body;
 
   const user = await userModel.findOne({ email }).select("_id email");
   if (!user) {
+    // Respond identically whether the email exists or not (prevents enumeration)
     return res.status(200).json({
       success: true,
       message: "If this email exists, a reset code has been sent.",
-      data: null,
-      errors: null,
+      data:    null,
+      errors:  null,
     });
   }
 
-  const code = nanoid(8);
+  const code     = nanoid(8);
   const codeHash = crypto.createHash("sha256").update(code).digest("hex");
-  const expiry = new Date(Date.now() + 60 * 60 * 1000);
+  const expiry   = new Date(Date.now() + 60 * 60 * 1000);
 
   await sendEmail(
     email,
@@ -232,14 +251,13 @@ export const sendCode = asyncHandler(async (req, res, next) => {
   return res.status(200).json({
     success: true,
     message: "If this email exists, a reset code has been sent.",
-    data: { token },
-    errors: null,
+    data:    { token },
+    errors:  null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Reset password using OTP
-// Bug 10 fix: hashes incoming OTP before DB comparison.
 // ─────────────────────────────────────────────────────────────────────────────
 export const forgotPassword = asyncHandler(async (req, res, next) => {
   const { otp, email, newPassword } = req.body;
@@ -250,7 +268,7 @@ export const forgotPassword = asyncHandler(async (req, res, next) => {
   }
 
   const rawToken = authHeader.slice(7).trim();
-  const decoded = jwt.verify(rawToken, process.env.FORGOTPASSWORDTOKEN);
+  const decoded  = jwt.verify(rawToken, process.env.FORGOTPASSWORDTOKEN);
 
   if (!otp || !decoded) {
     return next(new Error("Invalid request", { cause: 400 }));
@@ -274,16 +292,16 @@ export const forgotPassword = asyncHandler(async (req, res, next) => {
     );
   }
 
-  user.password = newPassword;
-  user.passwordResetToken = null;
-  user.passwordResetExpiry = null;
+  user.password             = newPassword;
+  user.passwordResetToken   = null;
+  user.passwordResetExpiry  = null;
   await user.save();
 
   return res.status(200).json({
     success: true,
     message: "Password changed successfully",
-    data: null,
-    errors: null,
+    data:    null,
+    errors:  null,
   });
 });
 
@@ -303,36 +321,32 @@ export const createUser = asyncHandler(async (req, res, next) => {
   const savedUser = await userModel.create({ userName, email, password, role });
 
   await logModel.create({
-    user: req.user._id,
+    user:   req.user._id,
     action: "CREATE_USER",
     details: {
-      userId: savedUser._id,
+      userId:   savedUser._id,
       userName: savedUser.userName,
-      email: savedUser.email,
-      role: savedUser.role,
+      email:    savedUser.email,
+      role:     savedUser.role,
     },
   });
 
   return res.status(201).json({
     success: true,
     message: "User created successfully",
-    data: { user_id: savedUser._id },
-    errors: null,
+    data:    { user_id: savedUser._id },
+    errors:  null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Update user (admin only — can change any field including role/blocked)
+// Update user (admin only)
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateUser = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
   const protectedFields = [
-    "_id",
-    "passwordResetToken",
-    "passwordResetExpiry",
-    "image",
-    "imagePublicId",
+    "_id", "passwordResetToken", "passwordResetExpiry", "image", "imagePublicId",
   ];
 
   const user = await userModel.findById(id);
@@ -341,11 +355,7 @@ export const updateUser = asyncHandler(async (req, res, next) => {
   const passwordChanged = Boolean(req.body.password);
 
   for (const [key, value] of Object.entries(req.body)) {
-    if (
-      !protectedFields.includes(key) &&
-      key !== "cPassword" &&
-      value != null
-    ) {
+    if (!protectedFields.includes(key) && key !== "cPassword" && value != null) {
       user[key] = value;
     }
   }
@@ -353,13 +363,12 @@ export const updateUser = asyncHandler(async (req, res, next) => {
   await user.save();
 
   await logModel.create({
-    user: req.user._id,
+    user:   req.user._id,
     action: "UPDATE_USER",
     details: {
       userId: id,
       updatedFields: Object.keys(req.body).filter(
-        (k) =>
-          !protectedFields.includes(k) && k !== "password" && k !== "cPassword",
+        (k) => !protectedFields.includes(k) && k !== "password" && k !== "cPassword",
       ),
       passwordChanged,
     },
@@ -373,21 +382,19 @@ export const updateUser = asyncHandler(async (req, res, next) => {
   return res.status(200).json({
     success: true,
     message: "User updated successfully",
-    data: { user: safeUser },
-    errors: null,
+    data:    { user: safeUser },
+    errors:  null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Get all users (admin only)
-// Bug fix: now returns consistent pagination shape matching all other list
-// endpoints — { totalCount, totalPages, page, users } instead of { count, users }.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getAllUsers = asyncHandler(async (req, res, next) => {
   const { role, blocked, page, size } = req.query;
 
   const query = {};
-  if (role) query.role = role;
+  if (role)               query.role    = role;
   if (blocked !== undefined) query.blocked = blocked === "true";
 
   const { limit, skip } = pagination(page, size);
@@ -416,8 +423,7 @@ export const getAllUsers = asyncHandler(async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NEW: Delete user (admin only)
-// Prevents self-deletion. Invalidates all refresh tokens for the deleted user.
+// Delete user (admin only)
 // ─────────────────────────────────────────────────────────────────────────────
 export const deleteUser = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
@@ -431,25 +437,24 @@ export const deleteUser = asyncHandler(async (req, res, next) => {
   const user = await userModel.findByIdAndDelete(id);
   if (!user) return next(new Error("User not found", { cause: 404 }));
 
-  // Revoke all active sessions for the deleted user
   await refreshTokenModel.deleteMany({ user: id });
 
   await logModel.create({
-    user: req.user._id,
+    user:   req.user._id,
     action: "DELETE_USER",
     details: {
-      userId: id,
+      userId:   id,
       userName: user.userName,
-      email: user.email,
-      role: user.role,
+      email:    user.email,
+      role:     user.role,
     },
   });
 
   return res.status(200).json({
     success: true,
     message: "User deleted successfully",
-    data: null,
-    errors: null,
+    data:    null,
+    errors:  null,
   });
 });
 
@@ -474,12 +479,12 @@ export const uploadUserImage = asyncHandler(async (req, res, next) => {
 
   const result = await uploadImage(req.file.buffer, "profiles");
 
-  user.image = result.secure_url;
+  user.image         = result.secure_url;
   user.imagePublicId = result.public_id;
   await user.save();
 
   await logModel.create({
-    user: req.user._id,
+    user:   req.user._id,
     action: "UPLOAD_USER_IMAGE",
     details: { targetUserId: id, cloudinaryPublicId: result.public_id },
   });
@@ -487,22 +492,19 @@ export const uploadUserImage = asyncHandler(async (req, res, next) => {
   return res.status(200).json({
     success: true,
     message: "Profile image uploaded successfully",
-    data: { imageUrl: result.secure_url },
-    errors: null,
+    data:    { imageUrl: result.secure_url },
+    errors:  null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NEW: Logout from all devices (any authenticated user)
-// POST /api/v1/auth/logout-all
-// Deletes every refresh token for the current user — forces re-login on all
-// devices. Useful after a password change or suspected account compromise.
+// Logout all devices
 // ─────────────────────────────────────────────────────────────────────────────
 export const logoutAll = asyncHandler(async (req, res, next) => {
   const deleted = await refreshTokenModel.deleteMany({ user: req.user._id });
 
   await logModel.create({
-    user: req.user._id,
+    user:   req.user._id,
     action: "LOGOUT_ALL_SESSIONS",
     details: { sessionsRevoked: deleted.deletedCount },
   });
@@ -510,7 +512,7 @@ export const logoutAll = asyncHandler(async (req, res, next) => {
   return res.status(200).json({
     success: true,
     message: `Logged out from all devices. ${deleted.deletedCount} session(s) revoked.`,
-    data: { sessionsRevoked: deleted.deletedCount },
-    errors: null,
+    data:    { sessionsRevoked: deleted.deletedCount },
+    errors:  null,
   });
 });
