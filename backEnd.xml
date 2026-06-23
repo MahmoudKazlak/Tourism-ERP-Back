@@ -143,30 +143,525 @@ tests/unit/invoicePdfService.test.js
 <files>
 This section contains the contents of the repository's files.
 
-<file path="src/modules/export/export.controller.js">
+<file path=".gitignore">
+node_modules/
+.env
+</file>
+
+<file path="DB/model/counter.model.js">
+import mongoose from "mongoose";
+
 /**
- * export.controller.js
- * Thin HTTP handler — no business logic, just translates req/res into a
- * service call and handles mid-stream error edge cases.
+ * Simple atomic counter collection.
+ * Each document is identified by a string _id (e.g. "booking").
+ *
+ * Usage:
+ *   const counter = await counterModel.findOneAndUpdate(
+ *     { _id: "booking" },
+ *     { $inc: { seq: 1 } },
+ *     { new: true, upsert: true },
+ *   );
+ *   const nextId = counter.seq;
  */
-import { asyncHandler } from "../../middleware/asyncHandler.js";
-import { generateFullExport } from "./export.service.js";
-
-export const downloadFullExport = asyncHandler(async (req, res, next) => {
-  const date     = new Date().toISOString().split("T")[0];
-  const filename = `hayfa-tur-export-${date}.xlsx`;
-
-  
-    await generateFullExport(res, filename);
-  
-    // Headers not yet sent → let the global error handler respond normally
-    if (!res.headersSent) return next(err);
-    // Streaming already started → destroy the socket so the browser gets
-    // an error instead of silently saving a corrupt file
-    console.error("❌ Export stream failed mid-flight:", err.message);
-    res.destroy(err);
-  
+const counterSchema = new mongoose.Schema({
+  _id: { type: String, required: true }, // counter name, e.g. "booking"
+  seq: { type: Number, default: 0 },
 });
+
+export default mongoose.model("Counter", counterSchema);
+</file>
+
+<file path="DB/model/expense.model.js">
+import mongoose from "mongoose";
+
+const expenseSchema = new mongoose.Schema(
+  {
+    category: {
+      type: String,
+      enum: ["rent", "utilities", "salary", "supplies", "maintenance", "other"],
+      required: [true, "Category is required"],
+    },
+    amount: {
+      type: Number,
+      required: [true, "Amount is required"],
+      min: [0.01, "Amount must be greater than 0"],
+    },
+    date: {
+      type: Date,
+      default: Date.now,
+      required: true,
+    },
+    description: {
+      type: String,
+      required: [true, "Description is required"],
+      trim: true,
+      maxlength: [200, "Description too long"],
+    },
+    method: {
+      type: String,
+      enum: ["cash", "bank_transfer", "check", "other"],
+      default: "cash",
+    },
+    // مرجع خارجي اختياري (مثلاً رقم فاتورة الكهرباء)
+    reference: { type: String, trim: true },
+    recordedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+  },
+  { timestamps: true },
+);
+
+// إضافة index على التاريخ للبحث السريع
+expenseSchema.index({ date: -1 });
+expenseSchema.index({ category: 1, date: -1 });
+
+export default mongoose.model("Expense", expenseSchema);
+</file>
+
+<file path="DB/model/officeServiceType.model.js">
+import mongoose from "mongoose";
+
+const detailFieldSchema = new mongoose.Schema(
+  {
+    key: { type: String, required: true },
+    label: { type: String, required: true },
+    fieldType: {
+      type: String,
+      enum: ["text", "date", "number"],
+      default: "text",
+    },
+    required: { type: Boolean, default: false },
+  },
+  { _id: false },
+);
+
+const durationFieldsSchema = new mongoose.Schema(
+  {
+    from: String,
+    to: String,
+    unit: { type: String, default: "days" },
+  },
+  { _id: false },
+);
+
+const officeServiceTypeSchema = new mongoose.Schema(
+  {
+    key: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      lowercase: true,
+    },
+    label: { type: String, required: true, trim: true },
+    voucherPrefix: {
+      type: String,
+      required: true,
+      uppercase: true,
+      trim: true,
+      maxlength: 4,
+    },
+    durationFields: { type: durationFieldsSchema, default: undefined },
+    detailFields: { type: [detailFieldSchema], default: [] },
+    isActive: { type: Boolean, default: true },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+  },
+  { timestamps: true },
+);
+
+export default mongoose.model("OfficeServiceType", officeServiceTypeSchema);
+</file>
+
+<file path="DB/model/officeSettings.model.js">
+import mongoose from "mongoose";
+
+/**
+ * Singleton document — exactly one per database.
+ * The controller uses findOne() + create-if-missing (upsert pattern).
+ *
+ * Stores the customer-facing office identity that prints on PDF invoices.
+ * Kazlak platform branding (logo + name) is separate and immutable.
+ */
+const officeSettingsSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      default: "My Office",
+      trim: true,
+      maxlength: [100, "Office name is too long"],
+    },
+    address: { type: String, default: "", trim: true, maxlength: 200 },
+    phone: { type: String, default: "", trim: true, maxlength: 30 },
+    email: { type: String, default: "", trim: true, maxlength: 100 },
+    // Cloudinary URL for the office logo — printed on PDF invoices
+    logoUrl: { type: String, default: null },
+    // Stored for deletion when the logo is replaced or removed
+    logoPublicId: { type: String, default: null },
+  },
+  { timestamps: true },
+);
+
+export default mongoose.model("OfficeSettings", officeSettingsSchema);
+</file>
+
+<file path="DB/model/refreshToken.model.js">
+import mongoose from "mongoose";
+
+const refreshTokenSchema = new mongoose.Schema({
+  user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+    index: true,
+  },
+  // Store only the SHA-256 hash of the raw token, never the token itself.
+  // If this collection is ever exposed, the hashes are useless without the raw token.
+  tokenHash: {
+    type: String,
+    required: true,
+    unique: true,
+  },
+  expiresAt: {
+    type: Date,
+    required: true,
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+  // Optional: track which device/IP issued this token for audit purposes.
+  userAgent: String,
+  ip: String,
+});
+
+// MongoDB auto-removes documents once expiresAt passes.
+// No cron job or manual cleanup required.
+refreshTokenSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+export default mongoose.model("RefreshToken", refreshTokenSchema);
+</file>
+
+<file path="jest.config.js">
+export default {
+  testEnvironment: "node",
+  transform: {},
+  injectGlobals: false, // ← add this line
+  setupFiles: ["./tests/setup/env.js"],
+  globalSetup: "./tests/setup/globalSetup.js",
+  globalTeardown: "./tests/setup/globalTeardown.js",
+  testMatch: [
+    "**/tests/unit/**/*.test.js",
+    "**/tests/integration/**/*.test.js",
+  ],
+  verbose: true,
+  testTimeout: 30000,
+  collectCoverageFrom: [
+    "src/services/bookingService.js",
+    "src/modules/booking/controller/booking.controller.js",
+    "src/modules/payment/controller/payment.controller.js",
+    "DB/model/booking.model.js",
+  ],
+  coverageDirectory: "coverage",
+  coverageReporters: ["text", "lcov"],
+};
+</file>
+
+<file path="src/middleware/asyncHandler.js">
+export const asyncHandler = (fn) => {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch((error) => {
+      next(error);
+    });
+  };
+};
+</file>
+
+<file path="src/middleware/upload.js">
+import multer from "multer";
+
+// Store uploaded files in memory so we can stream them directly to Cloudinary
+// without writing temporary files to disk.
+const storage = multer.memoryStorage();
+
+const fileFilter = (req, file, cb) => {
+  if (file.mimetype.startsWith("image/")) {
+    cb(null, true);
+  } else {
+    cb(
+      new Error("Only image files are allowed (jpeg, png, webp, etc.)"),
+      false,
+    );
+  }
+};
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5 MB hard cap
+  },
+});
+
+/**
+ * Middleware: accept a single image field named "image".
+ * Attach file to req.file as a Buffer via memoryStorage.
+ */
+export const uploadSingle = upload.single("image");
+
+/**
+ * Error-normalising wrapper for multer.
+ * Converts MulterError into a structured JSON response instead of
+ * leaking the raw error object to the global handler.
+ */
+export const handleUploadError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    const messages = {
+      LIMIT_FILE_SIZE: "File too large. Maximum allowed size is 5 MB.",
+      LIMIT_UNEXPECTED_FILE:
+        "Unexpected field name. Use 'image' as the field key.",
+    };
+    return res.status(400).json({
+      success: false,
+      message: messages[err.code] || err.message,
+      errors: null,
+    });
+  }
+  if (err) {
+    return res
+      .status(400)
+      .json({ success: false, message: err.message, errors: null });
+  }
+  next();
+};
+</file>
+
+<file path="src/middleware/validation.js">
+const dataMethod = ["body", "params", "query", "headers"];
+
+export const validation = (schema) => {
+  return (req, res, next) => {
+    try {
+      const validationArray = [];
+
+      dataMethod.forEach((key) => {
+        if (schema[key]) {
+          const validationResult = schema[key].validate(req[key], {
+            abortEarly: false,
+          });
+
+          if (validationResult.error) {
+            validationArray.push(validationResult.error.details);
+          }
+        }
+      });
+
+      if (validationArray.length) {
+        return res.status(400).json({
+          message: "validation error",
+          validationArray,
+        });
+      }
+
+      next();
+    } catch (err) {
+      return res.status(500).json({
+        message: "catch error",
+        error: err.message,
+      });
+    }
+  };
+};
+</file>
+
+<file path="src/modules/booking/controller/services.controller.js">
+import mongoose from "mongoose";
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import { pagination } from "../../../services/pagination.js";
+
+/**
+ * GET /api/v1/booking/all-services
+ *
+ * Returns a flat list of service line-items across all bookings.
+ * Each row represents one service, enriched with its parent booking context.
+ *
+ * Query params:
+ *   customerName  — partial match on booking customer name
+ *   provider      — filter by service provider ID (not the main booking provider)
+ *   serviceType   — filter by service type
+ *   fromDate      — filter bookings created on or after this date
+ *   toDate        — filter bookings created on or before this date
+ *   page, size    — pagination
+ */
+export const getAllServices = asyncHandler(async (req, res) => {
+  const { customerName, provider, serviceType, fromDate, toDate, page, size } =
+    req.query;
+
+  const { limit, skip } = pagination(page, size);
+
+  // ── Stage 1: match at booking level ────────────────────────────────────────
+  const bookingMatch = {};
+  if (customerName) {
+    bookingMatch["customers.name"] = {
+      $regex: customerName.trim(),
+      $options: "i",
+    };
+  }
+  if (fromDate || toDate) {
+    bookingMatch.createdAt = {};
+    if (fromDate) bookingMatch.createdAt.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      bookingMatch.createdAt.$lte = to;
+    }
+  }
+
+  // ── Stage 3: match at service level (after $unwind) ────────────────────────
+  const serviceMatch = {};
+  if (provider) {
+    serviceMatch["services.provider"] = new mongoose.Types.ObjectId(provider);
+  }
+  if (serviceType) {
+    serviceMatch["services.serviceType"] = serviceType;
+  }
+
+  const pipeline = [
+    { $match: bookingMatch },
+    { $unwind: "$services" },
+    ...(Object.keys(serviceMatch).length ? [{ $match: serviceMatch }] : []),
+
+    // Lookup service provider details
+    {
+      $lookup: {
+        from: "providers",
+        localField: "services.provider",
+        foreignField: "_id",
+        as: "_svcProv",
+      },
+    },
+
+    // Lookup main booking provider details
+    {
+      $lookup: {
+        from: "providers",
+        localField: "provider",
+        foreignField: "_id",
+        as: "_mainProv",
+      },
+    },
+
+    {
+      $project: {
+        bookingID:    1,
+        status:       1,
+        paymentStatus:1,
+        createdAt:    1,
+        customers:    1,
+        mainProvider: { $arrayElemAt: ["$_mainProv", 0] },
+        service: {
+          _id:          "$services._id",
+          serviceType:  "$services.serviceType",
+          serviceNumber:"$services.serviceNumber",
+          buy:          "$services.buy",
+          sell:         "$services.sell",
+          profit:       "$services.profit",
+          duration:     "$services.duration",
+          details:      "$services.details",
+          provider:     { $arrayElemAt: ["$_svcProv", 0] },
+        },
+      },
+    },
+
+    // Sort: bookingID ascending, then serviceNumber ascending
+    { $sort: { bookingID: 1, "service.serviceNumber": 1 } },
+
+    // Paginate + count in one round-trip
+    {
+      $facet: {
+        data:  [{ $skip: skip }, { $limit: limit }],
+        count: [{ $count: "n" }],
+      },
+    },
+  ];
+
+  const [result] = await bookingModel.aggregate(pipeline);
+  const services   = result?.data ?? [];
+  const totalCount = result?.count?.[0]?.n ?? 0;
+
+  return res.status(200).json({
+    success: true,
+    message: "Services retrieved successfully",
+    data: {
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      page:       parseInt(page) || 1,
+      services,
+    },
+    errors: null,
+  });
+});
+</file>
+
+<file path="src/modules/expense/expense.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as expenseController from "./controller/expense.controller.js";
+import * as validators from "./expense.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// إغلاق الصندوق اليومي — static قبل dynamic
+// GET /api/v1/expense/cash-closing?date=2024-01-15
+router.get(
+  "/cash-closing",
+  auth(endpoint.accounting_only),
+  expenseController.getDailyCashClosing,
+);
+
+// جلب كل المصاريف مع فلترة
+// GET /api/v1/expense?category=rent&fromDate=&toDate=&page=1&size=10
+router.get(
+  "/",
+  auth(endpoint.accounting_only),
+  validation(validators.getExpenses),
+  expenseController.getAllExpenses,
+);
+
+// إضافة مصروف
+// POST /api/v1/expense
+router.post(
+  "/",
+  auth(endpoint.accounting_only),
+  validation(validators.createExpense),
+  expenseController.createExpense,
+);
+
+// تعديل مصروف
+// PATCH /api/v1/expense/:id
+router.patch(
+  "/:id",
+  auth(endpoint.AdminOnly),
+  validation(validators.updateExpense),
+  expenseController.updateExpense,
+);
+
+// حذف مصروف
+// DELETE /api/v1/expense/:id
+router.delete(
+  "/:id",
+  auth(endpoint.AdminOnly),
+  expenseController.deleteExpense,
+);
+
+export default router;
 </file>
 
 <file path="src/modules/export/export.router.js">
@@ -813,527 +1308,6 @@ const resolveNumFmt = (type) => {
     default:         return undefined;
   }
 };
-</file>
-
-<file path=".gitignore">
-node_modules/
-.env
-</file>
-
-<file path="DB/model/counter.model.js">
-import mongoose from "mongoose";
-
-/**
- * Simple atomic counter collection.
- * Each document is identified by a string _id (e.g. "booking").
- *
- * Usage:
- *   const counter = await counterModel.findOneAndUpdate(
- *     { _id: "booking" },
- *     { $inc: { seq: 1 } },
- *     { new: true, upsert: true },
- *   );
- *   const nextId = counter.seq;
- */
-const counterSchema = new mongoose.Schema({
-  _id: { type: String, required: true }, // counter name, e.g. "booking"
-  seq: { type: Number, default: 0 },
-});
-
-export default mongoose.model("Counter", counterSchema);
-</file>
-
-<file path="DB/model/expense.model.js">
-import mongoose from "mongoose";
-
-const expenseSchema = new mongoose.Schema(
-  {
-    category: {
-      type: String,
-      enum: ["rent", "utilities", "salary", "supplies", "maintenance", "other"],
-      required: [true, "Category is required"],
-    },
-    amount: {
-      type: Number,
-      required: [true, "Amount is required"],
-      min: [0.01, "Amount must be greater than 0"],
-    },
-    date: {
-      type: Date,
-      default: Date.now,
-      required: true,
-    },
-    description: {
-      type: String,
-      required: [true, "Description is required"],
-      trim: true,
-      maxlength: [200, "Description too long"],
-    },
-    method: {
-      type: String,
-      enum: ["cash", "bank_transfer", "check", "other"],
-      default: "cash",
-    },
-    // مرجع خارجي اختياري (مثلاً رقم فاتورة الكهرباء)
-    reference: { type: String, trim: true },
-    recordedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
-  },
-  { timestamps: true },
-);
-
-// إضافة index على التاريخ للبحث السريع
-expenseSchema.index({ date: -1 });
-expenseSchema.index({ category: 1, date: -1 });
-
-export default mongoose.model("Expense", expenseSchema);
-</file>
-
-<file path="DB/model/officeServiceType.model.js">
-import mongoose from "mongoose";
-
-const detailFieldSchema = new mongoose.Schema(
-  {
-    key: { type: String, required: true },
-    label: { type: String, required: true },
-    fieldType: {
-      type: String,
-      enum: ["text", "date", "number"],
-      default: "text",
-    },
-    required: { type: Boolean, default: false },
-  },
-  { _id: false },
-);
-
-const durationFieldsSchema = new mongoose.Schema(
-  {
-    from: String,
-    to: String,
-    unit: { type: String, default: "days" },
-  },
-  { _id: false },
-);
-
-const officeServiceTypeSchema = new mongoose.Schema(
-  {
-    key: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
-      lowercase: true,
-    },
-    label: { type: String, required: true, trim: true },
-    voucherPrefix: {
-      type: String,
-      required: true,
-      uppercase: true,
-      trim: true,
-      maxlength: 4,
-    },
-    durationFields: { type: durationFieldsSchema, default: undefined },
-    detailFields: { type: [detailFieldSchema], default: [] },
-    isActive: { type: Boolean, default: true },
-    createdBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-    },
-  },
-  { timestamps: true },
-);
-
-export default mongoose.model("OfficeServiceType", officeServiceTypeSchema);
-</file>
-
-<file path="DB/model/officeSettings.model.js">
-import mongoose from "mongoose";
-
-/**
- * Singleton document — exactly one per database.
- * The controller uses findOne() + create-if-missing (upsert pattern).
- *
- * Stores the customer-facing office identity that prints on PDF invoices.
- * Kazlak platform branding (logo + name) is separate and immutable.
- */
-const officeSettingsSchema = new mongoose.Schema(
-  {
-    name: {
-      type: String,
-      default: "My Office",
-      trim: true,
-      maxlength: [100, "Office name is too long"],
-    },
-    address: { type: String, default: "", trim: true, maxlength: 200 },
-    phone: { type: String, default: "", trim: true, maxlength: 30 },
-    email: { type: String, default: "", trim: true, maxlength: 100 },
-    // Cloudinary URL for the office logo — printed on PDF invoices
-    logoUrl: { type: String, default: null },
-    // Stored for deletion when the logo is replaced or removed
-    logoPublicId: { type: String, default: null },
-  },
-  { timestamps: true },
-);
-
-export default mongoose.model("OfficeSettings", officeSettingsSchema);
-</file>
-
-<file path="DB/model/refreshToken.model.js">
-import mongoose from "mongoose";
-
-const refreshTokenSchema = new mongoose.Schema({
-  user: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "User",
-    required: true,
-    index: true,
-  },
-  // Store only the SHA-256 hash of the raw token, never the token itself.
-  // If this collection is ever exposed, the hashes are useless without the raw token.
-  tokenHash: {
-    type: String,
-    required: true,
-    unique: true,
-  },
-  expiresAt: {
-    type: Date,
-    required: true,
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
-  // Optional: track which device/IP issued this token for audit purposes.
-  userAgent: String,
-  ip: String,
-});
-
-// MongoDB auto-removes documents once expiresAt passes.
-// No cron job or manual cleanup required.
-refreshTokenSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-
-export default mongoose.model("RefreshToken", refreshTokenSchema);
-</file>
-
-<file path="jest.config.js">
-export default {
-  testEnvironment: "node",
-  transform: {},
-  injectGlobals: false, // ← add this line
-  setupFiles: ["./tests/setup/env.js"],
-  globalSetup: "./tests/setup/globalSetup.js",
-  globalTeardown: "./tests/setup/globalTeardown.js",
-  testMatch: [
-    "**/tests/unit/**/*.test.js",
-    "**/tests/integration/**/*.test.js",
-  ],
-  verbose: true,
-  testTimeout: 30000,
-  collectCoverageFrom: [
-    "src/services/bookingService.js",
-    "src/modules/booking/controller/booking.controller.js",
-    "src/modules/payment/controller/payment.controller.js",
-    "DB/model/booking.model.js",
-  ],
-  coverageDirectory: "coverage",
-  coverageReporters: ["text", "lcov"],
-};
-</file>
-
-<file path="src/middleware/asyncHandler.js">
-export const asyncHandler = (fn) => {
-  return (req, res, next) => {
-    Promise.resolve(fn(req, res, next)).catch((error) => {
-      next(error);
-    });
-  };
-};
-</file>
-
-<file path="src/middleware/upload.js">
-import multer from "multer";
-
-// Store uploaded files in memory so we can stream them directly to Cloudinary
-// without writing temporary files to disk.
-const storage = multer.memoryStorage();
-
-const fileFilter = (req, file, cb) => {
-  if (file.mimetype.startsWith("image/")) {
-    cb(null, true);
-  } else {
-    cb(
-      new Error("Only image files are allowed (jpeg, png, webp, etc.)"),
-      false,
-    );
-  }
-};
-
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: {
-    fileSize: 5 * 1024 * 1024, // 5 MB hard cap
-  },
-});
-
-/**
- * Middleware: accept a single image field named "image".
- * Attach file to req.file as a Buffer via memoryStorage.
- */
-export const uploadSingle = upload.single("image");
-
-/**
- * Error-normalising wrapper for multer.
- * Converts MulterError into a structured JSON response instead of
- * leaking the raw error object to the global handler.
- */
-export const handleUploadError = (err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    const messages = {
-      LIMIT_FILE_SIZE: "File too large. Maximum allowed size is 5 MB.",
-      LIMIT_UNEXPECTED_FILE:
-        "Unexpected field name. Use 'image' as the field key.",
-    };
-    return res.status(400).json({
-      success: false,
-      message: messages[err.code] || err.message,
-      errors: null,
-    });
-  }
-  if (err) {
-    return res
-      .status(400)
-      .json({ success: false, message: err.message, errors: null });
-  }
-  next();
-};
-</file>
-
-<file path="src/middleware/validation.js">
-const dataMethod = ["body", "params", "query", "headers"];
-
-export const validation = (schema) => {
-  return (req, res, next) => {
-    try {
-      const validationArray = [];
-
-      dataMethod.forEach((key) => {
-        if (schema[key]) {
-          const validationResult = schema[key].validate(req[key], {
-            abortEarly: false,
-          });
-
-          if (validationResult.error) {
-            validationArray.push(validationResult.error.details);
-          }
-        }
-      });
-
-      if (validationArray.length) {
-        return res.status(400).json({
-          message: "validation error",
-          validationArray,
-        });
-      }
-
-      next();
-    } catch (err) {
-      return res.status(500).json({
-        message: "catch error",
-        error: err.message,
-      });
-    }
-  };
-};
-</file>
-
-<file path="src/modules/booking/controller/services.controller.js">
-import mongoose from "mongoose";
-import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import bookingModel from "../../../../DB/model/booking.model.js";
-import { pagination } from "../../../services/pagination.js";
-
-/**
- * GET /api/v1/booking/all-services
- *
- * Returns a flat list of service line-items across all bookings.
- * Each row represents one service, enriched with its parent booking context.
- *
- * Query params:
- *   customerName  — partial match on booking customer name
- *   provider      — filter by service provider ID (not the main booking provider)
- *   serviceType   — filter by service type
- *   fromDate      — filter bookings created on or after this date
- *   toDate        — filter bookings created on or before this date
- *   page, size    — pagination
- */
-export const getAllServices = asyncHandler(async (req, res) => {
-  const { customerName, provider, serviceType, fromDate, toDate, page, size } =
-    req.query;
-
-  const { limit, skip } = pagination(page, size);
-
-  // ── Stage 1: match at booking level ────────────────────────────────────────
-  const bookingMatch = {};
-  if (customerName) {
-    bookingMatch["customers.name"] = {
-      $regex: customerName.trim(),
-      $options: "i",
-    };
-  }
-  if (fromDate || toDate) {
-    bookingMatch.createdAt = {};
-    if (fromDate) bookingMatch.createdAt.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      bookingMatch.createdAt.$lte = to;
-    }
-  }
-
-  // ── Stage 3: match at service level (after $unwind) ────────────────────────
-  const serviceMatch = {};
-  if (provider) {
-    serviceMatch["services.provider"] = new mongoose.Types.ObjectId(provider);
-  }
-  if (serviceType) {
-    serviceMatch["services.serviceType"] = serviceType;
-  }
-
-  const pipeline = [
-    { $match: bookingMatch },
-    { $unwind: "$services" },
-    ...(Object.keys(serviceMatch).length ? [{ $match: serviceMatch }] : []),
-
-    // Lookup service provider details
-    {
-      $lookup: {
-        from: "providers",
-        localField: "services.provider",
-        foreignField: "_id",
-        as: "_svcProv",
-      },
-    },
-
-    // Lookup main booking provider details
-    {
-      $lookup: {
-        from: "providers",
-        localField: "provider",
-        foreignField: "_id",
-        as: "_mainProv",
-      },
-    },
-
-    {
-      $project: {
-        bookingID:    1,
-        status:       1,
-        paymentStatus:1,
-        createdAt:    1,
-        customers:    1,
-        mainProvider: { $arrayElemAt: ["$_mainProv", 0] },
-        service: {
-          _id:          "$services._id",
-          serviceType:  "$services.serviceType",
-          serviceNumber:"$services.serviceNumber",
-          buy:          "$services.buy",
-          sell:         "$services.sell",
-          profit:       "$services.profit",
-          duration:     "$services.duration",
-          details:      "$services.details",
-          provider:     { $arrayElemAt: ["$_svcProv", 0] },
-        },
-      },
-    },
-
-    // Sort: bookingID ascending, then serviceNumber ascending
-    { $sort: { bookingID: 1, "service.serviceNumber": 1 } },
-
-    // Paginate + count in one round-trip
-    {
-      $facet: {
-        data:  [{ $skip: skip }, { $limit: limit }],
-        count: [{ $count: "n" }],
-      },
-    },
-  ];
-
-  const [result] = await bookingModel.aggregate(pipeline);
-  const services   = result?.data ?? [];
-  const totalCount = result?.count?.[0]?.n ?? 0;
-
-  return res.status(200).json({
-    success: true,
-    message: "Services retrieved successfully",
-    data: {
-      totalCount,
-      totalPages: Math.ceil(totalCount / limit),
-      page:       parseInt(page) || 1,
-      services,
-    },
-    errors: null,
-  });
-});
-</file>
-
-<file path="src/modules/expense/expense.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import { validation } from "../../middleware/validation.js";
-import * as expenseController from "./controller/expense.controller.js";
-import * as validators from "./expense.validation.js";
-import { endpoint } from "../indexEndpoint.js";
-
-const router = Router();
-
-// إغلاق الصندوق اليومي — static قبل dynamic
-// GET /api/v1/expense/cash-closing?date=2024-01-15
-router.get(
-  "/cash-closing",
-  auth(endpoint.accounting_only),
-  expenseController.getDailyCashClosing,
-);
-
-// جلب كل المصاريف مع فلترة
-// GET /api/v1/expense?category=rent&fromDate=&toDate=&page=1&size=10
-router.get(
-  "/",
-  auth(endpoint.accounting_only),
-  validation(validators.getExpenses),
-  expenseController.getAllExpenses,
-);
-
-// إضافة مصروف
-// POST /api/v1/expense
-router.post(
-  "/",
-  auth(endpoint.accounting_only),
-  validation(validators.createExpense),
-  expenseController.createExpense,
-);
-
-// تعديل مصروف
-// PATCH /api/v1/expense/:id
-router.patch(
-  "/:id",
-  auth(endpoint.AdminOnly),
-  validation(validators.updateExpense),
-  expenseController.updateExpense,
-);
-
-// حذف مصروف
-// DELETE /api/v1/expense/:id
-router.delete(
-  "/:id",
-  auth(endpoint.AdminOnly),
-  expenseController.deleteExpense,
-);
-
-export default router;
 </file>
 
 <file path="src/modules/indexEndpoint.js">
@@ -5013,6 +4987,33 @@ export const expenseIdParam = {
     }),
   }),
 };
+</file>
+
+<file path="src/modules/export/export.controller.js">
+/**
+ * export.controller.js
+ * Thin HTTP handler — no business logic, just translates req/res into a
+ * service call and handles mid-stream error edge cases.
+ */
+import { asyncHandler } from "../../middleware/asyncHandler.js";
+import { generateFullExport } from "./export.service.js";
+
+export const downloadFullExport = asyncHandler(async (req, res, next) => {
+  const date     = new Date().toISOString().split("T")[0];
+  const filename = `hayfa-tur-export-${date}.xlsx`;
+
+  try {
+    await generateFullExport(res, filename);
+  } catch (err) {
+    // Headers not yet sent → let the global error handler respond normally
+    if (!res.headersSent) return next(err);
+
+    // Streaming already started → destroy the socket so the browser gets
+    // an error instead of silently saving a corrupt file
+    console.error("❌ Export stream failed mid-flight:", err.message);
+    res.destroy(err);
+  }
+});
 </file>
 
 <file path="src/modules/payment/payment.router.js">
@@ -10422,51 +10423,6 @@ export const createBookingStaffWithToken = async (overrides = {}) => {
 };
 </file>
 
-<file path="package.json">
-{
-  "name": "booking",
-  "version": "2.0.0",
-  "description": "Tourism booking management system",
-  "main": "app.js",
-  "scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
-    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/unit",
-    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/integration",
-    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --watch",
-    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage"
-  },
-  "type": "module",
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "bcrypt": "^6.0.0",
-    "cloudinary": "^2.8.0",
-    "cors": "^2.8.6",
-    "dotenv": "^17.2.3",
-    "exceljs": "^4.4.0",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.3.2",
-    "helmet": "^8.1.0",
-    "joi": "^18.0.2",
-    "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.1.2",
-    "multer": "^2.0.2",
-    "nanoid": "^5.1.6",
-    "nodemailer": "^7.0.12",
-    "pdfkit": "^0.18.0",
-    "svg-to-pdfkit": "^0.1.8"
-  },
-  "devDependencies": {
-    "jest": "^29.7.0",
-    "mongodb-memory-server": "^10.0.0",
-    "supertest": "^7.0.0"
-  }
-}
-</file>
-
 <file path="src/modules/booking/booking.router.js">
 import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
@@ -11138,6 +11094,51 @@ export const getActiveServices = asyncHandler(async (req, res) => {
     errors: null,
   });
 });
+</file>
+
+<file path="package.json">
+{
+  "name": "booking",
+  "version": "2.0.0",
+  "description": "Tourism booking management system",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
+    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/unit",
+    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/integration",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage"
+  },
+  "type": "module",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cloudinary": "^2.8.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.3.2",
+    "helmet": "^8.1.0",
+    "joi": "^18.0.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.1.2",
+    "multer": "^2.0.2",
+    "nanoid": "^5.1.6",
+    "nodemailer": "^7.0.12",
+    "pdfkit": "^0.18.0",
+    "svg-to-pdfkit": "^0.1.8"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^10.0.0",
+    "supertest": "^7.0.0"
+  }
+}
 </file>
 
 <file path="src/modules/auth/controller/auth.controller.js">
@@ -11833,38 +11834,6 @@ export const getAllBookingsQuery = {
     page:       Joi.number().integer().min(1).default(1),
     size:       Joi.number().integer().min(1).max(100).default(10),
   }),
-};
-</file>
-
-<file path="src/modules/indexRouter.js">
-import authRouter               from "./auth/auth.router.js";
-import bookingRouter            from "./booking/booking.router.js";
-import providerRouter           from "./provider/provider.router.js";
-import logRouter                from "./log/log.router.js";
-import paymentRouter            from "./payment/payment.router.js";
-import viewBoardRouter          from "./viewBoard/viewBoard.router.js";
-import statementRouter          from "./statement/statement.router.js";
-import voucherRouter            from "./voucher/voucher.router.js";
-import expenseRouter            from "./expense/expense.router.js";
-import providerPaymentRouter    from "./providerPayment/providerPayment.router.js";
-import providerCollectionRouter from "./providerCollection/providerCollection.router.js";
-import reportRouter             from "./report/report.router.js";
-import exportRouter             from "./export/export.router.js"; // ← new
-
-export {
-  authRouter,
-  bookingRouter,
-  providerRouter,
-  logRouter,
-  paymentRouter,
-  viewBoardRouter,
-  statementRouter,
-  voucherRouter,
-  expenseRouter,
-  providerPaymentRouter,
-  providerCollectionRouter,
-  reportRouter,
-  exportRouter, // ← new
 };
 </file>
 
@@ -13025,6 +12994,42 @@ export const calculateBookingTotals = (doc) => {
 };
 </file>
 
+<file path="src/modules/indexRouter.js">
+import authRouter               from "./auth/auth.router.js";
+import bookingRouter            from "./booking/booking.router.js";
+import providerRouter           from "./provider/provider.router.js";
+import logRouter                from "./log/log.router.js";
+import paymentRouter            from "./payment/payment.router.js";
+import viewBoardRouter          from "./viewBoard/viewBoard.router.js";
+import statementRouter          from "./statement/statement.router.js";
+import voucherRouter            from "./voucher/voucher.router.js";
+import expenseRouter            from "./expense/expense.router.js";
+import providerPaymentRouter    from "./providerPayment/providerPayment.router.js";
+import providerCollectionRouter from "./providerCollection/providerCollection.router.js";
+import reportRouter             from "./report/report.router.js";
+import exportRouter             from "./export/export.router.js";
+import officeSettingsRouter     from "./officeSettings/officeSettings.router.js";
+import serviceTypeRouter        from "./serviceType/serviceType.router.js";
+
+export {
+  authRouter,
+  bookingRouter,
+  providerRouter,
+  logRouter,
+  paymentRouter,
+  viewBoardRouter,
+  statementRouter,
+  voucherRouter,
+  expenseRouter,
+  providerPaymentRouter,
+  providerCollectionRouter,
+  reportRouter,
+  exportRouter,
+  officeSettingsRouter,
+  serviceTypeRouter,
+};
+</file>
+
 <file path="src/modules/payment/controller/payment.controller.js">
 import mongoose from "mongoose";
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
@@ -13538,109 +13543,6 @@ export const editPayment = asyncHandler(async (req, res, next) => {
 });
 </file>
 
-<file path="app.js">
-import express from "express";
-import dotenv from "dotenv";
-import cors from "cors";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
-import connectDB from "./DB/connection.js";
-import * as indexRouter from "./src/modules/indexRouter.js";
-
-dotenv.config({ path: "./config/.env" });
-
-const REQUIRED_ENV = [
-  "DBURI", "SIGNINTOKEN", "FORGOTPASSWORDTOKEN", "SALTROUND",
-  "SENDEREMAIL", "SENDEREMAILPASSWORD",
-  "CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET",
-];
-const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
-if (missingEnv.length) {
-  console.error(`❌ Missing required environment variables: ${missingEnv.join(", ")}`);
-  process.exit(1);
-}
-
-const app  = express();
-const port = process.env.PORT || 3000;
-
-app.use(helmet());
-app.set("trust proxy", 1);
-
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
-  : ["http://localhost:3000", "http://localhost:5173", "http://localhost:4173"];
-
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-    callback(new Error("Not allowed by CORS"));
-  },
-  credentials: true,
-}));
-
-app.use(express.json({ limit: "10kb" }));
-
-// ── Rate limiters ─────────────────────────────────────────────────────────────
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 20,
-  message: { success: false, message: "Too many requests from this IP, please try again later." },
-  standardHeaders: true, legacyHeaders: false,
-});
-
-// Export shares the heavy limiter — it runs a full DB scan and is
-// admin-only, so one request at a time per IP is entirely appropriate.
-const heavyLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 10,
-  message: { success: false, message: "Too many requests. Please wait before retrying." },
-  standardHeaders: true, legacyHeaders: false,
-});
-
-const generalLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 120,
-  message: { success: false, message: "Too many requests. Please slow down." },
-  standardHeaders: true, legacyHeaders: false,
-});
-
-// ── DB ────────────────────────────────────────────────────────────────────────
-connectDB();
-
-// ── Routes ────────────────────────────────────────────────────────────────────
-const baseUrl = process.env.BASEURL || "/api/v1";
-
-app.use(`${baseUrl}/auth`,                authLimiter,    indexRouter.authRouter);
-app.use(`${baseUrl}/view-board`,          heavyLimiter,   indexRouter.viewBoardRouter);
-app.use(`${baseUrl}/report`,              heavyLimiter,   indexRouter.reportRouter);
-// Export streams a full DB scan — treat it like a heavy aggregation endpoint
-app.use(`${baseUrl}/export`,              heavyLimiter,   indexRouter.exportRouter);
-
-app.use(`${baseUrl}/booking`,             generalLimiter, indexRouter.bookingRouter);
-app.use(`${baseUrl}/booking`,             generalLimiter, indexRouter.paymentRouter);
-app.use(`${baseUrl}/provider`,            generalLimiter, indexRouter.providerRouter);
-app.use(`${baseUrl}/log`,                 generalLimiter, indexRouter.logRouter);
-app.use(`${baseUrl}/statement`,           generalLimiter, indexRouter.statementRouter);
-app.use(`${baseUrl}/voucher`,             generalLimiter, indexRouter.voucherRouter);
-app.use(`${baseUrl}/expense`,             generalLimiter, indexRouter.expenseRouter);
-app.use(`${baseUrl}/provider-payment`,    generalLimiter, indexRouter.providerPaymentRouter);
-app.use(`${baseUrl}/provider-collection`, generalLimiter, indexRouter.providerCollectionRouter);
-
-// ── Error handlers ────────────────────────────────────────────────────────────
-app.use((err, req, res, next) => {
-  const status = err.cause || 500;
-  return res.status(status).json({
-    success: false,
-    message: err.message || "Server Error",
-    errors:  null,
-    stack:   process.env.NODE_ENV === "development" ? err.stack : undefined,
-  });
-});
-
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: "Route not found" });
-});
-
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
-</file>
-
 <file path="src/modules/booking/controller/booking.controller.js">
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
@@ -14137,6 +14039,115 @@ export const editStatus = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
+</file>
+
+<file path="app.js">
+import express from "express";
+import dotenv from "dotenv";
+import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import connectDB from "./DB/connection.js";
+import * as indexRouter from "./src/modules/indexRouter.js";
+
+dotenv.config({ path: "./config/.env" });
+
+const REQUIRED_ENV = [
+  "DBURI", "SIGNINTOKEN", "FORGOTPASSWORDTOKEN", "SALTROUND",
+  "SENDEREMAIL", "SENDEREMAILPASSWORD",
+  "CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET",
+];
+const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
+if (missingEnv.length) {
+  console.error(`❌ Missing required environment variables: ${missingEnv.join(", ")}`);
+  process.exit(1);
+}
+
+const app  = express();
+const port = process.env.PORT || 3000;
+
+app.use(helmet());
+app.set("trust proxy", 1);
+
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
+  : ["http://localhost:3000", "http://localhost:5173", "http://localhost:4173"];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+}));
+
+app.use(express.json({ limit: "10kb" }));
+
+// ── Rate limiters ─────────────────────────────────────────────────────────────
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 20,
+  message: { success: false, message: "Too many requests from this IP, please try again later." },
+  standardHeaders: true, legacyHeaders: false,
+});
+
+// Export shares the heavy limiter — it runs a full DB scan and is
+// admin-only, so one request at a time per IP is entirely appropriate.
+const heavyLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 10,
+  message: { success: false, message: "Too many requests. Please wait before retrying." },
+  standardHeaders: true, legacyHeaders: false,
+});
+
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 120,
+  message: { success: false, message: "Too many requests. Please slow down." },
+  standardHeaders: true, legacyHeaders: false,
+});
+
+// ── DB ────────────────────────────────────────────────────────────────────────
+connectDB();
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+const baseUrl = process.env.BASEURL || "/api/v1";
+
+app.use(`${baseUrl}/auth`,                authLimiter,    indexRouter.authRouter);
+app.use(`${baseUrl}/view-board`,          heavyLimiter,   indexRouter.viewBoardRouter);
+app.use(`${baseUrl}/report`,              heavyLimiter,   indexRouter.reportRouter);
+// Export streams a full DB scan — treat it like a heavy aggregation endpoint
+app.use(`${baseUrl}/export`,              heavyLimiter,   indexRouter.exportRouter);
+
+app.use(`${baseUrl}/booking`,             generalLimiter, indexRouter.bookingRouter);
+app.use(`${baseUrl}/booking`,             generalLimiter, indexRouter.paymentRouter);
+app.use(`${baseUrl}/provider`,            generalLimiter, indexRouter.providerRouter);
+app.use(`${baseUrl}/log`,                 generalLimiter, indexRouter.logRouter);
+app.use(`${baseUrl}/statement`,           generalLimiter, indexRouter.statementRouter);
+app.use(`${baseUrl}/voucher`,             generalLimiter, indexRouter.voucherRouter);
+app.use(`${baseUrl}/expense`,             generalLimiter, indexRouter.expenseRouter);
+app.use(`${baseUrl}/provider-payment`,    generalLimiter, indexRouter.providerPaymentRouter);
+app.use(`${baseUrl}/provider-collection`, generalLimiter, indexRouter.providerCollectionRouter);
+app.use(`${baseUrl}/office-settings`,     generalLimiter, indexRouter.officeSettingsRouter);
+app.use(`${baseUrl}/service-types`,       generalLimiter, indexRouter.serviceTypeRouter);
+
+// ── Error handlers ────────────────────────────────────────────────────────────
+app.use((err, req, res, next) => {
+  const status = err.cause || 500;
+  return res.status(status).json({
+    success: false,
+    message: err.message || "Server Error",
+    errors:  null,
+    stack:   process.env.NODE_ENV === "development" ? err.stack : undefined,
+  });
+});
+
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: "Route not found" });
+});
+
+app.listen(port, () => {
+  console.log(`🚀 Server running on port ${port}`);
+});
+
+export default app;
 </file>
 
 </files>
