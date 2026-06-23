@@ -10,7 +10,9 @@ import expenseRouter            from "./expense/expense.router.js";
 import providerPaymentRouter    from "./providerPayment/providerPayment.router.js";
 import providerCollectionRouter from "./providerCollection/providerCollection.router.js";
 import reportRouter             from "./report/report.router.js";
-import exportRouter             from "./export/export.router.js"; // ← new
+import exportRouter             from "./export/export.router.js";
+import officeSettingsRouter     from "./officeSettings/officeSettings.router.js";
+import serviceTypeRouter        from "./serviceType/serviceType.router.js";
 
 export {
   authRouter,
@@ -25,5 +27,7 @@ export {
   providerPaymentRouter,
   providerCollectionRouter,
   reportRouter,
-  exportRouter, // ← new
+  exportRouter,
+  officeSettingsRouter,
+  serviceTypeRouter,
 };

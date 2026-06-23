@@ -81,6 +81,8 @@ app.use(`${baseUrl}/voucher`,             generalLimiter, indexRouter.voucherRou
 app.use(`${baseUrl}/expense`,             generalLimiter, indexRouter.expenseRouter);
 app.use(`${baseUrl}/provider-payment`,    generalLimiter, indexRouter.providerPaymentRouter);
 app.use(`${baseUrl}/provider-collection`, generalLimiter, indexRouter.providerCollectionRouter);
+app.use(`${baseUrl}/office-settings`,     generalLimiter, indexRouter.officeSettingsRouter);
+app.use(`${baseUrl}/service-types`,       generalLimiter, indexRouter.serviceTypeRouter);
 
 // ── Error handlers ────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
@@ -97,4 +99,8 @@ app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
 
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+app.listen(port, () => {
+  console.log(`🚀 Server running on port ${port}`);
+});
+
+export default app;
