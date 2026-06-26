@@ -1,13 +1,15 @@
-import express from "express";
-import dotenv from "dotenv";
-import cors from "cors";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
-import connectDB from "./DB/connection.js";
+import express      from "express";
+import dotenv       from "dotenv";
+import cors         from "cors";
+import helmet       from "helmet";
+import cookieParser from "cookie-parser";
+import rateLimit    from "express-rate-limit";
+import connectDB    from "./DB/connection.js";
 import * as indexRouter from "./src/modules/indexRouter.js";
 
 dotenv.config({ path: "./config/.env" });
 
+// ── Required environment guard ────────────────────────────────────────────────
 const REQUIRED_ENV = [
   "DBURI", "SIGNINTOKEN", "FORGOTPASSWORDTOKEN", "SALTROUND",
   "SENDEREMAIL", "SENDEREMAILPASSWORD",
@@ -22,6 +24,7 @@ if (missingEnv.length) {
 const app  = express();
 const port = process.env.PORT || 3000;
 
+// ── Core middleware ───────────────────────────────────────────────────────────
 app.use(helmet());
 app.set("trust proxy", 1);
 
@@ -34,30 +37,43 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
     callback(new Error("Not allowed by CORS"));
   },
-  credentials: true,
+  credentials: true, // required for httpOnly cookie exchange
 }));
 
 app.use(express.json({ limit: "10kb" }));
 
+// cookieParser is required to read req.cookies.refreshToken set by the
+// auth controller. Must be registered before any route handler.
+app.use(cookieParser());
+
 // ── Rate limiters ─────────────────────────────────────────────────────────────
+// Auth: reduced to 8 attempts per 15 min (was 20).
+// At 8 attempts the brute-force window is ~2,304 guesses/day per IP —
+// still allows legitimate typos while making password spraying impractical.
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 20,
-  message: { success: false, message: "Too many requests from this IP, please try again later." },
-  standardHeaders: true, legacyHeaders: false,
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  message: { success: false, message: "Too many login attempts. Please try again in 15 minutes." },
+  standardHeaders: true,
+  legacyHeaders:   false,
 });
 
-// Export shares the heavy limiter — it runs a full DB scan and is
-// admin-only, so one request at a time per IP is entirely appropriate.
+// Heavy: aggregation, reports, and full exports — low throughput by design.
 const heavyLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 10,
+  windowMs: 60 * 1000,
+  max: 10,
   message: { success: false, message: "Too many requests. Please wait before retrying." },
-  standardHeaders: true, legacyHeaders: false,
+  standardHeaders: true,
+  legacyHeaders:   false,
 });
 
+// General: all other authenticated endpoints.
 const generalLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 120,
+  windowMs: 60 * 1000,
+  max: 120,
   message: { success: false, message: "Too many requests. Please slow down." },
-  standardHeaders: true, legacyHeaders: false,
+  standardHeaders: true,
+  legacyHeaders:   false,
 });
 
 // ── DB ────────────────────────────────────────────────────────────────────────
@@ -69,9 +85,7 @@ const baseUrl = process.env.BASEURL || "/api/v1";
 app.use(`${baseUrl}/auth`,                authLimiter,    indexRouter.authRouter);
 app.use(`${baseUrl}/view-board`,          heavyLimiter,   indexRouter.viewBoardRouter);
 app.use(`${baseUrl}/report`,              heavyLimiter,   indexRouter.reportRouter);
-// Export streams a full DB scan — treat it like a heavy aggregation endpoint
 app.use(`${baseUrl}/export`,              heavyLimiter,   indexRouter.exportRouter);
-
 app.use(`${baseUrl}/booking`,             generalLimiter, indexRouter.bookingRouter);
 app.use(`${baseUrl}/booking`,             generalLimiter, indexRouter.paymentRouter);
 app.use(`${baseUrl}/provider`,            generalLimiter, indexRouter.providerRouter);
@@ -85,6 +99,7 @@ app.use(`${baseUrl}/office-settings`,     generalLimiter, indexRouter.officeSett
 app.use(`${baseUrl}/service-types`,       generalLimiter, indexRouter.serviceTypeRouter);
 
 // ── Error handlers ────────────────────────────────────────────────────────────
+// Central error handler — asyncHandler forwards all thrown errors here.
 app.use((err, req, res, next) => {
   const status = err.cause || 500;
   return res.status(status).json({
@@ -95,6 +110,7 @@ app.use((err, req, res, next) => {
   });
 });
 
+// 404 fallback
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });

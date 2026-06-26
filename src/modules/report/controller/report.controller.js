@@ -1,18 +1,24 @@
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import bookingModel from "../../../../DB/model/booking.model.js";
-import paymentModel from "../../../../DB/model/payment.model.js";
-import expenseModel from "../../../../DB/model/expense.model.js";
+import bookingModel         from "../../../../DB/model/booking.model.js";
+import paymentModel         from "../../../../DB/model/payment.model.js";
+import expenseModel         from "../../../../DB/model/expense.model.js";
 import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
+
+// ── Safety cap ────────────────────────────────────────────────────────────────
+/**
+ * Hard limit on CSV report rows to prevent accidental memory exhaustion.
+ *
+ * Without a limit, a date-range query spanning years could pull tens of
+ * thousands of documents into the Node heap in one shot.
+ * The /export/full endpoint uses cursor-based streaming and is not affected.
+ *
+ * When the cap is hit a `X-Report-Truncated: true` header is set so the
+ * frontend can display a warning to the user.
+ */
+const REPORT_MAX_ROWS = 10_000;
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
 
-/**
- * Converts an array of flat objects to a CSV string.
- *
- * @param {string[]} headers - Column headers in output order.
- * @param {Record<string, any>[]} rows - Data rows.
- * @returns {string} CSV content.
- */
 const toCSV = (headers, rows) => {
   const escape = (value) => {
     if (value == null) return "";
@@ -21,7 +27,6 @@ const toCSV = (headers, rows) => {
       ? `"${str}"`
       : str;
   };
-
   const lines = [
     headers.join(","),
     ...rows.map((row) => headers.map((h) => escape(row[h])).join(",")),
@@ -29,12 +34,6 @@ const toCSV = (headers, rows) => {
   return lines.join("\n");
 };
 
-/**
- * Sets response headers for a CSV file download.
- *
- * @param {import('express').Response} res
- * @param {string} filename
- */
 const sendCSV = (res, filename, csv) => {
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
@@ -50,7 +49,7 @@ export const exportBookings = asyncHandler(async (req, res) => {
   const { fromDate, toDate, status, paymentStatus } = req.query;
 
   const query = {};
-  if (status) query.status = status;
+  if (status)        query.status        = status;
   if (paymentStatus) query.paymentStatus = paymentStatus;
   if (fromDate || toDate) {
     query.createdAt = {};
@@ -64,41 +63,37 @@ export const exportBookings = asyncHandler(async (req, res) => {
 
   const bookings = await bookingModel
     .find(query)
-    .populate("provider", "name type")
+    .populate("provider",  "name type")
     .populate("createdBy", "userName")
     .sort({ bookingID: 1 })
+    .limit(REPORT_MAX_ROWS)
     .lean();
 
+  if (bookings.length === REPORT_MAX_ROWS) {
+    res.setHeader("X-Report-Truncated", "true");
+  }
+
   const headers = [
-    "bookingID",
-    "date",
-    "status",
-    "paymentStatus",
-    "provider",
-    "customers",
-    "totalToPay",
-    "totalPaid",
-    "remainingBalance",
-    "totalProfit",
-    "createdBy",
+    "bookingID", "date", "status", "paymentStatus", "provider",
+    "customers", "totalToPay", "totalPaid", "remainingBalance",
+    "totalProfit", "createdBy",
   ];
 
   const rows = bookings.map((b) => ({
-    bookingID: b.bookingID,
-    date: b.createdAt ? new Date(b.createdAt).toLocaleDateString() : "",
-    status: b.status,
-    paymentStatus: b.paymentStatus,
-    provider: b.provider?.name || "",
-    customers: b.customers?.map((c) => c.name).join(" | ") || "",
-    totalToPay: b.totalToPay,
-    totalPaid: b.totalPaid,
+    bookingID:        b.bookingID,
+    date:             b.createdAt ? new Date(b.createdAt).toLocaleDateString() : "",
+    status:           b.status,
+    paymentStatus:    b.paymentStatus,
+    provider:         b.provider?.name || "",
+    customers:        b.customers?.map((c) => c.name).join(" | ") || "",
+    totalToPay:       b.totalToPay,
+    totalPaid:        b.totalPaid,
     remainingBalance: b.remainingBalance,
-    totalProfit: b.totalProfit,
-    createdBy: b.createdBy?.userName || "",
+    totalProfit:      b.totalProfit,
+    createdBy:        b.createdBy?.userName || "",
   }));
 
-  const dateTag =
-    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  const dateTag = fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
   sendCSV(res, `bookings${dateTag}.csv`, toCSV(headers, rows));
 });
 
@@ -123,31 +118,28 @@ export const exportPayments = asyncHandler(async (req, res) => {
 
   const payments = await paymentModel
     .find(query)
-    .populate("booking", "bookingID")
+    .populate("booking",    "bookingID")
     .populate("recordedBy", "userName")
     .sort({ date: -1 })
+    .limit(REPORT_MAX_ROWS)
     .lean();
 
-  const headers = [
-    "bookingID",
-    "date",
-    "amount",
-    "method",
-    "notes",
-    "recordedBy",
-  ];
+  if (payments.length === REPORT_MAX_ROWS) {
+    res.setHeader("X-Report-Truncated", "true");
+  }
+
+  const headers = ["bookingID", "date", "amount", "method", "notes", "recordedBy"];
 
   const rows = payments.map((p) => ({
-    bookingID: p.booking?.bookingID || p.bookingID || "",
-    date: p.date ? new Date(p.date).toLocaleDateString() : "",
-    amount: p.amount,
-    method: p.method,
-    notes: p.notes || "",
+    bookingID:  p.booking?.bookingID || p.bookingID || "",
+    date:       p.date ? new Date(p.date).toLocaleDateString() : "",
+    amount:     p.amount,
+    method:     p.method,
+    notes:      p.notes || "",
     recordedBy: p.recordedBy?.userName || "",
   }));
 
-  const dateTag =
-    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  const dateTag = fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
   sendCSV(res, `payments${dateTag}.csv`, toCSV(headers, rows));
 });
 
@@ -174,30 +166,29 @@ export const exportExpenses = asyncHandler(async (req, res) => {
     .find(query)
     .populate("recordedBy", "userName")
     .sort({ date: -1 })
+    .limit(REPORT_MAX_ROWS)
     .lean();
 
+  if (expenses.length === REPORT_MAX_ROWS) {
+    res.setHeader("X-Report-Truncated", "true");
+  }
+
   const headers = [
-    "date",
-    "category",
-    "description",
-    "amount",
-    "method",
-    "reference",
-    "recordedBy",
+    "date", "category", "description", "amount",
+    "method", "reference", "recordedBy",
   ];
 
   const rows = expenses.map((e) => ({
-    date: e.date ? new Date(e.date).toLocaleDateString() : "",
-    category: e.category,
+    date:        e.date ? new Date(e.date).toLocaleDateString() : "",
+    category:    e.category,
     description: e.description,
-    amount: e.amount,
-    method: e.method,
-    reference: e.reference || "",
-    recordedBy: e.recordedBy?.userName || "",
+    amount:      e.amount,
+    method:      e.method,
+    reference:   e.reference || "",
+    recordedBy:  e.recordedBy?.userName || "",
   }));
 
-  const dateTag =
-    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  const dateTag = fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
   sendCSV(res, `expenses${dateTag}.csv`, toCSV(headers, rows));
 });
 
@@ -221,42 +212,39 @@ export const exportProviderPayments = asyncHandler(async (req, res) => {
 
   const payments = await providerPaymentModel
     .find(query)
-    .populate("provider", "name type")
+    .populate("provider",   "name type")
     .populate("recordedBy", "userName")
     .sort({ date: -1 })
+    .limit(REPORT_MAX_ROWS)
     .lean();
 
+  if (payments.length === REPORT_MAX_ROWS) {
+    res.setHeader("X-Report-Truncated", "true");
+  }
+
   const headers = [
-    "date",
-    "provider",
-    "providerType",
-    "amount",
-    "method",
-    "reference",
-    "notes",
-    "recordedBy",
+    "date", "provider", "providerType", "amount",
+    "method", "reference", "notes", "recordedBy",
   ];
 
   const rows = payments.map((p) => ({
-    date: p.date ? new Date(p.date).toLocaleDateString() : "",
-    provider: p.provider?.name || "",
+    date:         p.date ? new Date(p.date).toLocaleDateString() : "",
+    provider:     p.provider?.name || "",
     providerType: p.provider?.type || "",
-    amount: p.amount,
-    method: p.method,
-    reference: p.reference || "",
-    notes: p.notes || "",
-    recordedBy: p.recordedBy?.userName || "",
+    amount:       p.amount,
+    method:       p.method,
+    reference:    p.reference || "",
+    notes:        p.notes || "",
+    recordedBy:   p.recordedBy?.userName || "",
   }));
 
-  const dateTag =
-    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  const dateTag = fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
   sendCSV(res, `provider-payments${dateTag}.csv`, toCSV(headers, rows));
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Profit & Loss summary
 // GET /api/v1/report/pnl?fromDate=&toDate=
-// Returns aggregated totals — useful for a monthly P&L view.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getProfitLoss = asyncHandler(async (req, res) => {
   const { fromDate, toDate } = req.query;
@@ -269,95 +257,62 @@ export const getProfitLoss = asyncHandler(async (req, res) => {
     dateFilter.$lte = to;
   }
 
-  const bookingDateQuery = Object.keys(dateFilter).length
-    ? { createdAt: dateFilter }
-    : {};
-  const txnDateQuery = Object.keys(dateFilter).length
-    ? { date: dateFilter }
-    : {};
+  const bookingQuery  = Object.keys(dateFilter).length ? { createdAt: dateFilter } : {};
+  const financeQuery  = Object.keys(dateFilter).length ? { date:      dateFilter } : {};
 
-  const [
-    bookingTotals,
-    expenseTotals,
-    providerPaymentTotals,
-    customerPaymentTotals,
-  ] = await Promise.all([
+  const [bookingAgg, expenseAgg, providerPaymentAgg] = await Promise.all([
     bookingModel.aggregate([
-      { $match: bookingDateQuery },
+      { $match: bookingQuery },
       {
         $group: {
-          _id: null,
-          totalRevenue: { $sum: "$totalToPay" },
-          totalCost: { $sum: "$totalToBuy" },
-          totalProfit: { $sum: "$totalProfit" },
-          totalPaid: { $sum: "$totalPaid" },
-          totalOutstanding: { $sum: "$remainingBalance" },
-          count: { $sum: 1 },
+          _id:          null,
+          totalRevenue: { $sum: "$totalToPay"  },
+          totalPaid:    { $sum: "$totalPaid"   },
+          totalProfit:  { $sum: "$totalProfit" },
+          totalCost:    { $sum: "$totalBuy"    },
+          bookingCount: { $sum: 1              },
         },
       },
     ]),
     expenseModel.aggregate([
-      { $match: txnDateQuery },
-      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+      { $match: financeQuery },
+      { $group: { _id: null, totalExpenses: { $sum: "$amount" }, expenseCount: { $sum: 1 } } },
     ]),
     providerPaymentModel.aggregate([
-      { $match: txnDateQuery },
-      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
-    ]),
-    paymentModel.aggregate([
-      { $match: txnDateQuery },
-      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+      { $match: financeQuery },
+      { $group: { _id: null, totalProviderPayments: { $sum: "$amount" }, paymentCount: { $sum: 1 } } },
     ]),
   ]);
 
-  const b = bookingTotals[0] || {
-    totalRevenue: 0,
-    totalCost: 0,
-    totalProfit: 0,
-    totalPaid: 0,
-    totalOutstanding: 0,
-    count: 0,
-  };
-  const expenses = expenseTotals[0]?.total || 0;
-  const providerPaid = providerPaymentTotals[0]?.total || 0;
-  const customerPaid = customerPaymentTotals[0]?.total || 0;
-
-  // Net profit = gross booking profit minus operating expenses.
-  const netProfit = b.totalProfit - expenses;
+  const b  = bookingAgg[0]         || {};
+  const e  = expenseAgg[0]         || {};
+  const pp = providerPaymentAgg[0] || {};
 
   return res.status(200).json({
     success: true,
-    message: "Profit & Loss summary",
+    message: "Profit & Loss summary retrieved",
     data: {
       period: {
-        from: fromDate || "All time",
-        to: toDate || "All time",
+        from: fromDate || null,
+        to:   toDate   || null,
       },
       bookings: {
-        count: b.count,
-        totalRevenue: b.totalRevenue,
-        totalCost: b.totalCost,
-        grossProfit: b.totalProfit,
-        totalCollectedFromCustomers: customerPaid,
-        totalOutstandingFromCustomers: b.totalOutstanding,
+        count:        b.bookingCount  || 0,
+        totalRevenue: b.totalRevenue  || 0,
+        totalPaid:    b.totalPaid     || 0,
+        totalCost:    b.totalCost     || 0,
+        grossProfit:  b.totalProfit   || 0,
       },
       expenses: {
-        total: expenses,
-        count: expenseTotals[0]?.count || 0,
+        count: e.expenseCount || 0,
+        total: e.totalExpenses || 0,
       },
       providerPayments: {
-        total: providerPaid,
-        count: providerPaymentTotals[0]?.count || 0,
+        count: pp.paymentCount         || 0,
+        total: pp.totalProviderPayments || 0,
       },
-      summary: {
-        grossProfit: b.totalProfit,
-        operatingExpenses: expenses,
-        netProfit,
-        netProfitLabel:
-          netProfit >= 0
-            ? `Net Profit: ${netProfit}`
-            : `Net Loss: ${Math.abs(netProfit)}`,
-      },
+      netProfit:
+        (b.totalProfit || 0) - (e.totalExpenses || 0),
     },
     errors: null,
   });

@@ -9,10 +9,31 @@ import { nanoid } from "nanoid";
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import { pagination } from "../../../services/pagination.js";
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-const ACCESS_TOKEN_EXPIRY      = process.env.ACCESS_TOKEN_EXPIRY || "1h";
+const ACCESS_TOKEN_EXPIRY       = process.env.ACCESS_TOKEN_EXPIRY || "1h";
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
+
+// The cookie is scoped to the auth sub-path so it is never sent along with
+// requests to /booking, /provider, etc. — principle of least exposure.
+const REFRESH_COOKIE_PATH = `${process.env.BASEURL || "/api/v1"}/auth`;
+
+const REFRESH_COOKIE_OPTIONS = {
+  httpOnly: true,                                               // not accessible via JS — blocks XSS token theft
+  secure:   process.env.NODE_ENV === "production",             // HTTPS-only in prod; works over HTTP in dev
+  sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax", // blocks CSRF in prod
+  maxAge:   REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000, // 7 days in ms
+  path:     REFRESH_COOKIE_PATH,
+};
+
+// Fields an admin is allowed to set on another user via PATCH /auth/update/:id.
+// Allowlist — anything not in this array is silently ignored, preventing
+// privilege escalation (e.g. req.body.role injected by an attacker).
+const ADMIN_UPDATABLE_USER_FIELDS = [
+  "userName", "email", "password", "role", "blocked", "phone",
+];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 const signAccessToken = (userId) =>
   jwt.sign({ id: userId }, process.env.SIGNINTOKEN, {
@@ -26,14 +47,31 @@ const createRefreshToken = async (userId, req) => {
   await refreshTokenModel.create({
     user:      userId,
     tokenHash: hash,
-    expiresAt: new Date(
-      Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
-    ),
+    expiresAt: new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000),
     userAgent: req.headers["user-agent"],
     ip:        req.ip,
   });
 
   return raw;
+};
+
+/**
+ * Sets the refresh token as an httpOnly cookie on the response.
+ * The raw token is never returned in the JSON body — the browser stores
+ * and sends the cookie automatically, invisible to JavaScript.
+ */
+const setRefreshCookie = (res, rawToken) => {
+  res.cookie("refreshToken", rawToken, REFRESH_COOKIE_OPTIONS);
+};
+
+/** Clears the refresh token cookie, matching path and options. */
+const clearRefreshCookie = (res) => {
+  res.clearCookie("refreshToken", {
+    httpOnly: true,
+    secure:   process.env.NODE_ENV === "production",
+    sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
+    path:     REFRESH_COOKIE_PATH,
+  });
 };
 
 // ── Controllers ───────────────────────────────────────────────────────────────
@@ -46,9 +84,7 @@ export const signIn = asyncHandler(async (req, res, next) => {
     return next(new Error("Invalid login credentials", { cause: 400 }));
 
   if (user.blocked) {
-    return res
-      .status(403)
-      .json({ success: false, message: "Account is blocked" });
+    return res.status(403).json({ success: false, message: "Account is blocked" });
   }
 
   const isMatch = await user.comparePassword(password);
@@ -56,14 +92,16 @@ export const signIn = asyncHandler(async (req, res, next) => {
     return next(new Error("Invalid login credentials", { cause: 400 }));
 
   const accessToken  = signAccessToken(user._id);
-  const refreshToken = await createRefreshToken(user._id, req);
+  const rawRefresh   = await createRefreshToken(user._id, req);
+
+  // Refresh token lives in an httpOnly cookie — never in the response body.
+  setRefreshCookie(res, rawRefresh);
 
   return res.status(200).json({
     success: true,
     message: "Login successfully",
     data: {
       accessToken,
-      refreshToken,
       expiresIn: ACCESS_TOKEN_EXPIRY,
       user: {
         id:       user._id,
@@ -80,37 +118,32 @@ export const signIn = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Refresh access token  —  with refresh token ROTATION
 //
-// Security model:
-//   On every successful refresh the used token is DELETED and a brand new
-//   refresh token is issued. This means each token can only be used once.
+// The refresh token is now read from the httpOnly cookie (req.cookies) instead
+// of req.body. The browser sends the cookie automatically on every request
+// to paths under REFRESH_COOKIE_PATH — no JavaScript involved.
 //
-//   Attack detection: if a stolen token is used before the legitimate user
-//   refreshes, the legitimate user's next refresh finds no matching record
-//   and is forced to log in again — the window of abuse is at most one
-//   refresh cycle.
-//
-// Note on "double-spend" edge case:
-//   If the network drops after the server deletes the old token but before
-//   the client receives the response, the user is logged out and must
-//   re-authenticate. This is the accepted trade-off for rotation security.
+// Security model (unchanged):
+//   Each token is used exactly once. On success the old token is deleted and
+//   a fresh token is issued as a new cookie. If a stolen token is used first,
+//   the legitimate user's next refresh finds no matching record and is forced
+//   to re-authenticate.
 // ─────────────────────────────────────────────────────────────────────────────
 export const refreshToken = asyncHandler(async (req, res, next) => {
-  const { refreshToken: rawToken } = req.body;
+  // Read from httpOnly cookie — not from request body
+  const rawToken = req.cookies?.refreshToken;
   if (!rawToken)
     return next(new Error("Refresh token is required", { cause: 400 }));
 
   const hash        = crypto.createHash("sha256").update(rawToken).digest("hex");
   const storedToken = await refreshTokenModel.findOne({ tokenHash: hash });
 
-  if (!storedToken) {
+  if (!storedToken)
     return next(new Error("Invalid or expired refresh token", { cause: 401 }));
-  }
 
   if (storedToken.expiresAt < new Date()) {
     await storedToken.deleteOne();
-    return next(
-      new Error("Refresh token expired. Please log in again.", { cause: 401 }),
-    );
+    clearRefreshCookie(res);
+    return next(new Error("Refresh token expired. Please log in again.", { cause: 401 }));
   }
 
   const user = await userModel
@@ -119,33 +152,38 @@ export const refreshToken = asyncHandler(async (req, res, next) => {
 
   if (!user || user.blocked) {
     await storedToken.deleteOne();
+    clearRefreshCookie(res);
     return next(new Error("User unavailable", { cause: 401 }));
   }
 
-  // ── Rotation: invalidate the used token, issue a fresh pair ──────────────
+  // ── Rotation: delete old token, issue fresh pair ───────────────────────────
   await storedToken.deleteOne();
 
-  const newAccessToken  = signAccessToken(user._id);
-  const newRefreshToken = await createRefreshToken(user._id, req);
+  const newAccessToken = signAccessToken(user._id);
+  const newRawRefresh  = await createRefreshToken(user._id, req);
+
+  setRefreshCookie(res, newRawRefresh);
 
   return res.status(200).json({
     success: true,
     message: "Access token refreshed",
     data: {
-      accessToken:  newAccessToken,
-      refreshToken: newRefreshToken,   // ← client must save this new token
-      expiresIn:    ACCESS_TOKEN_EXPIRY,
+      accessToken: newAccessToken,
+      expiresIn:   ACCESS_TOKEN_EXPIRY,
     },
     errors: null,
   });
 });
 
 export const logout = asyncHandler(async (req, res, next) => {
-  const { refreshToken: rawToken } = req.body;
+  const rawToken = req.cookies?.refreshToken;
+
   if (rawToken) {
     const hash = crypto.createHash("sha256").update(rawToken).digest("hex");
     await refreshTokenModel.deleteOne({ tokenHash: hash });
   }
+
+  clearRefreshCookie(res);
 
   return res.status(200).json({
     success: true,
@@ -191,9 +229,7 @@ export const updateSelf = asyncHandler(async (req, res, next) => {
     user:   req.user._id,
     action: "UPDATE_SELF_PROFILE",
     details: {
-      updatedFields: Object.keys(req.body).filter(
-        (k) => allowedFields.includes(k) && k !== "password",
-      ),
+      updatedFields:   Object.keys(req.body).filter((k) => allowedFields.includes(k) && k !== "password"),
       passwordChanged: Boolean(req.body.password),
     },
   });
@@ -258,6 +294,10 @@ export const sendCode = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Reset password using OTP
+//
+// Security fix: jwt.verify() previously threw an unhandled JsonWebTokenError
+// when the token was malformed or expired, which propagated as a 500 through
+// asyncHandler. It is now wrapped in try/catch and returns a user-friendly 400.
 // ─────────────────────────────────────────────────────────────────────────────
 export const forgotPassword = asyncHandler(async (req, res, next) => {
   const { otp, email, newPassword } = req.body;
@@ -268,7 +308,14 @@ export const forgotPassword = asyncHandler(async (req, res, next) => {
   }
 
   const rawToken = authHeader.slice(7).trim();
-  const decoded  = jwt.verify(rawToken, process.env.FORGOTPASSWORDTOKEN);
+
+  // Wrap jwt.verify — it throws on malformed / expired tokens.
+  let decoded;
+  try {
+    decoded = jwt.verify(rawToken, process.env.FORGOTPASSWORDTOKEN);
+  } catch {
+    return next(new Error("Reset link is invalid or has expired", { cause: 400 }));
+  }
 
   if (!otp || !decoded) {
     return next(new Error("Invalid request", { cause: 400 }));
@@ -287,14 +334,12 @@ export const forgotPassword = asyncHandler(async (req, res, next) => {
   }
 
   if (user.passwordResetExpiry < new Date()) {
-    return next(
-      new Error("OTP has expired. Request a new one.", { cause: 400 }),
-    );
+    return next(new Error("OTP has expired. Request a new one.", { cause: 400 }));
   }
 
-  user.password             = newPassword;
-  user.passwordResetToken   = null;
-  user.passwordResetExpiry  = null;
+  user.password            = newPassword;
+  user.passwordResetToken  = null;
+  user.passwordResetExpiry = null;
   await user.save();
 
   return res.status(200).json({
@@ -313,9 +358,7 @@ export const createUser = asyncHandler(async (req, res, next) => {
 
   const exists = await userModel.findOne({ email }).select("_id");
   if (exists) {
-    return res
-      .status(409)
-      .json({ success: false, message: "Email already exists" });
+    return res.status(409).json({ success: false, message: "Email already exists" });
   }
 
   const savedUser = await userModel.create({ userName, email, password, role });
@@ -341,23 +384,23 @@ export const createUser = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Update user (admin only)
+//
+// Security fix: replaced the blocklist pattern (which accepted any field not
+// explicitly blocked) with an explicit allowlist. Only fields in
+// ADMIN_UPDATABLE_USER_FIELDS can be changed — any extra keys in req.body
+// are silently ignored, preventing privilege-escalation via injected fields
+// (e.g. an attacker sending req.body.imagePublicId or unknown future fields).
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateUser = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
-
-  const protectedFields = [
-    "_id", "passwordResetToken", "passwordResetExpiry", "image", "imagePublicId",
-  ];
 
   const user = await userModel.findById(id);
   if (!user) return next(new Error("User not found", { cause: 404 }));
 
   const passwordChanged = Boolean(req.body.password);
 
-  for (const [key, value] of Object.entries(req.body)) {
-    if (!protectedFields.includes(key) && key !== "cPassword" && value != null) {
-      user[key] = value;
-    }
+  for (const key of ADMIN_UPDATABLE_USER_FIELDS) {
+    if (req.body[key] != null) user[key] = req.body[key];
   }
 
   await user.save();
@@ -367,8 +410,8 @@ export const updateUser = asyncHandler(async (req, res, next) => {
     action: "UPDATE_USER",
     details: {
       userId: id,
-      updatedFields: Object.keys(req.body).filter(
-        (k) => !protectedFields.includes(k) && k !== "password" && k !== "cPassword",
+      updatedFields: ADMIN_UPDATABLE_USER_FIELDS.filter(
+        (k) => req.body[k] != null && k !== "password",
       ),
       passwordChanged,
     },
@@ -394,7 +437,7 @@ export const getAllUsers = asyncHandler(async (req, res, next) => {
   const { role, blocked, page, size } = req.query;
 
   const query = {};
-  if (role)               query.role    = role;
+  if (role)                  query.role    = role;
   if (blocked !== undefined) query.blocked = blocked === "true";
 
   const { limit, skip } = pagination(page, size);
@@ -415,7 +458,7 @@ export const getAllUsers = asyncHandler(async (req, res, next) => {
     data: {
       totalCount,
       totalPages: Math.ceil(totalCount / limit),
-      page: parseInt(page) || 1,
+      page:       parseInt(page) || 1,
       users,
     },
     errors: null,
@@ -429,9 +472,7 @@ export const deleteUser = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
   if (id === req.user._id.toString()) {
-    return next(
-      new Error("You cannot delete your own account", { cause: 400 }),
-    );
+    return next(new Error("You cannot delete your own account", { cause: 400 }));
   }
 
   const user = await userModel.findByIdAndDelete(id);
@@ -502,6 +543,9 @@ export const uploadUserImage = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 export const logoutAll = asyncHandler(async (req, res, next) => {
   const deleted = await refreshTokenModel.deleteMany({ user: req.user._id });
+
+  // Also clear the cookie on the current device
+  clearRefreshCookie(res);
 
   await logModel.create({
     user:   req.user._id,

@@ -5,6 +5,18 @@ import mongoose from "mongoose";
 import { pagination } from "../../../services/pagination.js";
 import { resyncProviderSummary } from "../../../services/providerSummaryService.js";
 
+// ── Security helper ───────────────────────────────────────────────────────────
+/**
+ * Escapes regex metacharacters so user-supplied strings cannot be used as
+ * injection vectors inside MongoDB $regex queries.
+ *
+ * Without this: ?name=.* → full collection scan
+ *               ?name=(?i)secret → data enumeration
+ *
+ * Phase 1 security fix — the ONLY change to this file vs. the original.
+ */
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Create provider
 // POST /api/v1/provider/create
@@ -80,18 +92,15 @@ export const deleteProvider = asyncHandler(async (req, res, next) => {
 // Get all providers (paginated + filtered)
 // GET /api/v1/provider/getAll
 //
-// Query params:
-//   type   — filter by provider type (hotel, car_rental, etc.)
-//   name   — partial name search (case-insensitive)  ← NEW
-//   page, size
+// Phase 1 change: `name` is now escaped before use in $regex.
 // ─────────────────────────────────────────────────────────────────────────────
-export const getAllProviders = asyncHandler(async (req, res, next) => {
+export const getAllProviders = asyncHandler(async (req, res) => {
   const { type, name, page, size } = req.query;
 
   const query = {};
   if (type) query.type = type;
-  // Bug fix: allow partial name search for dropdowns / autocomplete
-  if (name) query.name = { $regex: name.trim(), $options: "i" };
+  // Phase 1 security fix: escape user input before using as regex pattern
+  if (name) query.name = { $regex: escapeRegex(name.trim()), $options: "i" };
 
   const { limit, skip } = pagination(page, size || 50);
 
@@ -133,8 +142,6 @@ export const getProviderById = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Update provider
 // PATCH /api/v1/provider/update/:id
-//
-// Bug 5 fix: duplicate name check excludes the current document.
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateProvider = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
@@ -152,7 +159,7 @@ export const updateProvider = asyncHandler(async (req, res, next) => {
     }
   }
 
-  // Prevent renaming to an already-taken name
+  // Prevent renaming to an already-taken name (excludes current document)
   if (update.name) {
     const duplicate = await providerModel.findOne({
       name: update.name,
@@ -219,7 +226,7 @@ export const resyncProvider = asyncHandler(async (req, res, next) => {
 // Resync ALL providers
 // POST /api/v1/provider/resync-all
 // ─────────────────────────────────────────────────────────────────────────────
-export const resyncAllProviders = asyncHandler(async (req, res, next) => {
+export const resyncAllProviders = asyncHandler(async (req, res) => {
   const providers = await providerModel.find({}).select("_id name").lean();
 
   const results = [];

@@ -8,6 +8,19 @@ import { pagination } from "../../../services/pagination.js";
 import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
 import mongoose from "mongoose";
 
+// ── Security helper ───────────────────────────────────────────────────────────
+/**
+ * Escapes regex metacharacters so user-supplied strings cannot be used as
+ * injection vectors inside MongoDB $regex queries.
+ *
+ * Without this: ?customerName=.* → full collection scan
+ *               ?customerName=(?i)secret → data enumeration
+ *
+ * Phase 1 security fix — the ONLY change to this file vs. the original.
+ */
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// ── Protected fields ──────────────────────────────────────────────────────────
 const PROTECTED_BOOKING_FIELDS = [
   "bookingID",
   "createdBy",
@@ -18,7 +31,8 @@ const PROTECTED_BOOKING_FIELDS = [
   "totalProfit",
 ];
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Local validation helpers ──────────────────────────────────────────────────
+// These are private to this controller — NOT exported, NOT imported from bookingService.
 
 /**
  * Validates type-specific required fields inside service.details.
@@ -52,7 +66,10 @@ const validateServiceDetails = (service) => {
   }
 
   for (const field of typeDef.detailFields ?? []) {
-    if (field.required && (details[field.key] == null || details[field.key] === "")) {
+    if (
+      field.required &&
+      (details[field.key] == null || details[field.key] === "")
+    ) {
       const err = new Error(
         `Service type "${serviceType}" requires details.${field.key}`,
       );
@@ -138,6 +155,7 @@ export const createBooking = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Get all bookings
+// Phase 1 change: customerName is now escaped before use in $regex.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getAllBookings = asyncHandler(async (req, res) => {
   const {
@@ -164,8 +182,13 @@ export const getAllBookings = asyncHandler(async (req, res) => {
   if (serviceType) query["services.serviceType"] = serviceType;
   if (status) query.status = status;
   if (paymentStatus) query.paymentStatus = paymentStatus;
+
+  // Phase 1 security fix: escape user input before using as regex pattern
   if (customerName)
-    query["customers.name"] = { $regex: customerName, $options: "i" };
+    query["customers.name"] = {
+      $regex: escapeRegex(customerName.trim()),
+      $options: "i",
+    };
 
   if (fromDate || toDate) {
     query.createdAt = {};
@@ -247,9 +270,6 @@ export const getBookingById = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Update booking
-// FIX Bug 2: validateSubProviders + validateServiceDetails are now called
-// for any incoming services array, closing the validation gap that existed
-// when updating vs creating a booking.
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
@@ -260,7 +280,6 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
     .populate("createdBy", "userName email");
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  // ── Bug 2 fix: validate services before merging ───────────────────────────
   if (data.services && Array.isArray(data.services)) {
     const subProviderError = await validateSubProviders(data.services);
     if (subProviderError) return next(subProviderError);
@@ -343,11 +362,10 @@ export const addServiceToBooking = asyncHandler(async (req, res, next) => {
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
   const providerDoc = await providerModel.findById(provider).select("_id");
-  if (!providerDoc) {
+  if (!providerDoc)
     return next(
       new Error(`Provider ${provider} does not exist.`, { cause: 404 }),
     );
-  }
 
   const detailError = validateServiceDetails({
     serviceType,
@@ -459,21 +477,16 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Change Booking Status
-// FIX Bug 8: validation now runs BEFORE writing to DB.
-// Old code called findByIdAndUpdate first, then checked the guard — meaning
-// the DB could already hold status:"completed" before the 400 fired.
+// Change booking status
 // ─────────────────────────────────────────────────────────────────────────────
 export const editStatus = asyncHandler(async (req, res, next) => {
   const { newStatus } = req.body;
   if (!newStatus)
     return next(new Error("Enter the new status", { cause: 400 }));
 
-  // Fetch first so we can validate before touching the DB
   const booking = await bookingModel.findById(req.params.id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  // Guard runs BEFORE the write
   if (newStatus === "completed" && booking.paymentStatus !== "paid") {
     return next(
       new Error(

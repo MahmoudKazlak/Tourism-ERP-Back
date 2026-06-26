@@ -1,52 +1,59 @@
-import logModel    from "./model/log.model.js";
+import logModel     from "./model/log.model.js";
 import userModel    from "./model/user.model.js";
 import counterModel from "./model/counter.model.js";
 import bookingModel from "./model/booking.model.js";
 
+/**
+ * Seeds the initial admin account and initialises the booking counter.
+ *
+ * Credentials are read from environment variables so they are never
+ * committed to source control. Set ADMIN_SEED_EMAIL and ADMIN_SEED_PASSWORD
+ * in your .env file. Sensible defaults are provided for local development
+ * only — override them in staging/production.
+ */
 export const seedAdmin = async () => {
-  try {
-    const adminExists = await userModel.findOne({ role: "admin" });
+  const seedEmail    = process.env.ADMIN_SEED_EMAIL    || "admin@system.com";
+  const seedPassword = process.env.ADMIN_SEED_PASSWORD || "Admin@123";
 
-    if (!adminExists) {
-      console.log("🚀 No admin found. Creating initial admin account...");
+  const adminExists = await userModel.findOne({ role: "admin" });
 
-      const user = await userModel.create({
-        userName: "SuperAdmin",
-        email: "admin@system.com",
-        password: "Admin@123",
-        role: "admin",
-      });
+  if (!adminExists) {
+    console.log("🚀 No admin found. Creating initial admin account...");
 
-      await logModel.create({
-        user: user._id,
-        action: "ADMIN_SEED",
-        details: { userId: user._id, userName: user.userName },
-      });
+    const user = await userModel.create({
+      userName: "SuperAdmin",
+      email:    seedEmail,
+      password: seedPassword,
+      role:     "admin",
+    });
 
-      console.log("✅ Initial Admin created: admin@system.com / Admin@123");
-      console.log("⚠️  Change the password immediately after first login!");
-    }
+    await logModel.create({
+      user:   user._id,
+      action: "ADMIN_SEED",
+      details: { userId: user._id, userName: user.userName },
+    });
 
-    // ── Booking counter initialisation ────────────────────────────────────────
-    // Find the highest bookingID currently in the database so the global counter
-    // starts above any existing records. Uses $max so it never moves backwards.
-    const topBooking = await bookingModel
-      .findOne({}, { bookingID: 1 })
-      .sort({ bookingID: -1 })
-      .lean();
+    console.log(`✅ Initial admin created: ${seedEmail}`);
+    console.log("⚠️  Change the password immediately after first login!");
+  }
 
-    const currentMax = topBooking?.bookingID ?? 0;
+  // ── Booking counter initialisation ─────────────────────────────────────────
+  // Finds the highest bookingID in the DB so the counter never resets below
+  // existing data. $max ensures this is a no-op if counter is already higher.
+  const topBooking = await bookingModel
+    .findOne({}, { bookingID: 1 })
+    .sort({ bookingID: -1 })
+    .lean();
 
-    await counterModel.findOneAndUpdate(
-      { _id: "booking" },
-      { $max: { seq: currentMax } }, // only sets if new value is larger
-      { upsert: true },
-    );
+  const currentMax = topBooking?.bookingID ?? 0;
 
-    if (currentMax > 0) {
-      console.log(`ℹ️  Booking counter initialised to ${currentMax} (existing max ID).`);
-    }
-  } catch (error) {
-    console.error("❌ Error in seed:", error);
+  await counterModel.findOneAndUpdate(
+    { _id: "booking" },
+    { $max: { seq: currentMax } },
+    { upsert: true },
+  );
+
+  if (currentMax > 0) {
+    console.log(`ℹ️  Booking counter initialised to ${currentMax} (existing max ID).`);
   }
 };
