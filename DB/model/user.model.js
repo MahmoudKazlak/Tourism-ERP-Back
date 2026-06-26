@@ -1,55 +1,56 @@
 import mongoose from "mongoose";
-import bcrypt from "bcrypt";
+import bcrypt    from "bcrypt";
+import { ALL_ROLES, ROLES } from "../../src/config/roles.js";
 
+/**
+ * User model.
+ *
+ * The role enum is derived from ALL_ROLES (src/config/roles.js) — the single
+ * source of truth. Adding a new role to the config automatically expands this
+ * enum without editing this file.
+ */
 const userSchema = new mongoose.Schema(
   {
     userName: {
-      type: String,
-      required: [true, "Username is required"],
-      minlength: [3, "Min length is 3"],
+      type:      String,
+      required:  [true, "Username is required"],
+      minlength: [3,  "Min length is 3"],
       maxlength: [25, "Max length is 25"],
-      trim: true,
+      trim:      true,
     },
     email: {
-      type: String,
-      unique: true,
-      required: [true, "Email is required"],
+      type:      String,
+      unique:    true,
+      required:  [true, "Email is required"],
       lowercase: true,
-      trim: true,
+      trim:      true,
     },
     password: {
-      type: String,
-      required: [true, "Password is required"],
+      type:      String,
+      required:  [true, "Password is required"],
       minlength: 6,
     },
     phone: String,
     role: {
-      type: String,
-      enum: ["admin", "booking_staff", "accounting_staff"],
-      default: "booking_staff",
+      type:    String,
+      enum:    ALL_ROLES,           // derived from roles.js — no magic strings here
+      default: ROLES.BOOKING_STAFF, // new users default to least-privilege role
     },
-    image: String, // Cloudinary URL stored here
-    imagePublicId: String, // Cloudinary public_id for deletion
+    image:         String, // Cloudinary secure URL
+    imagePublicId: String, // Cloudinary public_id (needed for deletion)
     blocked: {
-      type: Boolean,
+      type:    Boolean,
       default: false,
     },
-    // FIX [12]: Replaced the "dontTrust32" sentinel string with explicit
-    // nullable fields + an expiry date. Benefits:
-    //   - No magic string to leak or misuse.
-    //   - Token auto-expires: the controller checks passwordResetExpiry.
-    //   - Clear intent — null means "no active reset request".
-    passwordResetToken: {
-      type: String,
-      default: null,
-    },
-    passwordResetExpiry: {
-      type: Date,
-      default: null,
-    },
+    // Null means "no active reset request". Expiry is enforced in the controller
+    // so the token auto-invalidates without requiring a background job.
+    passwordResetToken:  { type: String, default: null },
+    passwordResetExpiry: { type: Date,   default: null },
   },
   { timestamps: true },
 );
+
+// ── Hooks ─────────────────────────────────────────────────────────────────────
 
 userSchema.pre("save", async function () {
   if (!this.isModified("password")) return;
@@ -58,6 +59,8 @@ userSchema.pre("save", async function () {
     parseInt(process.env.SALTROUND) || 10,
   );
 });
+
+// ── Instance methods ──────────────────────────────────────────────────────────
 
 userSchema.methods.comparePassword = function (password) {
   return bcrypt.compare(password, this.password);

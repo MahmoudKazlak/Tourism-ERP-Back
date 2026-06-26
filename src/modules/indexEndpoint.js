@@ -1,20 +1,31 @@
-const roles = {
-  Admin: "admin",
-  Booking: "booking_staff",
-  Accounting: "accounting_staff",
-};
+import { ROLES } from "../config/roles.js";
 
+/**
+ * Endpoint access-control groups.
+ *
+ * Each group is an array of role strings passed to auth() middleware.
+ * Using named groups (e.g. endpoint.AdminOnly) instead of inline arrays
+ * means a permission change requires editing exactly one line here — no
+ * need to hunt down every router file.
+ *
+ * Roles come from src/config/roles.js — the single source of truth.
+ * Never inline role strings ("admin", "booking_staff") in router files.
+ */
 export const endpoint = {
-  booking_manage: [roles.Admin, roles.Booking],
-  booking_view: [roles.Admin, roles.Booking, roles.Accounting],
-  booking_delete: [roles.Admin],
+  // ── Booking ─────────────────────────────────────────────────────────────────
+  booking_manage: [ROLES.ADMIN, ROLES.BOOKING_STAFF],
+  booking_view:   [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
+  booking_delete: [ROLES.ADMIN],
 
-  provider_manage: [roles.Admin],
-  provider_view: [roles.Admin, roles.Booking, roles.Accounting],
+  // ── Provider ─────────────────────────────────────────────────────────────────
+  provider_manage: [ROLES.ADMIN],
+  provider_view:   [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
 
-  accounting_only: [roles.Admin, roles.Accounting],
+  // ── Finance ──────────────────────────────────────────────────────────────────
+  accounting_only: [ROLES.ADMIN, ROLES.ACCOUNTING_STAFF],
 
-  AdminOnly: [roles.Admin],
-  All: [roles.Admin, roles.Booking, roles.Accounting],
-  view_logs: [roles.Admin],
+  // ── Cross-cutting ─────────────────────────────────────────────────────────────
+  AdminOnly: [ROLES.ADMIN],
+  All:       [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
+  view_logs: [ROLES.ADMIN],
 };
