@@ -38,26 +38,13 @@ const bookingSchema = new mongoose.Schema(
       default: "unpaid",
     },
     customers: [{ name: String, ageType: String }],
-
-    /**
-     * Unified services array — replaces the former named arrays
-     * (accommodations, carRentals, carWithDriver).
-     *
-     * serviceType drives all processing logic via the SERVICE_TYPES registry.
-     * details holds every type-specific field (checkIn/checkOut, brand, etc.).
-     *
-     * Built-in types live in src/config/serviceTypes.js; office-defined
-     * types are stored in OfficeServiceType and merged at runtime.
-     */
     services: [
       {
         serviceType: {
           type:     String,
           required: true,
           validate: {
-            validator(v) {
-              return getMergedServiceTypeKeys().includes(v);
-            },
+            validator(v) { return getMergedServiceTypeKeys().includes(v); },
             message: "Invalid service type",
           },
         },
@@ -70,33 +57,22 @@ const bookingSchema = new mongoose.Schema(
         buy:      { type: Number, default: 0 },
         sell:     { type: Number, default: 0 },
         profit:   { type: Number, default: 0 },
-        // Auto-calculated for service types that define durationFields
         duration: Number,
-        // All type-specific fields (checkIn, checkOut, brand, driverName, etc.)
-        details: { type: mongoose.Schema.Types.Mixed, default: {} },
+        details:  { type: mongoose.Schema.Types.Mixed, default: {} },
       },
     ],
-
     totalPax: { adults: Number, kids: Number, total: Number },
   },
   { timestamps: true },
 );
 
-bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
-
 // ── pre-save ──────────────────────────────────────────────────────────────────
 bookingSchema.pre("save", async function () {
   this._wasNew = this.isNew;
 
+  // Phase 2: only fetch old doc when services actually changed.
+  // _oldServiceDeltas = null signals post-save to skip all delta logic.
   if (!this.isNew) {
-    // Performance fix (Phase 2):
-    // Previously, findById() was called on EVERY booking update to snapshot
-    // the old services for delta computation — even on saves that only changed
-    // status, customers, or payment fields (where services are untouched).
-    //
-    // Now we only pay for the DB read when services are actually modified.
-    // On a status-only change this skips the extra round-trip entirely.
-    // _oldServiceDeltas = null signals post-save to skip delta logic too.
     if (this.isModified("services")) {
       const oldDoc = await this.constructor.findById(this._id).lean();
       this._oldServiceDeltas = oldDoc ? computeServiceDeltas(oldDoc) : new Map();
@@ -117,15 +93,14 @@ bookingSchema.post("save", async function () {
     if (this._wasNew) {
       // New booking — apply full service deltas to each provider
       for (const [pid, delta] of newDeltas) {
-        await applyProviderSummaryDelta(pid, {
-          totalBuy:  delta.buy,
-          totalSell: delta.sell,
-        });
+        await applyProviderSummaryDelta(
+          pid,
+          { totalBuy: delta.buy, totalSell: delta.sell },
+          "booking_save",  // Phase 4: source tag for SyncFailure records
+        );
       }
     } else if (this._oldServiceDeltas !== null) {
-      // Existing booking with services modified — apply only the diff.
-      // _oldServiceDeltas is null (not an empty Map) when services weren't
-      // changed, so this block is skipped for non-service updates.
+      // Services were modified — apply only the diff
       const allProviderIds = new Set([
         ...newDeltas.keys(),
         ...(this._oldServiceDeltas?.keys() ?? []),
@@ -138,19 +113,20 @@ bookingSchema.post("save", async function () {
         const diffSell = newD.sell - oldD.sell;
 
         if (diffBuy !== 0 || diffSell !== 0) {
-          await applyProviderSummaryDelta(pid, {
-            totalBuy:  diffBuy,
-            totalSell: diffSell,
-          });
+          await applyProviderSummaryDelta(
+            pid,
+            { totalBuy: diffBuy, totalSell: diffSell },
+            "booking_update",
+          );
         }
       }
     }
-    // else: _oldServiceDeltas === null → services unchanged → nothing to sync
+    // _oldServiceDeltas === null → services unchanged → nothing to sync
   } catch (err) {
-    console.error(
-      "❌ Provider summary sync failed after booking save:",
-      err.message,
-    );
+    // This catch covers errors in computeServiceDeltas or the iteration logic
+    // itself. Individual applyProviderSummaryDelta failures are caught and
+    // recorded internally — they don't propagate here.
+    console.error("❌ booking.model post-save: unexpected error in sync loop:", err.message);
   }
 });
 
@@ -162,16 +138,14 @@ bookingSchema.post(
     try {
       const deltas = computeServiceDeltas(this);
       for (const [pid, delta] of deltas) {
-        await applyProviderSummaryDelta(pid, {
-          totalBuy:  -delta.buy,
-          totalSell: -delta.sell,
-        });
+        await applyProviderSummaryDelta(
+          pid,
+          { totalBuy: -delta.buy, totalSell: -delta.sell },
+          "booking_delete",
+        );
       }
     } catch (err) {
-      console.error(
-        "❌ Provider summary sync failed after booking delete:",
-        err.message,
-      );
+      console.error("❌ booking.model post-delete: unexpected error in sync loop:", err.message);
     }
   },
 );
