@@ -38,13 +38,25 @@ const bookingSchema = new mongoose.Schema(
       default: "unpaid",
     },
     customers: [{ name: String, ageType: String }],
+
+    /**
+     * Unified services array — replaces the former named arrays
+     * (accommodations, carRentals, carWithDriver).
+     *
+     * serviceType drives all processing logic via the SERVICE_TYPES registry.
+     * details holds every type-specific field (checkIn/checkOut, brand, etc.).
+     * notes  is a free-text optional field available on every service type,
+     *        regardless of whether it is built-in or office-defined.
+     */
     services: [
       {
         serviceType: {
           type:     String,
           required: true,
           validate: {
-            validator(v) { return getMergedServiceTypeKeys().includes(v); },
+            validator(v) {
+              return getMergedServiceTypeKeys().includes(v);
+            },
             message: "Invalid service type",
           },
         },
@@ -54,31 +66,33 @@ const bookingSchema = new mongoose.Schema(
           ref:      "Provider",
           required: true,
         },
-        buy:      { type: Number, default: 0 },
-        sell:     { type: Number, default: 0 },
-        profit:   { type: Number, default: 0 },
+        buy:    { type: Number, default: 0 },
+        sell:   { type: Number, default: 0 },
+        profit: { type: Number, default: 0 },
+        // Auto-calculated for service types that define durationFields
         duration: Number,
-        details:  { type: mongoose.Schema.Types.Mixed, default: {} },
+        // All type-specific fields (checkIn, checkOut, brand, driverName, etc.)
+        details: { type: mongoose.Schema.Types.Mixed, default: {} },
+        // Free-text note for this specific service — not required, any length
+        // up to 1 000 characters. Available on every service type.
+        notes: { type: String, default: "" },
       },
     ],
+
     totalPax: { adults: Number, kids: Number, total: Number },
   },
   { timestamps: true },
 );
 
+bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
+
 // ── pre-save ──────────────────────────────────────────────────────────────────
 bookingSchema.pre("save", async function () {
   this._wasNew = this.isNew;
 
-  // Phase 2: only fetch old doc when services actually changed.
-  // _oldServiceDeltas = null signals post-save to skip all delta logic.
   if (!this.isNew) {
-    if (this.isModified("services")) {
-      const oldDoc = await this.constructor.findById(this._id).lean();
-      this._oldServiceDeltas = oldDoc ? computeServiceDeltas(oldDoc) : new Map();
-    } else {
-      this._oldServiceDeltas = null;
-    }
+    const oldDoc = await this.constructor.findById(this._id).lean();
+    this._oldServiceDeltas = oldDoc ? computeServiceDeltas(oldDoc) : new Map();
   }
 
   await assignBookingSequences(this);
@@ -91,19 +105,16 @@ bookingSchema.post("save", async function () {
     const newDeltas = computeServiceDeltas(this);
 
     if (this._wasNew) {
-      // New booking — apply full service deltas to each provider
       for (const [pid, delta] of newDeltas) {
-        await applyProviderSummaryDelta(
-          pid,
-          { totalBuy: delta.buy, totalSell: delta.sell },
-          "booking_save",  // Phase 4: source tag for SyncFailure records
-        );
+        await applyProviderSummaryDelta(pid, {
+          totalBuy:  delta.buy,
+          totalSell: delta.sell,
+        });
       }
-    } else if (this._oldServiceDeltas !== null) {
-      // Services were modified — apply only the diff
+    } else if (this._oldServiceDeltas) {
       const allProviderIds = new Set([
         ...newDeltas.keys(),
-        ...(this._oldServiceDeltas?.keys() ?? []),
+        ...this._oldServiceDeltas.keys(),
       ]);
 
       for (const pid of allProviderIds) {
@@ -113,20 +124,18 @@ bookingSchema.post("save", async function () {
         const diffSell = newD.sell - oldD.sell;
 
         if (diffBuy !== 0 || diffSell !== 0) {
-          await applyProviderSummaryDelta(
-            pid,
-            { totalBuy: diffBuy, totalSell: diffSell },
-            "booking_update",
-          );
+          await applyProviderSummaryDelta(pid, {
+            totalBuy:  diffBuy,
+            totalSell: diffSell,
+          });
         }
       }
     }
-    // _oldServiceDeltas === null → services unchanged → nothing to sync
   } catch (err) {
-    // This catch covers errors in computeServiceDeltas or the iteration logic
-    // itself. Individual applyProviderSummaryDelta failures are caught and
-    // recorded internally — they don't propagate here.
-    console.error("❌ booking.model post-save: unexpected error in sync loop:", err.message);
+    console.error(
+      "❌ Provider summary sync failed after booking save:",
+      err.message,
+    );
   }
 });
 
@@ -138,14 +147,16 @@ bookingSchema.post(
     try {
       const deltas = computeServiceDeltas(this);
       for (const [pid, delta] of deltas) {
-        await applyProviderSummaryDelta(
-          pid,
-          { totalBuy: -delta.buy, totalSell: -delta.sell },
-          "booking_delete",
-        );
+        await applyProviderSummaryDelta(pid, {
+          totalBuy:  -delta.buy,
+          totalSell: -delta.sell,
+        });
       }
     } catch (err) {
-      console.error("❌ booking.model post-delete: unexpected error in sync loop:", err.message);
+      console.error(
+        "❌ Provider summary sync failed after booking delete:",
+        err.message,
+      );
     }
   },
 );

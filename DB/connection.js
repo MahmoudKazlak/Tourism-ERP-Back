@@ -1,20 +1,27 @@
 import mongoose from "mongoose";
 import { seedAdmin } from "./adminSeed.js";
 import { refreshServiceTypeRegistry } from "../src/services/serviceTypeRegistry.js";
+import "./model/syncFailure.model.js"; // ← ADD THIS: registers the SyncFailure schema at startup
+
 
 /**
- * Connects to MongoDB then runs startup tasks sequentially.
+ * Establishes the MongoDB connection then runs startup tasks sequentially.
  *
- * Design decisions:
- *  - process.exit(1) on connection failure — a server with no DB is broken,
- *    not degraded. Fail loudly so the process manager restarts it.
- *  - seedAdmin and refreshServiceTypeRegistry run after the connection is
- *    confirmed, not inside the connect chain, so each step's errors are
- *    distinct and visible in logs.
+ * Connection options:
+ *   retryWrites: false — Required for standalone (non-replica-set) MongoDB
+ *     deployments. MongoDB 4+ drivers enable retryable writes by default, but
+ *     retryable writes require a replica set to be active. On a standalone
+ *     instance the driver throws "does not support retryable writes" on the
+ *     very first write operation. Setting this to false disables the feature
+ *     for this connection without affecting any other behaviour.
+ *     When you later deploy MongoDB as a replica set (recommended for
+ *     production), you can remove this option or set it back to true.
  */
 const connectDB = async () => {
   try {
-    await mongoose.connect(process.env.DBURI);
+    await mongoose.connect(process.env.DBURI, {
+      retryWrites: false,
+    });
     console.log("✅ MongoDB connected");
   } catch (err) {
     console.error("❌ MongoDB connection failed:", err.message);
@@ -31,8 +38,6 @@ const connectDB = async () => {
   try {
     await refreshServiceTypeRegistry();
   } catch (err) {
-    // Non-fatal: the app can run without custom service types loaded,
-    // but log it prominently so it gets noticed.
     console.error("⚠️  Service type registry refresh failed:", err.message);
   }
 };

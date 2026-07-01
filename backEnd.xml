@@ -56,10 +56,12 @@ DB/model/provider.model.js
 DB/model/providerCollection.model.js
 DB/model/providerPayment.model.js
 DB/model/refreshToken.model.js
+DB/model/syncFailure.model.js
 DB/model/user.model.js
 jest.config.js
 package.json
 scripts/migrateServices.js
+src/config/roles.js
 src/config/serviceTypes.js
 src/middleware/asyncHandler.js
 src/middleware/auth.js
@@ -346,6 +348,92 @@ refreshTokenSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 export default mongoose.model("RefreshToken", refreshTokenSchema);
 </file>
 
+<file path="DB/model/syncFailure.model.js">
+import mongoose from "mongoose";
+
+/**
+ * SyncFailure — records every provider summary drift event.
+ *
+ * Problem being solved:
+ *   Booking, ProviderPayment, and ProviderCollection post-save/post-delete
+ *   hooks call applyProviderSummaryDelta() after the primary document is
+ *   committed. If the delta update fails, the booking/payment is safely stored
+ *   but the provider's summary.currentBalance is now wrong — silently.
+ *
+ *   Previously the only signal was a console.error line, which requires
+ *   active log monitoring to catch. In a single-office deployment without
+ *   dedicated DevOps, that line gets missed.
+ *
+ * What this model provides:
+ *   - A queryable record of every drift event (source, provider, delta, error).
+ *   - A `resolved` flag so admins can mark failures as fixed after running
+ *     POST /api/v1/provider/:id/resync or POST /api/v1/provider/resync-all.
+ *   - A TTL index that auto-deletes resolved failures after 30 days to avoid
+ *     unbounded collection growth.
+ *
+ * How to use:
+ *   // Find all unresolved failures (admin dashboard)
+ *   await SyncFailure.find({ resolved: false }).populate("providerId", "name");
+ *
+ *   // After resync, mark resolved
+ *   await SyncFailure.updateMany({ providerId }, { resolved: true, resolvedAt: new Date() });
+ *
+ * Multi-tenant note (Phase 5):
+ *   Add tenantId field when moving to SaaS — failures are per-tenant.
+ */
+const syncFailureSchema = new mongoose.Schema(
+  {
+    // Which provider's summary drifted
+    providerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref:  "Provider",
+      index: true,
+    },
+    // Which hook triggered the delta that failed
+    // e.g. "booking_save" | "booking_delete" | "providerPayment_save" |
+    //      "providerPayment_delete" | "providerCollection_save" | "providerCollection_delete"
+    source: {
+      type:     String,
+      required: true,
+    },
+    // The delta object that was passed to applyProviderSummaryDelta —
+    // stored so a developer can manually reconstruct the correct state if needed.
+    delta: {
+      type: mongoose.Schema.Types.Mixed,
+    },
+    // The error message from the failed DB operation
+    errorMessage: {
+      type:     String,
+      required: true,
+    },
+    // Whether this failure has been fixed (manually or via resync endpoint)
+    resolved: {
+      type:    Boolean,
+      default: false,
+      index:   true,
+    },
+    resolvedAt: {
+      type:    Date,
+      default: null,
+    },
+  },
+  { timestamps: true },
+);
+
+// Compound index for the most common admin query: unresolved by provider
+syncFailureSchema.index({ providerId: 1, resolved: 1, createdAt: -1 });
+
+// TTL: automatically remove resolved failures after 30 days.
+// Unresolved failures (resolved: false) have resolvedAt = null, so they are
+// never expired by this index — they persist until manually resolved.
+syncFailureSchema.index(
+  { resolvedAt: 1 },
+  { expireAfterSeconds: 30 * 24 * 60 * 60, partialFilterExpression: { resolved: true } },
+);
+
+export default mongoose.model("SyncFailure", syncFailureSchema);
+</file>
+
 <file path="jest.config.js">
 export default {
   testEnvironment: "node",
@@ -369,6 +457,35 @@ export default {
   coverageDirectory: "coverage",
   coverageReporters: ["text", "lcov"],
 };
+</file>
+
+<file path="src/config/roles.js">
+/**
+ * Canonical role identifiers — single source of truth for the entire backend.
+ *
+ * Every consumer (validation schemas, middleware, controllers, seeders) imports
+ * from here. Changing a role string means changing it in exactly one place.
+ *
+ * When a new role is added:
+ *   1. Add it here.
+ *   2. Add it to DB/model/user.model.js enum array (references ALL_ROLES).
+ *   3. Update src/modules/indexEndpoint.js endpoint arrays.
+ *   4. Mirror the change in the frontend src/config/roles.js.
+ *
+ * Multi-tenant note (Phase 5):
+ *   A "tenant_owner" role will likely be needed to represent the admin of a
+ *   single tenant (distinct from the platform "admin"). Add it here when that
+ *   work begins — all access-control logic will pick it up automatically.
+ */
+
+export const ROLES = Object.freeze({
+  ADMIN:            "admin",
+  BOOKING_STAFF:    "booking_staff",
+  ACCOUNTING_STAFF: "accounting_staff",
+});
+
+/** Flat array of all valid role strings — used in Mongoose enum and Joi valid(). */
+export const ALL_ROLES = Object.values(ROLES);
 </file>
 
 <file path="src/middleware/asyncHandler.js">
@@ -1310,29 +1427,6 @@ const resolveNumFmt = (type) => {
 };
 </file>
 
-<file path="src/modules/indexEndpoint.js">
-const roles = {
-  Admin: "admin",
-  Booking: "booking_staff",
-  Accounting: "accounting_staff",
-};
-
-export const endpoint = {
-  booking_manage: [roles.Admin, roles.Booking],
-  booking_view: [roles.Admin, roles.Booking, roles.Accounting],
-  booking_delete: [roles.Admin],
-
-  provider_manage: [roles.Admin],
-  provider_view: [roles.Admin, roles.Booking, roles.Accounting],
-
-  accounting_only: [roles.Admin, roles.Accounting],
-
-  AdminOnly: [roles.Admin],
-  All: [roles.Admin, roles.Booking, roles.Accounting],
-  view_logs: [roles.Admin],
-};
-</file>
-
 <file path="src/modules/log/controller/log.controller.js">
 import logModel from "../../../../DB/model/log.model.js";
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
@@ -1609,7 +1703,7 @@ router.get(
 // DELETE /api/v1/provider-collection/:collectionId — Admin only
 router.delete(
   "/:collectionId",
-  auth(endpoint.AdminOnly),
+  auth(endpoint.AdminOnly), 
   validation(validators.deleteProviderCollection),
   providerCollectionController.deleteProviderCollection,
 );
@@ -1694,373 +1788,6 @@ export const getProviderCollections = {
     size: Joi.number().integer().min(1).max(100).default(10),
   }),
 };
-</file>
-
-<file path="src/modules/report/controller/report.controller.js">
-import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import bookingModel from "../../../../DB/model/booking.model.js";
-import paymentModel from "../../../../DB/model/payment.model.js";
-import expenseModel from "../../../../DB/model/expense.model.js";
-import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
-
-// ── CSV helpers ───────────────────────────────────────────────────────────────
-
-/**
- * Converts an array of flat objects to a CSV string.
- *
- * @param {string[]} headers - Column headers in output order.
- * @param {Record<string, any>[]} rows - Data rows.
- * @returns {string} CSV content.
- */
-const toCSV = (headers, rows) => {
-  const escape = (value) => {
-    if (value == null) return "";
-    const str = String(value).replace(/"/g, '""');
-    return str.includes(",") || str.includes('"') || str.includes("\n")
-      ? `"${str}"`
-      : str;
-  };
-
-  const lines = [
-    headers.join(","),
-    ...rows.map((row) => headers.map((h) => escape(row[h])).join(",")),
-  ];
-  return lines.join("\n");
-};
-
-/**
- * Sets response headers for a CSV file download.
- *
- * @param {import('express').Response} res
- * @param {string} filename
- */
-const sendCSV = (res, filename, csv) => {
-  res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-  // UTF-8 BOM so Excel opens Arabic / mixed-language content correctly.
-  res.send("\uFEFF" + csv);
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Bookings report
-// GET /api/v1/report/bookings?fromDate=&toDate=&status=&paymentStatus=
-// ─────────────────────────────────────────────────────────────────────────────
-export const exportBookings = asyncHandler(async (req, res) => {
-  const { fromDate, toDate, status, paymentStatus } = req.query;
-
-  const query = {};
-  if (status) query.status = status;
-  if (paymentStatus) query.paymentStatus = paymentStatus;
-  if (fromDate || toDate) {
-    query.createdAt = {};
-    if (fromDate) query.createdAt.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      query.createdAt.$lte = to;
-    }
-  }
-
-  const bookings = await bookingModel
-    .find(query)
-    .populate("provider", "name type")
-    .populate("createdBy", "userName")
-    .sort({ bookingID: 1 })
-    .lean();
-
-  const headers = [
-    "bookingID",
-    "date",
-    "status",
-    "paymentStatus",
-    "provider",
-    "customers",
-    "totalToPay",
-    "totalPaid",
-    "remainingBalance",
-    "totalProfit",
-    "createdBy",
-  ];
-
-  const rows = bookings.map((b) => ({
-    bookingID: b.bookingID,
-    date: b.createdAt ? new Date(b.createdAt).toLocaleDateString() : "",
-    status: b.status,
-    paymentStatus: b.paymentStatus,
-    provider: b.provider?.name || "",
-    customers: b.customers?.map((c) => c.name).join(" | ") || "",
-    totalToPay: b.totalToPay,
-    totalPaid: b.totalPaid,
-    remainingBalance: b.remainingBalance,
-    totalProfit: b.totalProfit,
-    createdBy: b.createdBy?.userName || "",
-  }));
-
-  const dateTag =
-    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
-  sendCSV(res, `bookings${dateTag}.csv`, toCSV(headers, rows));
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Payments report
-// GET /api/v1/report/payments?fromDate=&toDate=&method=
-// ─────────────────────────────────────────────────────────────────────────────
-export const exportPayments = asyncHandler(async (req, res) => {
-  const { fromDate, toDate, method } = req.query;
-
-  const query = {};
-  if (method) query.method = method;
-  if (fromDate || toDate) {
-    query.date = {};
-    if (fromDate) query.date.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      query.date.$lte = to;
-    }
-  }
-
-  const payments = await paymentModel
-    .find(query)
-    .populate("booking", "bookingID")
-    .populate("recordedBy", "userName")
-    .sort({ date: -1 })
-    .lean();
-
-  const headers = [
-    "bookingID",
-    "date",
-    "amount",
-    "method",
-    "notes",
-    "recordedBy",
-  ];
-
-  const rows = payments.map((p) => ({
-    bookingID: p.booking?.bookingID || p.bookingID || "",
-    date: p.date ? new Date(p.date).toLocaleDateString() : "",
-    amount: p.amount,
-    method: p.method,
-    notes: p.notes || "",
-    recordedBy: p.recordedBy?.userName || "",
-  }));
-
-  const dateTag =
-    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
-  sendCSV(res, `payments${dateTag}.csv`, toCSV(headers, rows));
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Expenses report
-// GET /api/v1/report/expenses?fromDate=&toDate=&category=
-// ─────────────────────────────────────────────────────────────────────────────
-export const exportExpenses = asyncHandler(async (req, res) => {
-  const { fromDate, toDate, category } = req.query;
-
-  const query = {};
-  if (category) query.category = category;
-  if (fromDate || toDate) {
-    query.date = {};
-    if (fromDate) query.date.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      query.date.$lte = to;
-    }
-  }
-
-  const expenses = await expenseModel
-    .find(query)
-    .populate("recordedBy", "userName")
-    .sort({ date: -1 })
-    .lean();
-
-  const headers = [
-    "date",
-    "category",
-    "description",
-    "amount",
-    "method",
-    "reference",
-    "recordedBy",
-  ];
-
-  const rows = expenses.map((e) => ({
-    date: e.date ? new Date(e.date).toLocaleDateString() : "",
-    category: e.category,
-    description: e.description,
-    amount: e.amount,
-    method: e.method,
-    reference: e.reference || "",
-    recordedBy: e.recordedBy?.userName || "",
-  }));
-
-  const dateTag =
-    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
-  sendCSV(res, `expenses${dateTag}.csv`, toCSV(headers, rows));
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Provider payments report
-// GET /api/v1/report/provider-payments?fromDate=&toDate=
-// ─────────────────────────────────────────────────────────────────────────────
-export const exportProviderPayments = asyncHandler(async (req, res) => {
-  const { fromDate, toDate } = req.query;
-
-  const query = {};
-  if (fromDate || toDate) {
-    query.date = {};
-    if (fromDate) query.date.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      query.date.$lte = to;
-    }
-  }
-
-  const payments = await providerPaymentModel
-    .find(query)
-    .populate("provider", "name type")
-    .populate("recordedBy", "userName")
-    .sort({ date: -1 })
-    .lean();
-
-  const headers = [
-    "date",
-    "provider",
-    "providerType",
-    "amount",
-    "method",
-    "reference",
-    "notes",
-    "recordedBy",
-  ];
-
-  const rows = payments.map((p) => ({
-    date: p.date ? new Date(p.date).toLocaleDateString() : "",
-    provider: p.provider?.name || "",
-    providerType: p.provider?.type || "",
-    amount: p.amount,
-    method: p.method,
-    reference: p.reference || "",
-    notes: p.notes || "",
-    recordedBy: p.recordedBy?.userName || "",
-  }));
-
-  const dateTag =
-    fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
-  sendCSV(res, `provider-payments${dateTag}.csv`, toCSV(headers, rows));
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Profit & Loss summary
-// GET /api/v1/report/pnl?fromDate=&toDate=
-// Returns aggregated totals — useful for a monthly P&L view.
-// ─────────────────────────────────────────────────────────────────────────────
-export const getProfitLoss = asyncHandler(async (req, res) => {
-  const { fromDate, toDate } = req.query;
-
-  const dateFilter = {};
-  if (fromDate) dateFilter.$gte = new Date(fromDate);
-  if (toDate) {
-    const to = new Date(toDate);
-    to.setHours(23, 59, 59, 999);
-    dateFilter.$lte = to;
-  }
-
-  const bookingDateQuery = Object.keys(dateFilter).length
-    ? { createdAt: dateFilter }
-    : {};
-  const txnDateQuery = Object.keys(dateFilter).length
-    ? { date: dateFilter }
-    : {};
-
-  const [
-    bookingTotals,
-    expenseTotals,
-    providerPaymentTotals,
-    customerPaymentTotals,
-  ] = await Promise.all([
-    bookingModel.aggregate([
-      { $match: bookingDateQuery },
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: "$totalToPay" },
-          totalCost: { $sum: "$totalToBuy" },
-          totalProfit: { $sum: "$totalProfit" },
-          totalPaid: { $sum: "$totalPaid" },
-          totalOutstanding: { $sum: "$remainingBalance" },
-          count: { $sum: 1 },
-        },
-      },
-    ]),
-    expenseModel.aggregate([
-      { $match: txnDateQuery },
-      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
-    ]),
-    providerPaymentModel.aggregate([
-      { $match: txnDateQuery },
-      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
-    ]),
-    paymentModel.aggregate([
-      { $match: txnDateQuery },
-      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
-    ]),
-  ]);
-
-  const b = bookingTotals[0] || {
-    totalRevenue: 0,
-    totalCost: 0,
-    totalProfit: 0,
-    totalPaid: 0,
-    totalOutstanding: 0,
-    count: 0,
-  };
-  const expenses = expenseTotals[0]?.total || 0;
-  const providerPaid = providerPaymentTotals[0]?.total || 0;
-  const customerPaid = customerPaymentTotals[0]?.total || 0;
-
-  // Net profit = gross booking profit minus operating expenses.
-  const netProfit = b.totalProfit - expenses;
-
-  return res.status(200).json({
-    success: true,
-    message: "Profit & Loss summary",
-    data: {
-      period: {
-        from: fromDate || "All time",
-        to: toDate || "All time",
-      },
-      bookings: {
-        count: b.count,
-        totalRevenue: b.totalRevenue,
-        totalCost: b.totalCost,
-        grossProfit: b.totalProfit,
-        totalCollectedFromCustomers: customerPaid,
-        totalOutstandingFromCustomers: b.totalOutstanding,
-      },
-      expenses: {
-        total: expenses,
-        count: expenseTotals[0]?.count || 0,
-      },
-      providerPayments: {
-        total: providerPaid,
-        count: providerPaymentTotals[0]?.count || 0,
-      },
-      summary: {
-        grossProfit: b.totalProfit,
-        operatingExpenses: expenses,
-        netProfit,
-        netProfitLabel:
-          netProfit >= 0
-            ? `Net Profit: ${netProfit}`
-            : `Net Loss: ${Math.abs(netProfit)}`,
-      },
-    },
-    errors: null,
-  });
-});
 </file>
 
 <file path="src/modules/report/report.router.js">
@@ -2641,52 +2368,6 @@ export const notifyProviderPaymentRecorded = async (
 };
 </file>
 
-<file path="src/services/serviceTypeRegistry.js">
-import { SERVICE_TYPES, SERVICE_TYPE_KEYS } from "../config/serviceTypes.js";
-import OfficeServiceType from "../../DB/model/officeServiceType.model.js";
-
-let mergedTypes = { ...SERVICE_TYPES };
-let mergedKeys = [...SERVICE_TYPE_KEYS];
-
-export const getMergedServiceTypes = () => mergedTypes;
-export const getMergedServiceTypeKeys = () => mergedKeys;
-
-const shapeOfficeType = (doc) => ({
-  key: doc.key,
-  label: doc.label,
-  voucherPrefix: doc.voucherPrefix,
-  durationFields: doc.durationFields?.from ? doc.durationFields : undefined,
-  detailFields: doc.detailFields ?? [],
-  source: "office",
-});
-
-export const refreshServiceTypeRegistry = async () => {
-  const custom = await OfficeServiceType.find({ isActive: true }).lean();
-
-  mergedTypes = { ...SERVICE_TYPES };
-  for (const doc of custom) {
-    mergedTypes[doc.key] = shapeOfficeType(doc);
-  }
-  mergedKeys = Object.keys(mergedTypes);
-};
-
-export const listServiceTypesForApi = () => {
-  const types = {};
-  for (const key of mergedKeys) {
-    const def = mergedTypes[key];
-    types[key] = {
-      key,
-      label: def.label,
-      voucherPrefix: def.voucherPrefix,
-      durationFields: def.durationFields ?? null,
-      detailFields: def.detailFields ?? [],
-      source: SERVICE_TYPES[key] ? "builtin" : "office",
-    };
-  }
-  return { types, keys: mergedKeys };
-};
-</file>
-
 <file path="src/services/transaction.js">
 import mongoose from "mongoose";
 
@@ -2698,6 +2379,21 @@ import mongoose from "mongoose";
  * The callback receives `session | null`. All Mongoose operations inside the
  * callback should pass the session through — Mongoose silently ignores a
  * null session, so the same callback body works in both modes.
+ *
+ * Standalone detection covers two distinct error surfaces:
+ *
+ *   1. "Transaction numbers are only allowed on a replica set member"
+ *      Thrown by session.startTransaction() when MongoDB is standalone.
+ *
+ *   2. "This MongoDB deployment does not support retryable writes"
+ *      Thrown by the MongoDB driver before a transaction even starts when
+ *      retryable writes are enabled (the default in MongoDB driver 3+) on a
+ *      standalone instance. Adding retryWrites=false to the connection string
+ *      prevents this error upstream, but the fallback is kept here as a
+ *      second line of defence in case the connection option is not set.
+ *
+ * ⚠️  Without a transaction, the operations inside the callback are NOT atomic.
+ *     For production, always run MongoDB as a replica set.
  *
  * @param {(session: import('mongoose').ClientSession | null) => Promise<T>} callback
  * @returns {Promise<T>}
@@ -2722,21 +2418,25 @@ export const withTransaction = async (callback) => {
       }
     }
 
-    // Standalone MongoDB instances reject transactions with this code.
-    // In that case we retry without a session so the app still functions.
-    // NOTE: without a transaction, the operations are no longer atomic.
-    // For production use, always run MongoDB as a replica set.
-    const isNoReplicaSetError =
+    // Detect any "standalone MongoDB" condition regardless of which layer
+    // surfaces the error first.
+    const isStandaloneError =
       error?.codeName === "IllegalOperation" ||
+      error?.code === 20 ||
       error?.message?.includes(
         "Transaction numbers are only allowed on a replica set",
-      );
+      ) ||
+      error?.message?.includes("does not support retryable writes") ||
+      error?.message?.includes("retryWrites");
 
-    if (isNoReplicaSetError) {
+    if (isStandaloneError) {
       console.warn(
-        "⚠️  MongoDB transactions require a replica set. " +
+        "⚠️  MongoDB transactions are not available on this deployment " +
+          "(standalone instance detected). " +
           "Falling back to non-transactional execution. " +
-          "Operations are NOT atomic in this mode.",
+          "Operations are NOT atomic in this mode. " +
+          "Add retryWrites=false to your connection string and run MongoDB " +
+          "as a replica set for full transaction support.",
       );
       return callback(null);
     }
@@ -4190,27 +3890,6 @@ describe("invoicePdfService", () => {
 </svg>
 </file>
 
-<file path="DB/connection.js">
-import mongoose from "mongoose";
-import { seedAdmin } from "./adminSeed.js";
-import { refreshServiceTypeRegistry } from "../src/services/serviceTypeRegistry.js";
-
-const connectDB = async () => {
-  return await mongoose
-    .connect(process.env.DBURI)
-    .then(async (res) => {
-      console.log("connectDb");
-      await seedAdmin();
-      await refreshServiceTypeRegistry();
-    })
-    .catch((err) => {
-      console.log("faild to connect", err);
-    });
-};
-
-export default connectDB;
-</file>
-
 <file path="DB/model/log.model.js">
 import mongoose from "mongoose";
 
@@ -4299,176 +3978,6 @@ const paymentSchema = new mongoose.Schema(
 paymentSchema.index({ providerRecipient: 1, date: -1 });
 
 export default mongoose.model("Payment", paymentSchema);
-</file>
-
-<file path="DB/model/providerCollection.model.js">
-import mongoose from "mongoose";
-import { applyProviderSummaryDelta } from "../../src/services/providerSummaryService.js";
-
-/**
- * Records money received FROM a provider who collected on our agency's behalf.
- *
- * Hook design (same pattern as providerPayment.model.js):
- *   pre-save captures isNew → post-save only increments on creation.
- *   This prevents double-counting if the document is ever re-saved.
- */
-const providerCollectionSchema = new mongoose.Schema(
-  {
-    provider: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Provider",
-      required: [true, "Provider is required"],
-      index: true,
-    },
-    amount: {
-      type: Number,
-      required: [true, "Amount is required"],
-      min: [0.01, "Amount must be greater than 0"],
-    },
-    date: {
-      type: Date,
-      default: Date.now,
-      required: true,
-    },
-    method: {
-      type: String,
-      enum: ["cash", "bank_transfer", "check", "other"],
-      default: "cash",
-    },
-    notes: {
-      type: String,
-      trim: true,
-      maxlength: [300, "Notes too long"],
-    },
-    booking: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Booking",
-      default: null,
-    },
-    reference: {
-      type: String,
-      trim: true,
-      maxlength: [100, "Reference too long"],
-    },
-    recordedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
-  },
-  { timestamps: true },
-);
-
-providerCollectionSchema.index({ provider: 1, date: -1 });
-
-// ── pre-save: capture isNew BEFORE Mongoose flips it to false ────────────────
-providerCollectionSchema.pre("save", function () {
-  this._wasNew = this.isNew;
-});
-
-// ── post-save: only increment on document CREATION ───────────────────────────
-providerCollectionSchema.post("save", async function () {
-  if (!this._wasNew) return; // skip updates
-  try {
-    await applyProviderSummaryDelta(this.provider, {
-      totalCollectedFromProvider: this.amount,
-    });
-  } catch (err) {
-    console.error(
-      "❌ Provider summary sync failed after providerCollection save:",
-      err.message,
-    );
-  }
-});
-
-// ── post-deleteOne: reverse the increment ────────────────────────────────────
-providerCollectionSchema.post(
-  "deleteOne",
-  { document: true, query: false },
-  async function () {
-    try {
-      await applyProviderSummaryDelta(this.provider, {
-        totalCollectedFromProvider: -this.amount,
-      });
-    } catch (err) {
-      console.error(
-        "❌ Provider summary sync failed after providerCollection delete:",
-        err.message,
-      );
-    }
-  },
-);
-
-export default mongoose.model("ProviderCollection", providerCollectionSchema);
-</file>
-
-<file path="DB/model/user.model.js">
-import mongoose from "mongoose";
-import bcrypt from "bcrypt";
-
-const userSchema = new mongoose.Schema(
-  {
-    userName: {
-      type: String,
-      required: [true, "Username is required"],
-      minlength: [3, "Min length is 3"],
-      maxlength: [25, "Max length is 25"],
-      trim: true,
-    },
-    email: {
-      type: String,
-      unique: true,
-      required: [true, "Email is required"],
-      lowercase: true,
-      trim: true,
-    },
-    password: {
-      type: String,
-      required: [true, "Password is required"],
-      minlength: 6,
-    },
-    phone: String,
-    role: {
-      type: String,
-      enum: ["admin", "booking_staff", "accounting_staff"],
-      default: "booking_staff",
-    },
-    image: String, // Cloudinary URL stored here
-    imagePublicId: String, // Cloudinary public_id for deletion
-    blocked: {
-      type: Boolean,
-      default: false,
-    },
-    // FIX [12]: Replaced the "dontTrust32" sentinel string with explicit
-    // nullable fields + an expiry date. Benefits:
-    //   - No magic string to leak or misuse.
-    //   - Token auto-expires: the controller checks passwordResetExpiry.
-    //   - Clear intent — null means "no active reset request".
-    passwordResetToken: {
-      type: String,
-      default: null,
-    },
-    passwordResetExpiry: {
-      type: Date,
-      default: null,
-    },
-  },
-  { timestamps: true },
-);
-
-userSchema.pre("save", async function () {
-  if (!this.isModified("password")) return;
-  this.password = await bcrypt.hash(
-    this.password,
-    parseInt(process.env.SALTROUND) || 10,
-  );
-});
-
-userSchema.methods.comparePassword = function (password) {
-  return bcrypt.compare(password, this.password);
-};
-
-export default mongoose.model("User", userSchema);
 </file>
 
 <file path="scripts/migrateServices.js">
@@ -5016,6 +4525,40 @@ export const downloadFullExport = asyncHandler(async (req, res, next) => {
 });
 </file>
 
+<file path="src/modules/indexEndpoint.js">
+import { ROLES } from "../config/roles.js";
+
+/**
+ * Endpoint access-control groups.
+ *
+ * Each group is an array of role strings passed to auth() middleware.
+ * Using named groups (e.g. endpoint.AdminOnly) instead of inline arrays
+ * means a permission change requires editing exactly one line here — no
+ * need to hunt down every router file.
+ *
+ * Roles come from src/config/roles.js — the single source of truth.
+ * Never inline role strings ("admin", "booking_staff") in router files.
+ */
+export const endpoint = {
+  // ── Booking ─────────────────────────────────────────────────────────────────
+  booking_manage: [ROLES.ADMIN, ROLES.BOOKING_STAFF],
+  booking_view:   [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
+  booking_delete: [ROLES.ADMIN],
+
+  // ── Provider ─────────────────────────────────────────────────────────────────
+  provider_manage: [ROLES.ADMIN],
+  provider_view:   [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
+
+  // ── Finance ──────────────────────────────────────────────────────────────────
+  accounting_only: [ROLES.ADMIN, ROLES.ACCOUNTING_STAFF],
+
+  // ── Cross-cutting ─────────────────────────────────────────────────────────────
+  AdminOnly: [ROLES.ADMIN],
+  All:       [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
+  view_logs: [ROLES.ADMIN],
+};
+</file>
+
 <file path="src/modules/payment/payment.router.js">
 import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
@@ -5461,6 +5004,328 @@ export const getProviderPayments = {
     size: Joi.number().integer().min(1).max(100).default(10),
   }),
 };
+</file>
+
+<file path="src/modules/report/controller/report.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel         from "../../../../DB/model/booking.model.js";
+import paymentModel         from "../../../../DB/model/payment.model.js";
+import expenseModel         from "../../../../DB/model/expense.model.js";
+import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
+
+// ── Safety cap ────────────────────────────────────────────────────────────────
+/**
+ * Hard limit on CSV report rows to prevent accidental memory exhaustion.
+ *
+ * Without a limit, a date-range query spanning years could pull tens of
+ * thousands of documents into the Node heap in one shot.
+ * The /export/full endpoint uses cursor-based streaming and is not affected.
+ *
+ * When the cap is hit a `X-Report-Truncated: true` header is set so the
+ * frontend can display a warning to the user.
+ */
+const REPORT_MAX_ROWS = 10_000;
+
+// ── CSV helpers ───────────────────────────────────────────────────────────────
+
+const toCSV = (headers, rows) => {
+  const escape = (value) => {
+    if (value == null) return "";
+    const str = String(value).replace(/"/g, '""');
+    return str.includes(",") || str.includes('"') || str.includes("\n")
+      ? `"${str}"`
+      : str;
+  };
+  const lines = [
+    headers.join(","),
+    ...rows.map((row) => headers.map((h) => escape(row[h])).join(",")),
+  ];
+  return lines.join("\n");
+};
+
+const sendCSV = (res, filename, csv) => {
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  // UTF-8 BOM so Excel opens Arabic / mixed-language content correctly.
+  res.send("\uFEFF" + csv);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bookings report
+// GET /api/v1/report/bookings?fromDate=&toDate=&status=&paymentStatus=
+// ─────────────────────────────────────────────────────────────────────────────
+export const exportBookings = asyncHandler(async (req, res) => {
+  const { fromDate, toDate, status, paymentStatus } = req.query;
+
+  const query = {};
+  if (status)        query.status        = status;
+  if (paymentStatus) query.paymentStatus = paymentStatus;
+  if (fromDate || toDate) {
+    query.createdAt = {};
+    if (fromDate) query.createdAt.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.createdAt.$lte = to;
+    }
+  }
+
+  const bookings = await bookingModel
+    .find(query)
+    .populate("provider",  "name type")
+    .populate("createdBy", "userName")
+    .sort({ bookingID: 1 })
+    .limit(REPORT_MAX_ROWS)
+    .lean();
+
+  if (bookings.length === REPORT_MAX_ROWS) {
+    res.setHeader("X-Report-Truncated", "true");
+  }
+
+  const headers = [
+    "bookingID", "date", "status", "paymentStatus", "provider",
+    "customers", "totalToPay", "totalPaid", "remainingBalance",
+    "totalProfit", "createdBy",
+  ];
+
+  const rows = bookings.map((b) => ({
+    bookingID:        b.bookingID,
+    date:             b.createdAt ? new Date(b.createdAt).toLocaleDateString() : "",
+    status:           b.status,
+    paymentStatus:    b.paymentStatus,
+    provider:         b.provider?.name || "",
+    customers:        b.customers?.map((c) => c.name).join(" | ") || "",
+    totalToPay:       b.totalToPay,
+    totalPaid:        b.totalPaid,
+    remainingBalance: b.remainingBalance,
+    totalProfit:      b.totalProfit,
+    createdBy:        b.createdBy?.userName || "",
+  }));
+
+  const dateTag = fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  sendCSV(res, `bookings${dateTag}.csv`, toCSV(headers, rows));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payments report
+// GET /api/v1/report/payments?fromDate=&toDate=&method=
+// ─────────────────────────────────────────────────────────────────────────────
+export const exportPayments = asyncHandler(async (req, res) => {
+  const { fromDate, toDate, method } = req.query;
+
+  const query = {};
+  if (method) query.method = method;
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const payments = await paymentModel
+    .find(query)
+    .populate("booking",    "bookingID")
+    .populate("recordedBy", "userName")
+    .sort({ date: -1 })
+    .limit(REPORT_MAX_ROWS)
+    .lean();
+
+  if (payments.length === REPORT_MAX_ROWS) {
+    res.setHeader("X-Report-Truncated", "true");
+  }
+
+  const headers = ["bookingID", "date", "amount", "method", "notes", "recordedBy"];
+
+  const rows = payments.map((p) => ({
+    bookingID:  p.booking?.bookingID || p.bookingID || "",
+    date:       p.date ? new Date(p.date).toLocaleDateString() : "",
+    amount:     p.amount,
+    method:     p.method,
+    notes:      p.notes || "",
+    recordedBy: p.recordedBy?.userName || "",
+  }));
+
+  const dateTag = fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  sendCSV(res, `payments${dateTag}.csv`, toCSV(headers, rows));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Expenses report
+// GET /api/v1/report/expenses?fromDate=&toDate=&category=
+// ─────────────────────────────────────────────────────────────────────────────
+export const exportExpenses = asyncHandler(async (req, res) => {
+  const { fromDate, toDate, category } = req.query;
+
+  const query = {};
+  if (category) query.category = category;
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const expenses = await expenseModel
+    .find(query)
+    .populate("recordedBy", "userName")
+    .sort({ date: -1 })
+    .limit(REPORT_MAX_ROWS)
+    .lean();
+
+  if (expenses.length === REPORT_MAX_ROWS) {
+    res.setHeader("X-Report-Truncated", "true");
+  }
+
+  const headers = [
+    "date", "category", "description", "amount",
+    "method", "reference", "recordedBy",
+  ];
+
+  const rows = expenses.map((e) => ({
+    date:        e.date ? new Date(e.date).toLocaleDateString() : "",
+    category:    e.category,
+    description: e.description,
+    amount:      e.amount,
+    method:      e.method,
+    reference:   e.reference || "",
+    recordedBy:  e.recordedBy?.userName || "",
+  }));
+
+  const dateTag = fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  sendCSV(res, `expenses${dateTag}.csv`, toCSV(headers, rows));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider payments report
+// GET /api/v1/report/provider-payments?fromDate=&toDate=
+// ─────────────────────────────────────────────────────────────────────────────
+export const exportProviderPayments = asyncHandler(async (req, res) => {
+  const { fromDate, toDate } = req.query;
+
+  const query = {};
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const payments = await providerPaymentModel
+    .find(query)
+    .populate("provider",   "name type")
+    .populate("recordedBy", "userName")
+    .sort({ date: -1 })
+    .limit(REPORT_MAX_ROWS)
+    .lean();
+
+  if (payments.length === REPORT_MAX_ROWS) {
+    res.setHeader("X-Report-Truncated", "true");
+  }
+
+  const headers = [
+    "date", "provider", "providerType", "amount",
+    "method", "reference", "notes", "recordedBy",
+  ];
+
+  const rows = payments.map((p) => ({
+    date:         p.date ? new Date(p.date).toLocaleDateString() : "",
+    provider:     p.provider?.name || "",
+    providerType: p.provider?.type || "",
+    amount:       p.amount,
+    method:       p.method,
+    reference:    p.reference || "",
+    notes:        p.notes || "",
+    recordedBy:   p.recordedBy?.userName || "",
+  }));
+
+  const dateTag = fromDate || toDate ? `_${fromDate || ""}_to_${toDate || ""}` : "";
+  sendCSV(res, `provider-payments${dateTag}.csv`, toCSV(headers, rows));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Profit & Loss summary
+// GET /api/v1/report/pnl?fromDate=&toDate=
+// ─────────────────────────────────────────────────────────────────────────────
+export const getProfitLoss = asyncHandler(async (req, res) => {
+  const { fromDate, toDate } = req.query;
+
+  const dateFilter = {};
+  if (fromDate) dateFilter.$gte = new Date(fromDate);
+  if (toDate) {
+    const to = new Date(toDate);
+    to.setHours(23, 59, 59, 999);
+    dateFilter.$lte = to;
+  }
+
+  const bookingQuery  = Object.keys(dateFilter).length ? { createdAt: dateFilter } : {};
+  const financeQuery  = Object.keys(dateFilter).length ? { date:      dateFilter } : {};
+
+  const [bookingAgg, expenseAgg, providerPaymentAgg] = await Promise.all([
+    bookingModel.aggregate([
+      { $match: bookingQuery },
+      {
+        $group: {
+          _id:          null,
+          totalRevenue: { $sum: "$totalToPay"  },
+          totalPaid:    { $sum: "$totalPaid"   },
+          totalProfit:  { $sum: "$totalProfit" },
+          totalCost:    { $sum: "$totalBuy"    },
+          bookingCount: { $sum: 1              },
+        },
+      },
+    ]),
+    expenseModel.aggregate([
+      { $match: financeQuery },
+      { $group: { _id: null, totalExpenses: { $sum: "$amount" }, expenseCount: { $sum: 1 } } },
+    ]),
+    providerPaymentModel.aggregate([
+      { $match: financeQuery },
+      { $group: { _id: null, totalProviderPayments: { $sum: "$amount" }, paymentCount: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const b  = bookingAgg[0]         || {};
+  const e  = expenseAgg[0]         || {};
+  const pp = providerPaymentAgg[0] || {};
+
+  return res.status(200).json({
+    success: true,
+    message: "Profit & Loss summary retrieved",
+    data: {
+      period: {
+        from: fromDate || null,
+        to:   toDate   || null,
+      },
+      bookings: {
+        count:        b.bookingCount  || 0,
+        totalRevenue: b.totalRevenue  || 0,
+        totalPaid:    b.totalPaid     || 0,
+        totalCost:    b.totalCost     || 0,
+        grossProfit:  b.totalProfit   || 0,
+      },
+      expenses: {
+        count: e.expenseCount || 0,
+        total: e.totalExpenses || 0,
+      },
+      providerPayments: {
+        count: pp.paymentCount         || 0,
+        total: pp.totalProviderPayments || 0,
+      },
+      netProfit:
+        (b.totalProfit || 0) - (e.totalExpenses || 0),
+    },
+    errors: null,
+  });
+});
 </file>
 
 <file path="src/modules/statement/statement.router.js">
@@ -6302,240 +6167,97 @@ export function pagination(page, size) {
 }
 </file>
 
-<file path="src/services/providerSummaryService.js">
-import mongoose from "mongoose";
-import providerModel from "../../DB/model/provider.model.js";
+<file path="src/services/serviceTypeRegistry.js">
+import { SERVICE_TYPES, SERVICE_TYPE_KEYS } from "../config/serviceTypes.js";
+import OfficeServiceType from "../../DB/model/officeServiceType.model.js";
 
-const buildSummaryPipeline = (delta) => {
-  const inc = (field, amount) => ({
-    $add: [{ $ifNull: [`$summary.${field}`, 0] }, amount],
-  });
+/**
+ * In-process service type registry.
+ *
+ * Merges the built-in service types (defined statically in serviceTypes.js)
+ * with office-defined custom types (stored in the OfficeServiceType collection)
+ * into two module-level variables that are cheap to read on every request.
+ *
+ * ── Architecture constraint (important before scaling) ──────────────────────
+ *
+ * `mergedTypes` and `mergedKeys` are process-level singletons. This means:
+ *
+ *   Single process (current deployment): ✅ works correctly.
+ *     refreshServiceTypeRegistry() is called after every mutating controller
+ *     action (create/update/delete), so the registry stays current within
+ *     the single Node process.
+ *
+ *   Multi-process (PM2 cluster / Node cluster): ⚠️ stale reads across workers.
+ *     When an admin creates a service type in worker A, workers B/C/D still
+ *     hold the old registry until they are individually refreshed or restarted.
+ *
+ *   Multi-tenant SaaS (Phase 5): ❌ must be replaced.
+ *     A single flat registry cannot hold per-tenant custom service types.
+ *     Each tenant needs their own isolated set of types.
+ *
+ * Pre-scaling action required:
+ *   Option A (minimal change): add `refreshServiceTypeRegistry()` to a
+ *     startup hook that all workers run, and accept eventual consistency
+ *     (new types propagate after a rolling restart).
+ *   Option B (proper fix): replace the module-level singleton with a Redis
+ *     cache keyed by tenantId. getMergedServiceTypes(tenantId) becomes async
+ *     but is always consistent across processes.
+ *
+ * The public API (getMergedServiceTypes / getMergedServiceTypeKeys) is kept
+ * intentionally simple so callers don't need to change when Option B is
+ * implemented — only this file changes.
+ */
 
-  return [
-    {
-      $set: {
-        "summary.totalBuy": inc("totalBuy", delta.totalBuy ?? 0),
-        "summary.totalSell": inc("totalSell", delta.totalSell ?? 0),
-        "summary.totalWeHavePaid": inc(
-          "totalWeHavePaid",
-          delta.totalWeHavePaid ?? 0,
-        ),
-        "summary.totalCustomersPaidDirect": inc(
-          "totalCustomersPaidDirect",
-          delta.totalCustomersPaidDirect ?? 0,
-        ),
-        "summary.totalCollectedFromProvider": inc(
-          "totalCollectedFromProvider",
-          delta.totalCollectedFromProvider ?? 0,
-        ),
-        "summary.lastSynced": new Date(),
-      },
-    },
-    {
-      $set: {
-        "summary.totalCredits": {
-          $add: [
-            "$summary.totalWeHavePaid",
-            "$summary.totalCustomersPaidDirect",
-          ],
-        },
-        "summary.currentBalance": {
-          $subtract: [
-            {
-              $add: [
-                "$summary.totalBuy",
-                "$summary.totalCollectedFromProvider",
-              ],
-            },
-            {
-              $add: [
-                "$summary.totalWeHavePaid",
-                "$summary.totalCustomersPaidDirect",
-              ],
-            },
-          ],
-        },
-      },
-    },
-    {
-      $set: {
-        "summary.balanceType": {
-          $switch: {
-            branches: [
-              {
-                case: { $gt: ["$summary.currentBalance", 0.01] },
-                then: "we_owe_provider",
-              },
-              {
-                case: { $lt: ["$summary.currentBalance", -0.01] },
-                then: "provider_owes_us",
-              },
-            ],
-            default: "settled",
-          },
-        },
-        "summary.balanceLabel": {
-          $cond: {
-            if: { $gt: ["$summary.currentBalance", 0.01] },
-            then: {
-              $concat: [
-                "Agency owes provider: $",
-                { $toString: { $round: ["$summary.currentBalance", 2] } },
-              ],
-            },
-            else: {
-              $cond: {
-                if: { $lt: ["$summary.currentBalance", -0.01] },
-                then: {
-                  $concat: [
-                    "Provider owes agency: $",
-                    {
-                      $toString: {
-                        $round: [{ $abs: "$summary.currentBalance" }, 2],
-                      },
-                    },
-                  ],
-                },
-                else: "Account settled — no outstanding balance",
-              },
-            },
-          },
-        },
-      },
-    },
-  ];
-};
+let mergedTypes = { ...SERVICE_TYPES };
+let mergedKeys  = [...SERVICE_TYPE_KEYS];
 
-export const applyProviderSummaryDelta = async (providerId, delta) => {
-  if (!providerId) return;
+/** Returns the merged map of all active service type definitions. */
+export const getMergedServiceTypes    = () => mergedTypes;
 
-  const hasChange = Object.values(delta).some((v) => v !== 0);
-  if (!hasChange) return;
+/** Returns the flat array of all active service type keys. */
+export const getMergedServiceTypeKeys = () => mergedKeys;
 
-  try {
-    await providerModel.collection.updateOne(
-      { _id: new mongoose.Types.ObjectId(providerId.toString()) },
-      buildSummaryPipeline(delta),
-    );
-    console.log(`✅ Provider ${providerId} summary synchronized.`);
-  } catch (err) {
-    console.error(
-      `❌ providerSummaryService: delta update failed for ${providerId}:`,
-      err.message,
-    );
+const shapeOfficeType = (doc) => ({
+  key:            doc.key,
+  label:          doc.label,
+  voucherPrefix:  doc.voucherPrefix,
+  durationFields: doc.durationFields?.from ? doc.durationFields : undefined,
+  detailFields:   doc.detailFields ?? [],
+  source:         "office",
+});
+
+/**
+ * Rebuilds the in-process registry from the DB.
+ * Call this after any create / update / delete on OfficeServiceType.
+ */
+export const refreshServiceTypeRegistry = async () => {
+  const custom = await OfficeServiceType.find({ isActive: true }).lean();
+
+  mergedTypes = { ...SERVICE_TYPES };
+  for (const doc of custom) {
+    mergedTypes[doc.key] = shapeOfficeType(doc);
   }
+  mergedKeys = Object.keys(mergedTypes);
 };
 
 /**
- * Extracts per-provider { buy, sell } totals from a booking document.
- * Works with the unified services array — provider-agnostic by design.
- *
- * @param {object} booking - Lean booking document
- * @returns {Map<string, { buy: number, sell: number }>}
+ * Returns a serialisable snapshot of all types for the API response.
+ * Used by GET /api/v1/service-types.
  */
-export const computeServiceDeltas = (booking) => {
-  const map = new Map();
-
-  for (const service of booking.services || []) {
-    if (!service.provider) continue;
-    const k = service.provider.toString();
-    const cur = map.get(k) || { buy: 0, sell: 0 };
-    map.set(k, {
-      buy: cur.buy + (Number(service.buy) || 0),
-      sell: cur.sell + (Number(service.sell) || 0),
-    });
+export const listServiceTypesForApi = () => {
+  const types = {};
+  for (const key of mergedKeys) {
+    const def     = mergedTypes[key];
+    types[key] = {
+      key,
+      label:          def.label,
+      voucherPrefix:  def.voucherPrefix,
+      durationFields: def.durationFields ?? null,
+      detailFields:   def.detailFields   ?? [],
+      source:         SERVICE_TYPES[key] ? "builtin" : "office",
+    };
   }
-
-  return map;
-};
-
-export const resyncProviderSummary = async (providerId) => {
-  const Booking = mongoose.model("Booking");
-  const ProviderPayment = mongoose.model("ProviderPayment");
-  const Payment = mongoose.model("Payment");
-  const ProviderCollection = mongoose.model("ProviderCollection");
-
-  const providerObjId = new mongoose.Types.ObjectId(providerId);
-
-  // Scan all bookings where this provider appears as main or as a service provider
-  const bookings = await Booking.find({
-    $or: [{ provider: providerObjId }, { "services.provider": providerObjId }],
-  }).lean();
-
-  let totalBuy = 0;
-  let totalSell = 0;
-
-  for (const booking of bookings) {
-    for (const service of booking.services || []) {
-      if (service.provider?.toString() === providerId) {
-        totalBuy += Number(service.buy) || 0;
-        totalSell += Number(service.sell) || 0;
-      }
-    }
-  }
-
-  const [provPayAgg, directPayAgg, collectionAgg] = await Promise.all([
-    ProviderPayment.aggregate([
-      { $match: { provider: providerObjId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-    Payment.aggregate([
-      { $match: { providerRecipient: providerObjId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-    ProviderCollection.aggregate([
-      { $match: { provider: providerObjId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-  ]);
-
-  const totalWeHavePaid = provPayAgg[0]?.total || 0;
-  const totalCustomersPaidDirect = directPayAgg[0]?.total || 0;
-  const totalCollectedFromProvider = collectionAgg[0]?.total || 0;
-
-  const totalCredits = totalWeHavePaid + totalCustomersPaidDirect;
-  const currentBalance = totalBuy - totalCredits + totalCollectedFromProvider;
-
-  const balanceType =
-    currentBalance > 0.01
-      ? "we_owe_provider"
-      : currentBalance < -0.01
-        ? "provider_owes_us"
-        : "settled";
-
-  const balanceLabel =
-    balanceType === "we_owe_provider"
-      ? `Agency owes provider: $${currentBalance.toFixed(2)}`
-      : balanceType === "provider_owes_us"
-        ? `Provider owes agency: $${Math.abs(currentBalance).toFixed(2)}`
-        : "Account settled — no outstanding balance";
-
-  await providerModel.findByIdAndUpdate(providerId, {
-    $set: {
-      "summary.totalBuy": totalBuy,
-      "summary.totalSell": totalSell,
-      "summary.totalWeHavePaid": totalWeHavePaid,
-      "summary.totalCustomersPaidDirect": totalCustomersPaidDirect,
-      "summary.totalCollectedFromProvider": totalCollectedFromProvider,
-      "summary.totalCredits": totalCredits,
-      "summary.currentBalance": currentBalance,
-      "summary.balanceType": balanceType,
-      "summary.balanceLabel": balanceLabel,
-      "summary.lastSynced": new Date(),
-    },
-  });
-
-  return {
-    totalBuy,
-    totalSell,
-    totalWeHavePaid,
-    totalCustomersPaidDirect,
-    totalCollectedFromProvider,
-    totalCredits,
-    currentBalance,
-    balanceType,
-    balanceLabel,
-  };
+  return { types, keys: mergedKeys };
 };
 </file>
 
@@ -7011,239 +6733,216 @@ export default async function globalSetup() {
 }
 </file>
 
-<file path="DB/adminSeed.js">
-import logModel    from "./model/log.model.js";
-import userModel    from "./model/user.model.js";
-import counterModel from "./model/counter.model.js";
-import bookingModel from "./model/booking.model.js";
-
-export const seedAdmin = async () => {
-  try {
-    const adminExists = await userModel.findOne({ role: "admin" });
-
-    if (!adminExists) {
-      console.log("🚀 No admin found. Creating initial admin account...");
-
-      const user = await userModel.create({
-        userName: "SuperAdmin",
-        email: "admin@system.com",
-        password: "Admin@123",
-        role: "admin",
-      });
-
-      await logModel.create({
-        user: user._id,
-        action: "ADMIN_SEED",
-        details: { userId: user._id, userName: user.userName },
-      });
-
-      console.log("✅ Initial Admin created: admin@system.com / Admin@123");
-      console.log("⚠️  Change the password immediately after first login!");
-    }
-
-    // ── Booking counter initialisation ────────────────────────────────────────
-    // Find the highest bookingID currently in the database so the global counter
-    // starts above any existing records. Uses $max so it never moves backwards.
-    const topBooking = await bookingModel
-      .findOne({}, { bookingID: 1 })
-      .sort({ bookingID: -1 })
-      .lean();
-
-    const currentMax = topBooking?.bookingID ?? 0;
-
-    await counterModel.findOneAndUpdate(
-      { _id: "booking" },
-      { $max: { seq: currentMax } }, // only sets if new value is larger
-      { upsert: true },
-    );
-
-    if (currentMax > 0) {
-      console.log(`ℹ️  Booking counter initialised to ${currentMax} (existing max ID).`);
-    }
-  } catch (error) {
-    console.error("❌ Error in seed:", error);
-  }
-};
-</file>
-
-<file path="DB/model/provider.model.js">
+<file path="DB/connection.js">
 import mongoose from "mongoose";
+import { seedAdmin } from "./adminSeed.js";
+import { refreshServiceTypeRegistry } from "../src/services/serviceTypeRegistry.js";
 
 /**
- * Embedded financial summary for a provider.
+ * Establishes the MongoDB connection then runs startup tasks sequentially.
  *
- * All fields are updated atomically via a single MongoDB aggregation-pipeline
- * update in providerSummaryService.applyProviderSummaryDelta(). They represent
- * "all-time" totals and are derived from four source collections:
- *
- *   totalBuy                ← Σ(service.buy)  across all bookings
- *   totalSell               ← Σ(service.sell) across all bookings
- *   totalWeHavePaid         ← Σ(ProviderPayment.amount)
- *   totalCustomersPaidDirect← Σ(Payment.amount where providerRecipient = this)
- *   totalCollectedFromProvider ← Σ(ProviderCollection.amount)
- *
- * Derived fields (recomputed in the same DB round-trip):
- *   totalCredits = totalWeHavePaid + totalCustomersPaidDirect
- *   currentBalance = totalBuy − totalCredits + totalCollectedFromProvider
- *   balanceType / balanceLabel = human-readable position
- *
- * Balance semantics:
- *   > 0  → we still owe the provider ("we_owe_provider")
- *   < 0  → provider owes us (they collected more than their service cost)
- *   = 0  → settled
+ * Connection options:
+ *   retryWrites: false — Required for standalone (non-replica-set) MongoDB
+ *     deployments. MongoDB 4+ drivers enable retryable writes by default, but
+ *     retryable writes require a replica set to be active. On a standalone
+ *     instance the driver throws "does not support retryable writes" on the
+ *     very first write operation. Setting this to false disables the feature
+ *     for this connection without affecting any other behaviour.
+ *     When you later deploy MongoDB as a replica set (recommended for
+ *     production), you can remove this option or set it back to true.
  */
-const providerSummarySchema = new mongoose.Schema(
-  {
-    totalBuy: { type: Number, default: 0 },
-    totalSell: { type: Number, default: 0 },
-    totalWeHavePaid: { type: Number, default: 0 },
-    totalCustomersPaidDirect: { type: Number, default: 0 },
-    totalCollectedFromProvider: { type: Number, default: 0 },
-    // Derived — recomputed on every delta update
-    totalCredits: { type: Number, default: 0 },
-    currentBalance: { type: Number, default: 0 },
-    balanceType: {
-      type: String,
-      enum: ["we_owe_provider", "provider_owes_us", "settled"],
-      default: "settled",
-    },
-    balanceLabel: {
-      type: String,
-      default: "Account settled — no outstanding balance",
-    },
-    // When was this summary last written (for debugging / staleness checks)
-    lastSynced: { type: Date, default: null },
-  },
-  { _id: false }, // embedded — no separate _id needed
-);
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.DBURI, {
+      retryWrites: false,
+    });
+    console.log("✅ MongoDB connected");
+  } catch (err) {
+    console.error("❌ MongoDB connection failed:", err.message);
+    process.exit(1);
+  }
 
-const providerSchema = new mongoose.Schema(
-  {
-    name: { type: String, required: true },
-    type: {
-      type: String,
-      enum: ["hotel", "car_rental", "driver_company", "tourism"],
-      required: true,
-    },
-    currentSequence: { type: Number, default: 0 },
-    totalBookings: { type: Number, default: 0 },
-    phone: String,
-    address: String,
+  try {
+    await seedAdmin();
+  } catch (err) {
+    console.error("❌ Admin seed failed:", err.message);
+    process.exit(1);
+  }
 
-    /**
-     * Persisted financial summary — O(1) read instead of multi-collection scan.
-     * Kept in sync automatically by Mongoose hooks on Booking, ProviderPayment,
-     * Payment (controller-level), and ProviderCollection.
-     *
-     * Use providerSummaryService.resyncProviderSummary() to rebuild from scratch
-     * if drift is suspected.
-     */
-    summary: { type: providerSummarySchema, default: () => ({}) },
-  },
-  { timestamps: true },
-);
+  try {
+    await refreshServiceTypeRegistry();
+  } catch (err) {
+    console.error("⚠️  Service type registry refresh failed:", err.message);
+  }
+};
 
-export default mongoose.model("Provider", providerSchema);
+export default connectDB;
 </file>
 
-<file path="DB/model/providerPayment.model.js">
+<file path="DB/model/providerCollection.model.js">
 import mongoose from "mongoose";
 import { applyProviderSummaryDelta } from "../../src/services/providerSummaryService.js";
 
 /**
- * Records money paid OUT to a provider (hotel, car company, etc.).
+ * Records money received FROM a provider who collected on the agency's behalf.
  *
- * Hook design:
- *   post-save fires on BOTH create and update. We capture isNew in pre-save
- *   (_wasNew) and skip the summary increment on updates — edits apply only
- *   the net diff via applyProviderSummaryDelta in the controller directly.
- *   This prevents double-counting when editProviderPayment saves the doc.
+ * Hook design (mirrors providerPayment.model.js):
+ *   pre-save captures isNew → post-save only increments on creation.
+ *   This prevents double-counting if the document is ever re-saved.
+ *
+ * Phase 4: applyProviderSummaryDelta receives a source tag so SyncFailure
+ *   records identify this hook as the drift origin.
  */
-const providerPaymentSchema = new mongoose.Schema(
+const providerCollectionSchema = new mongoose.Schema(
   {
     provider: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Provider",
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      "Provider",
       required: [true, "Provider is required"],
-      index: true,
+      index:    true,
     },
     amount: {
-      type: Number,
+      type:     Number,
       required: [true, "Amount is required"],
-      min: [0.01, "Amount must be greater than 0"],
+      min:      [0.01, "Amount must be greater than 0"],
     },
     date: {
-      type: Date,
-      default: Date.now,
+      type:     Date,
+      default:  Date.now,
       required: true,
     },
     method: {
-      type: String,
-      enum: ["cash", "bank_transfer", "check", "other"],
+      type:    String,
+      enum:    ["cash", "bank_transfer", "check", "other"],
       default: "cash",
     },
     notes: {
-      type: String,
-      trim: true,
+      type:      String,
+      trim:      true,
       maxlength: [300, "Notes too long"],
     },
+    booking: {
+      type:    mongoose.Schema.Types.ObjectId,
+      ref:     "Booking",
+      default: null,
+    },
     reference: {
-      type: String,
-      trim: true,
+      type:      String,
+      trim:      true,
       maxlength: [100, "Reference too long"],
     },
     recordedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      "User",
       required: true,
     },
   },
   { timestamps: true },
 );
 
-providerPaymentSchema.index({ provider: 1, date: -1 });
+providerCollectionSchema.index({ provider: 1, date: -1 });
 
-// ── pre-save: capture isNew BEFORE Mongoose flips it to false ────────────────
-providerPaymentSchema.pre("save", function () {
+// ── pre-save ───────────────────────────────────────────────────────────────────
+providerCollectionSchema.pre("save", function () {
   this._wasNew = this.isNew;
 });
 
-// ── post-save: only increment summary on document CREATION ───────────────────
-// Updates are handled explicitly in editProviderPayment with a net diff delta
-// to avoid double-counting the full amount on every save.
-providerPaymentSchema.post("save", async function () {
-  if (!this._wasNew) return; // skip updates
-  try {
-    await applyProviderSummaryDelta(this.provider, {
-      totalWeHavePaid: this.amount,
-    });
-  } catch (err) {
-    console.error(
-      "❌ Provider summary sync failed after providerPayment save:",
-      err.message,
-    );
-  }
+// ── post-save: only increment on creation ─────────────────────────────────────
+providerCollectionSchema.post("save", async function () {
+  if (!this._wasNew) return;
+  await applyProviderSummaryDelta(
+    this.provider,
+    { totalCollectedFromProvider: this.amount },
+    "providerCollection_save",
+  );
 });
 
-// ── post-deleteOne: reverse the increment ────────────────────────────────────
-providerPaymentSchema.post(
+// ── post-deleteOne: reverse the increment ─────────────────────────────────────
+providerCollectionSchema.post(
   "deleteOne",
   { document: true, query: false },
   async function () {
-    try {
-      await applyProviderSummaryDelta(this.provider, {
-        totalWeHavePaid: -this.amount,
-      });
-    } catch (err) {
-      console.error(
-        "❌ Provider summary sync failed after providerPayment delete:",
-        err.message,
-      );
-    }
+    await applyProviderSummaryDelta(
+      this.provider,
+      { totalCollectedFromProvider: -this.amount },
+      "providerCollection_delete",
+    );
   },
 );
 
-export default mongoose.model("ProviderPayment", providerPaymentSchema);
+export default mongoose.model("ProviderCollection", providerCollectionSchema);
+</file>
+
+<file path="DB/model/user.model.js">
+import mongoose from "mongoose";
+import bcrypt    from "bcrypt";
+import { ALL_ROLES, ROLES } from "../../src/config/roles.js";
+
+/**
+ * User model.
+ *
+ * The role enum is derived from ALL_ROLES (src/config/roles.js) — the single
+ * source of truth. Adding a new role to the config automatically expands this
+ * enum without editing this file.
+ */
+const userSchema = new mongoose.Schema(
+  {
+    userName: {
+      type:      String,
+      required:  [true, "Username is required"],
+      minlength: [3,  "Min length is 3"],
+      maxlength: [25, "Max length is 25"],
+      trim:      true,
+    },
+    email: {
+      type:      String,
+      unique:    true,
+      required:  [true, "Email is required"],
+      lowercase: true,
+      trim:      true,
+    },
+    password: {
+      type:      String,
+      required:  [true, "Password is required"],
+      minlength: 6,
+    },
+    phone: String,
+    role: {
+      type:    String,
+      enum:    ALL_ROLES,           // derived from roles.js — no magic strings here
+      default: ROLES.BOOKING_STAFF, // new users default to least-privilege role
+    },
+    image:         String, // Cloudinary secure URL
+    imagePublicId: String, // Cloudinary public_id (needed for deletion)
+    blocked: {
+      type:    Boolean,
+      default: false,
+    },
+    // Null means "no active reset request". Expiry is enforced in the controller
+    // so the token auto-invalidates without requiring a background job.
+    passwordResetToken:  { type: String, default: null },
+    passwordResetExpiry: { type: Date,   default: null },
+  },
+  { timestamps: true },
+);
+
+// ── Hooks ─────────────────────────────────────────────────────────────────────
+
+userSchema.pre("save", async function () {
+  if (!this.isModified("password")) return;
+  this.password = await bcrypt.hash(
+    this.password,
+    parseInt(process.env.SALTROUND) || 10,
+  );
+});
+
+// ── Instance methods ──────────────────────────────────────────────────────────
+
+userSchema.methods.comparePassword = function (password) {
+  return bcrypt.compare(password, this.password);
+};
+
+export default mongoose.model("User", userSchema);
 </file>
 
 <file path="src/config/serviceTypes.js">
@@ -7512,194 +7211,6 @@ router.post(
   uploadSingle,
   handleUploadError,
   asyncHandler(authController.uploadUserImage),
-);
-
-export default router;
-</file>
-
-<file path="src/modules/auth/auth.validation.js">
-import Joi from "joi";
-
-const passwordPattern = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{6,}$/;
-const passwordMessage =
-  "Password must be at least 6 characters with uppercase, lowercase, and a number";
-
-export const createUser = {
-  body: Joi.object()
-    .required()
-    .keys({
-      userName: Joi.string().min(3).max(25).required().messages({
-        "any.required": "Username is required",
-        "string.min": "Username must be at least 3 characters",
-      }),
-      email: Joi.string().email().required().messages({
-        "any.required": "Email is required",
-      }),
-      password: Joi.string().pattern(passwordPattern).required().messages({
-        "any.required": "Password is required",
-        "string.pattern.base": passwordMessage,
-      }),
-      cPassword: Joi.string().valid(Joi.ref("password")).required().messages({
-        "any.only": "Passwords do not match",
-      }),
-      role: Joi.string()
-        .valid("admin", "booking_staff", "accounting_staff")
-        .required()
-        .messages({
-          "any.only": "Role must be admin, booking_staff, or accounting_staff",
-          "any.required": "Role is required",
-        }),
-    }),
-};
-
-export const updateUser = {
-  body: Joi.object({
-    userName: Joi.string().min(3).max(25).messages({
-      "string.min": "Username must be at least 3 characters",
-    }),
-    email: Joi.string().email().messages({
-      "string.email": "Must be a valid email address",
-    }),
-    phone: Joi.string()
-      .pattern(/^\+?[\d\s\-().]{7,20}$/)
-      .allow("")
-      .messages({
-        "string.pattern.base": "Invalid phone number format",
-      }),
-    role: Joi.string()
-      .valid("admin", "booking_staff", "accounting_staff")
-      .messages({
-        "any.only": "Role must be admin, booking_staff, or accounting_staff",
-      }),
-    blocked: Joi.boolean(),
-    password: Joi.string().pattern(passwordPattern).messages({
-      "string.pattern.base": passwordMessage,
-    }),
-    cPassword: Joi.string()
-      .valid(Joi.ref("password"))
-      .when("password", {
-        is: Joi.exist(),
-        then: Joi.required(),
-        otherwise: Joi.forbidden(),
-      })
-      .messages({
-        "any.only": "Passwords do not match",
-        "any.required": "Confirm password is required when changing password",
-      }),
-  })
-    .min(1)
-    .messages({ "object.min": "At least one field is required to update" }),
-  params: Joi.object({
-    id: Joi.string().hex().length(24).required().messages({
-      "string.hex": "Invalid user ID",
-      "string.length": "Invalid user ID",
-    }),
-  }),
-};
-
-// ── NEW: self-service update (non-admin users updating their own profile) ────
-// Allows only safe personal fields — never role, blocked, or email.
-export const updateSelf = {
-  body: Joi.object({
-    userName: Joi.string().min(3).max(25).messages({
-      "string.min": "Username must be at least 3 characters",
-    }),
-    phone: Joi.string()
-      .pattern(/^\+?[\d\s\-().]{7,20}$/)
-      .allow("")
-      .messages({
-        "string.pattern.base": "Invalid phone number format",
-      }),
-    password: Joi.string().pattern(passwordPattern).messages({
-      "string.pattern.base": passwordMessage,
-    }),
-    cPassword: Joi.string()
-      .valid(Joi.ref("password"))
-      .when("password", {
-        is: Joi.exist(),
-        then: Joi.required(),
-        otherwise: Joi.forbidden(),
-      })
-      .messages({
-        "any.only": "Passwords do not match",
-        "any.required": "Confirm password is required when changing password",
-      }),
-  })
-    .min(1)
-    .messages({ "object.min": "At least one field is required to update" }),
-};
-
-// ── NEW: user ID param only ───────────────────────────────────────────────────
-export const userIdParam = {
-  params: Joi.object({
-    id: Joi.string().hex().length(24).required().messages({
-      "string.hex": "Invalid user ID",
-      "string.length": "Invalid user ID",
-    }),
-  }),
-};
-</file>
-
-<file path="src/modules/provider/provider.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import { validation } from "../../middleware/validation.js";
-import * as providerController from "./controller/provider.controller.js";
-import * as validators from "./provider.validation.js";
-import { endpoint } from "../indexEndpoint.js";
-
-const router = Router();
-
-// ── Static routes before dynamic ones ────────────────────────────────────────
-
-// POST /api/v1/provider/resync-all — rebuild all provider summaries (migration)
-router.post(
-  "/resync-all",
-  auth(endpoint.AdminOnly),
-  providerController.resyncAllProviders,
-);
-
-// ── Standard CRUD ─────────────────────────────────────────────────────────────
-
-router.post(
-  "/create",
-  auth(endpoint.provider_manage),
-  validation(validators.createProvider),
-  providerController.createProvider,
-);
-
-router.get(
-  "/getAll",
-  auth(endpoint.provider_view),
-  providerController.getAllProviders,
-);
-
-router.get(
-  "/get/:id",
-  auth(endpoint.provider_view),
-  providerController.getProviderById,
-);
-
-router.patch(
-  "/update/:id",
-  auth(endpoint.provider_manage),
-  validation(validators.updateProvider),
-  providerController.updateProvider,
-);
-
-router.delete(
-  "/delete/:id",
-  auth(endpoint.provider_manage),
-  providerController.deleteProvider,
-);
-
-// ── Per-provider resync (placed after /delete/:id intentionally) ─────────────
-
-// POST /api/v1/provider/:id/resync — rebuild a single provider's summary
-router.post(
-  "/:id/resync",
-  auth(endpoint.AdminOnly),
-  providerController.resyncProvider,
 );
 
 export default router;
@@ -10217,6 +9728,329 @@ describe("assignBookingSequences()", () => {
 });
 </file>
 
+<file path="DB/model/provider.model.js">
+import mongoose from "mongoose";
+
+/**
+ * Embedded financial summary for a provider.
+ *
+ * All fields are updated atomically via a single MongoDB aggregation-pipeline
+ * update in providerSummaryService.applyProviderSummaryDelta(). They represent
+ * "all-time" totals and are derived from four source collections:
+ *
+ *   totalBuy                 ← Σ(service.buy)  across all bookings for this provider
+ *   totalSell                ← Σ(service.sell) across all bookings for this provider
+ *   totalWeHavePaid          ← Σ(ProviderPayment.amount)
+ *   totalCustomersPaidDirect ← Σ(Payment.amount where providerRecipient = this)
+ *   totalCollectedFromProvider ← Σ(ProviderCollection.amount)
+ *
+ * Derived fields (recomputed in the same DB round-trip by the pipeline):
+ *   totalCredits   = totalWeHavePaid + totalCustomersPaidDirect
+ *   currentBalance = totalBuy − totalCredits + totalCollectedFromProvider
+ *   balanceType / balanceLabel = human-readable financial position
+ *
+ * Balance semantics:
+ *   currentBalance > 0  → we still owe the provider   ("we_owe_provider")
+ *   currentBalance < 0  → provider owes us            ("provider_owes_us")
+ *   currentBalance ≈ 0  → account is settled          ("settled")
+ */
+const providerSummarySchema = new mongoose.Schema(
+  {
+    totalBuy:                   { type: Number, default: 0 },
+    totalSell:                  { type: Number, default: 0 },
+    totalWeHavePaid:            { type: Number, default: 0 },
+    totalCustomersPaidDirect:   { type: Number, default: 0 },
+    totalCollectedFromProvider: { type: Number, default: 0 },
+    // Derived — recomputed atomically on every delta update
+    totalCredits:   { type: Number, default: 0 },
+    currentBalance: { type: Number, default: 0 },
+    balanceType: {
+      type:    String,
+      enum:    ["we_owe_provider", "provider_owes_us", "settled"],
+      default: "settled",
+    },
+    /**
+     * @deprecated balanceLabel stores a hard-coded English sentence in the DB.
+     *
+     * Problem: Arabic and Turkish UI users see English text because the label
+     * is generated server-side (in providerSummaryService.js) and persisted,
+     * ignoring the client's locale entirely.
+     *
+     * The authoritative machine-readable field is `balanceType` (above). The
+     * display label should be derived from it on the frontend using the i18n
+     * system so it automatically respects the active language.
+     *
+     * Migration plan (Phase 5 / pre-multi-tenant):
+     *   Step 1: Replace all frontend reads of `provider.summary.balanceLabel`
+     *           with a local `t("providers.balanceType.${balanceType}")` call.
+     *   Step 2: Once no frontend consumer reads balanceLabel, remove this field
+     *           from the schema and from buildSummaryPipeline in
+     *           providerSummaryService.js.
+     *   Step 3: Run a one-off migration to $unset balanceLabel from all existing
+     *           provider documents.
+     *
+     * Do NOT remove this field until Step 1 is verified in production.
+     */
+    balanceLabel: {
+      type:    String,
+      default: "Account settled — no outstanding balance",
+    },
+    // When was this summary last written — useful for staleness checks / debugging
+    lastSynced: { type: Date, default: null },
+  },
+  { _id: false }, // embedded — no separate _id needed
+);
+
+const providerSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    type: {
+      type:     String,
+      enum:     ["hotel", "car_rental", "driver_company", "tourism"],
+      required: true,
+    },
+    // currentSequence is a high-water mark — NEVER decremented.
+    // Decrementing it causes duplicate service numbers. Only totalBookings (a
+    // statistics counter) is decremented when a booking is deleted.
+    currentSequence: { type: Number, default: 0 },
+    totalBookings:   { type: Number, default: 0 },
+    phone:   String,
+    address: String,
+    /**
+     * Persisted financial summary — O(1) read per provider instead of a
+     * multi-collection full scan. Kept in sync automatically by Mongoose hooks
+     * on Booking, ProviderPayment, Payment (controller-level), and
+     * ProviderCollection.
+     *
+     * If drift is suspected use:
+     *   POST /api/v1/provider/:id/resync
+     *   POST /api/v1/provider/resync-all
+     */
+    summary: { type: providerSummarySchema, default: () => ({}) },
+  },
+  { timestamps: true },
+);
+
+export default mongoose.model("Provider", providerSchema);
+</file>
+
+<file path="DB/model/providerPayment.model.js">
+import mongoose from "mongoose";
+import { applyProviderSummaryDelta } from "../../src/services/providerSummaryService.js";
+
+/**
+ * Records money paid OUT to a provider (hotel, car company, etc.).
+ *
+ * Hook design:
+ *   post-save fires on BOTH create and update. We capture isNew in pre-save
+ *   (_wasNew) and only increment the summary on document creation.
+ *   Updates are handled explicitly in editProviderPayment with a net diff delta
+ *   to prevent double-counting the full amount on every save.
+ *
+ * Phase 4: applyProviderSummaryDelta now receives a source tag so any
+ *   resulting SyncFailure record identifies exactly which hook caused the drift.
+ */
+const providerPaymentSchema = new mongoose.Schema(
+  {
+    provider: {
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      "Provider",
+      required: [true, "Provider is required"],
+      index:    true,
+    },
+    amount: {
+      type:     Number,
+      required: [true, "Amount is required"],
+      min:      [0.01, "Amount must be greater than 0"],
+    },
+    date: {
+      type:     Date,
+      default:  Date.now,
+      required: true,
+    },
+    method: {
+      type:    String,
+      enum:    ["cash", "bank_transfer", "check", "other"],
+      default: "cash",
+    },
+    notes: {
+      type:      String,
+      trim:      true,
+      maxlength: [300, "Notes too long"],
+    },
+    reference: {
+      type:      String,
+      trim:      true,
+      maxlength: [100, "Reference too long"],
+    },
+    recordedBy: {
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      "User",
+      required: true,
+    },
+  },
+  { timestamps: true },
+);
+
+providerPaymentSchema.index({ provider: 1, date: -1 });
+
+// ── pre-save: capture isNew BEFORE Mongoose flips it to false ─────────────────
+providerPaymentSchema.pre("save", function () {
+  this._wasNew = this.isNew;
+});
+
+// ── post-save: only increment summary on document CREATION ────────────────────
+providerPaymentSchema.post("save", async function () {
+  if (!this._wasNew) return; // updates handled explicitly in the controller
+  await applyProviderSummaryDelta(
+    this.provider,
+    { totalWeHavePaid: this.amount },
+    "providerPayment_save",
+  );
+});
+
+// ── post-deleteOne: reverse the increment ─────────────────────────────────────
+providerPaymentSchema.post(
+  "deleteOne",
+  { document: true, query: false },
+  async function () {
+    await applyProviderSummaryDelta(
+      this.provider,
+      { totalWeHavePaid: -this.amount },
+      "providerPayment_delete",
+    );
+  },
+);
+
+export default mongoose.model("ProviderPayment", providerPaymentSchema);
+</file>
+
+<file path="src/modules/auth/auth.validation.js">
+import Joi from "joi";
+import { ROLES, ALL_ROLES } from "../../config/roles.js";
+
+const passwordPattern = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{6,}$/;
+const passwordMessage =
+  "Password must be at least 6 characters with uppercase, lowercase, and a number";
+
+// Role error message is derived from ALL_ROLES so it stays accurate
+// when a new role is added to the config.
+const roleValidMessage = `Role must be one of: ${ALL_ROLES.join(", ")}`;
+
+export const createUser = {
+  body: Joi.object()
+    .required()
+    .keys({
+      userName: Joi.string().min(3).max(25).required().messages({
+        "any.required": "Username is required",
+        "string.min":   "Username must be at least 3 characters",
+      }),
+      email: Joi.string().email().required().messages({
+        "any.required": "Email is required",
+      }),
+      password: Joi.string().pattern(passwordPattern).required().messages({
+        "any.required":        "Password is required",
+        "string.pattern.base": passwordMessage,
+      }),
+      cPassword: Joi.string().valid(Joi.ref("password")).required().messages({
+        "any.only": "Passwords do not match",
+      }),
+      // Joi.valid(...ALL_ROLES) expands to .valid("admin", "booking_staff", "accounting_staff").
+      // Adding a role to ROLES automatically updates validation — no changes needed here.
+      role: Joi.string().valid(...ALL_ROLES).required().messages({
+        "any.only":    roleValidMessage,
+        "any.required": "Role is required",
+      }),
+    }),
+};
+
+export const updateUser = {
+  body: Joi.object({
+    userName: Joi.string().min(3).max(25).messages({
+      "string.min": "Username must be at least 3 characters",
+    }),
+    email: Joi.string().email().messages({
+      "string.email": "Must be a valid email address",
+    }),
+    phone: Joi.string()
+      .pattern(/^\+?[\d\s\-().]{7,20}$/)
+      .allow("")
+      .messages({
+        "string.pattern.base": "Invalid phone number format",
+      }),
+    role: Joi.string().valid(...ALL_ROLES).messages({
+      "any.only": roleValidMessage,
+    }),
+    blocked:  Joi.boolean(),
+    password: Joi.string().pattern(passwordPattern).messages({
+      "string.pattern.base": passwordMessage,
+    }),
+    cPassword: Joi.string()
+      .valid(Joi.ref("password"))
+      .when("password", {
+        is:        Joi.exist(),
+        then:      Joi.required(),
+        otherwise: Joi.forbidden(),
+      })
+      .messages({
+        "any.only":    "Passwords do not match",
+        "any.required": "Confirm password is required when changing password",
+      }),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    id: Joi.string().hex().length(24).required().messages({
+      "string.hex":    "Invalid user ID",
+      "string.length": "Invalid user ID",
+    }),
+  }),
+};
+
+// ── Self-service profile update ───────────────────────────────────────────────
+// Non-admin users may only change safe personal fields.
+// role, blocked, and email are intentionally excluded.
+export const updateSelf = {
+  body: Joi.object({
+    userName: Joi.string().min(3).max(25).messages({
+      "string.min": "Username must be at least 3 characters",
+    }),
+    phone: Joi.string()
+      .pattern(/^\+?[\d\s\-().]{7,20}$/)
+      .allow("")
+      .messages({
+        "string.pattern.base": "Invalid phone number format",
+      }),
+    password: Joi.string().pattern(passwordPattern).messages({
+      "string.pattern.base": passwordMessage,
+    }),
+    cPassword: Joi.string()
+      .valid(Joi.ref("password"))
+      .when("password", {
+        is:        Joi.exist(),
+        then:      Joi.required(),
+        otherwise: Joi.forbidden(),
+      })
+      .messages({
+        "any.only":    "Passwords do not match",
+        "any.required": "Confirm password is required when changing password",
+      }),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+};
+
+// ── User ID param only ────────────────────────────────────────────────────────
+export const userIdParam = {
+  params: Joi.object({
+    id: Joi.string().hex().length(24).required().messages({
+      "string.hex":    "Invalid user ID",
+      "string.length": "Invalid user ID",
+    }),
+  }),
+};
+</file>
+
 <file path="src/modules/payment/payment.validation.js">
 import Joi from "joi";
 
@@ -10291,6 +10125,333 @@ export const editPayment = {
       "string.hex": "Invalid payment ID",
     }),
   }),
+};
+</file>
+
+<file path="src/modules/provider/provider.router.js">
+import { Router } from "express";
+import { auth }       from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as providerController from "./controller/provider.controller.js";
+import * as validators         from "./provider.validation.js";
+import { endpoint }            from "../indexEndpoint.js";
+
+const router = Router();
+
+// ── Static routes MUST come before /:id dynamic routes ───────────────────────
+// Express matches routes in registration order. Any static segment placed after
+// /:id will be swallowed by the param matcher (e.g. "sync-failures" would be
+// treated as an id value if registered after "/:id/resync").
+
+// POST /api/v1/provider/resync-all
+router.post(
+  "/resync-all",
+  auth(endpoint.AdminOnly),
+  providerController.resyncAllProviders,
+);
+
+// GET /api/v1/provider/sync-failures
+// Returns provider summary drift events (Phase 4 SyncFailure model).
+// ?resolved=false (default) | ?resolved=true | ?resolved=all
+// ?providerId=<ObjectId>  to filter by provider
+router.get(
+  "/sync-failures",
+  auth(endpoint.AdminOnly),
+  providerController.getSyncFailures,
+);
+
+// ── Standard CRUD ─────────────────────────────────────────────────────────────
+
+router.post(
+  "/create",
+  auth(endpoint.provider_manage),
+  validation(validators.createProvider),
+  providerController.createProvider,
+);
+
+router.get(
+  "/getAll",
+  auth(endpoint.provider_view),
+  providerController.getAllProviders,
+);
+
+router.get(
+  "/get/:id",
+  auth(endpoint.provider_view),
+  providerController.getProviderById,
+);
+
+router.patch(
+  "/update/:id",
+  auth(endpoint.provider_manage),
+  validation(validators.updateProvider),
+  providerController.updateProvider,
+);
+
+router.delete(
+  "/delete/:id",
+  auth(endpoint.provider_manage),
+  providerController.deleteProvider,
+);
+
+// ── Dynamic :id routes LAST ───────────────────────────────────────────────────
+
+// POST /api/v1/provider/:id/resync
+router.post(
+  "/:id/resync",
+  auth(endpoint.AdminOnly),
+  providerController.resyncProvider,
+);
+
+export default router;
+</file>
+
+<file path="src/services/providerSummaryService.js">
+import mongoose from "mongoose";
+import providerModel from "../../DB/model/provider.model.js";
+
+// ── Shared balance helper ─────────────────────────────────────────────────────
+
+/**
+ * Derives balance type and display label from a numeric balance.
+ * Single source of truth — used by resyncProviderSummary.
+ * The buildSummaryPipeline uses equivalent MongoDB expression syntax.
+ */
+export const computeBalanceInfo = (currentBalance) => {
+  if (currentBalance > 0.01) {
+    return {
+      balanceType:  "we_owe_provider",
+      balanceLabel: `Agency owes provider: $${currentBalance.toFixed(2)}`,
+    };
+  }
+  if (currentBalance < -0.01) {
+    return {
+      balanceType:  "provider_owes_us",
+      balanceLabel: `Provider owes agency: $${Math.abs(currentBalance).toFixed(2)}`,
+    };
+  }
+  return {
+    balanceType:  "settled",
+    balanceLabel: "Account settled — no outstanding balance",
+  };
+};
+
+// ── Sync failure recorder ─────────────────────────────────────────────────────
+
+/**
+ * Persists a provider summary drift event to the SyncFailure collection.
+ *
+ * Called from the catch block in applyProviderSummaryDelta so that every
+ * drift event creates a queryable record instead of disappearing into logs.
+ * Admins can find unresolved failures and trigger a targeted resync.
+ *
+ * This function never throws — a failure to record the failure should not
+ * create a recursive error chain.
+ */
+const recordSyncFailure = async ({ providerId, source, delta, errorMessage }) => {
+  try {
+    const SyncFailure = mongoose.model("SyncFailure");
+    await SyncFailure.create({ providerId, source, delta, errorMessage });
+  } catch (persistErr) {
+    // If even the failure record can't be written, we've hit a serious DB
+    // issue. Log to stderr so it at least shows up in any log aggregator.
+    console.error(
+      "❌ CRITICAL: Could not persist SyncFailure record.",
+      "Original error:", errorMessage,
+      "Persist error:",  persistErr.message,
+    );
+  }
+};
+
+export { recordSyncFailure };
+
+// ── Incremental delta pipeline (MongoDB aggregation-pipeline expression) ───────
+
+const buildSummaryPipeline = (delta) => {
+  const inc = (field, amount) => ({
+    $add: [{ $ifNull: [`$summary.${field}`, 0] }, amount],
+  });
+
+  return [
+    {
+      $set: {
+        "summary.totalBuy":                   inc("totalBuy",                   delta.totalBuy                   ?? 0),
+        "summary.totalSell":                  inc("totalSell",                  delta.totalSell                  ?? 0),
+        "summary.totalWeHavePaid":            inc("totalWeHavePaid",            delta.totalWeHavePaid            ?? 0),
+        "summary.totalCustomersPaidDirect":   inc("totalCustomersPaidDirect",   delta.totalCustomersPaidDirect   ?? 0),
+        "summary.totalCollectedFromProvider": inc("totalCollectedFromProvider",  delta.totalCollectedFromProvider ?? 0),
+        "summary.lastSynced":                 new Date(),
+      },
+    },
+    {
+      $set: {
+        "summary.totalCredits": {
+          $add: ["$summary.totalWeHavePaid", "$summary.totalCustomersPaidDirect"],
+        },
+        "summary.currentBalance": {
+          $subtract: [
+            { $add: ["$summary.totalBuy", "$summary.totalCollectedFromProvider"] },
+            { $add: ["$summary.totalWeHavePaid", "$summary.totalCustomersPaidDirect"] },
+          ],
+        },
+      },
+    },
+    {
+      $set: {
+        "summary.balanceType": {
+          $switch: {
+            branches: [
+              { case: { $gt: ["$summary.currentBalance",  0.01] }, then: "we_owe_provider"  },
+              { case: { $lt: ["$summary.currentBalance", -0.01] }, then: "provider_owes_us" },
+            ],
+            default: "settled",
+          },
+        },
+        "summary.balanceLabel": {
+          $cond: {
+            if:   { $gt: ["$summary.currentBalance", 0.01] },
+            then: { $concat: ["Agency owes provider: $", { $toString: { $round: ["$summary.currentBalance", 2] } }] },
+            else: {
+              $cond: {
+                if:   { $lt: ["$summary.currentBalance", -0.01] },
+                then: { $concat: ["Provider owes agency: $", { $toString: { $round: [{ $abs: "$summary.currentBalance" }, 2] } }] },
+                else: "Account settled — no outstanding balance",
+              },
+            },
+          },
+        },
+      },
+    },
+  ];
+};
+
+// ── Incremental delta update ──────────────────────────────────────────────────
+
+/**
+ * Applies an incremental financial delta to a provider's summary.
+ *
+ * Error handling (Phase 4):
+ *   On failure, the event is written to the SyncFailure collection so it
+ *   can be detected and recovered via the resync endpoint. The error is also
+ *   logged to stderr. This replaces the previous console.error-only approach.
+ *
+ * @param {string|ObjectId} providerId
+ * @param {object} delta - Fields to increment (all optional, default 0).
+ * @param {string} [source] - Identifies which hook triggered this call.
+ */
+export const applyProviderSummaryDelta = async (providerId, delta, source = "unknown") => {
+  if (!providerId) return;
+
+  const hasChange = Object.values(delta).some((v) => v !== 0);
+  if (!hasChange) return;
+
+  try {
+    await providerModel.collection.updateOne(
+      { _id: new mongoose.Types.ObjectId(providerId.toString()) },
+      buildSummaryPipeline(delta),
+    );
+  } catch (err) {
+    console.error(
+      `❌ providerSummaryService [${source}]: delta update failed for provider ${providerId}:`,
+      err.message,
+    );
+
+    // Persist the failure for admin monitoring and resync targeting.
+    // The booking/payment is already committed — this records the drift so
+    // it can be detected and resolved without relying on log monitoring.
+    await recordSyncFailure({
+      providerId: providerId.toString(),
+      source,
+      delta,
+      errorMessage: err.message,
+    });
+  }
+};
+
+// ── Delta extraction from a booking document ──────────────────────────────────
+
+export const computeServiceDeltas = (booking) => {
+  const map = new Map();
+  for (const service of booking.services || []) {
+    if (!service.provider) continue;
+    const k   = service.provider.toString();
+    const cur = map.get(k) || { buy: 0, sell: 0 };
+    map.set(k, {
+      buy:  cur.buy  + (Number(service.buy)  || 0),
+      sell: cur.sell + (Number(service.sell) || 0),
+    });
+  }
+  return map;
+};
+
+// ── Full resync ───────────────────────────────────────────────────────────────
+
+export const resyncProviderSummary = async (providerId) => {
+  const Booking            = mongoose.model("Booking");
+  const ProviderPayment    = mongoose.model("ProviderPayment");
+  const Payment            = mongoose.model("Payment");
+  const ProviderCollection = mongoose.model("ProviderCollection");
+  const SyncFailure        = mongoose.model("SyncFailure");
+
+  const providerObjId = new mongoose.Types.ObjectId(providerId);
+
+  const [bookingAgg, provPayAgg, directPayAgg, collectionAgg] = await Promise.all([
+    Booking.aggregate([
+      { $match:  { "services.provider": providerObjId } },
+      { $unwind: "$services" },
+      { $match:  { "services.provider": providerObjId } },
+      { $group:  { _id: null, totalBuy: { $sum: "$services.buy" }, totalSell: { $sum: "$services.sell" } } },
+    ]),
+    ProviderPayment.aggregate([
+      { $match: { provider: providerObjId } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+    Payment.aggregate([
+      { $match: { providerRecipient: providerObjId } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+    ProviderCollection.aggregate([
+      { $match: { provider: providerObjId } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+  ]);
+
+  const totalBuy                   = bookingAgg[0]?.totalBuy  ?? 0;
+  const totalSell                  = bookingAgg[0]?.totalSell ?? 0;
+  const totalWeHavePaid            = provPayAgg[0]?.total     ?? 0;
+  const totalCustomersPaidDirect   = directPayAgg[0]?.total   ?? 0;
+  const totalCollectedFromProvider = collectionAgg[0]?.total  ?? 0;
+
+  const totalCredits   = totalWeHavePaid + totalCustomersPaidDirect;
+  const currentBalance = totalBuy - totalCredits + totalCollectedFromProvider;
+  const { balanceType, balanceLabel } = computeBalanceInfo(currentBalance);
+
+  await providerModel.findByIdAndUpdate(providerId, {
+    $set: {
+      "summary.totalBuy":                   totalBuy,
+      "summary.totalSell":                  totalSell,
+      "summary.totalWeHavePaid":            totalWeHavePaid,
+      "summary.totalCustomersPaidDirect":   totalCustomersPaidDirect,
+      "summary.totalCollectedFromProvider": totalCollectedFromProvider,
+      "summary.totalCredits":               totalCredits,
+      "summary.currentBalance":             currentBalance,
+      "summary.balanceType":                balanceType,
+      "summary.balanceLabel":               balanceLabel,
+      "summary.lastSynced":                 new Date(),
+    },
+  });
+
+  // Mark all unresolved SyncFailure records for this provider as resolved
+  await SyncFailure.updateMany(
+    { providerId: providerObjId, resolved: false },
+    { $set: { resolved: true, resolvedAt: new Date() } },
+  );
+
+  return {
+    totalBuy, totalSell, totalWeHavePaid,
+    totalCustomersPaidDirect, totalCollectedFromProvider,
+    totalCredits, currentBalance, balanceType, balanceLabel,
+  };
 };
 </file>
 
@@ -10420,6 +10581,72 @@ export const createAdminWithToken = async (overrides = {}) => {
 export const createBookingStaffWithToken = async (overrides = {}) => {
   const user = await createUser({ role: "booking_staff", ...overrides });
   return { user, authHeader: getAuthHeader(user) };
+};
+</file>
+
+<file path="DB/adminSeed.js">
+import { ROLES } from "../src/config/roles.js";
+import logModel     from "./model/log.model.js";
+import userModel    from "./model/user.model.js";
+import counterModel from "./model/counter.model.js";
+import bookingModel from "./model/booking.model.js";
+
+/**
+ * Seeds the initial admin account and initialises the booking counter.
+ *
+ * Phase 1 (security): credentials read from env vars — never committed to git.
+ * Phase 3 (clean code): role assigned via ROLES.ADMIN constant — no magic string.
+ *
+ * Set in config/.env:
+ *   ADMIN_SEED_EMAIL=your-admin@domain.com
+ *   ADMIN_SEED_PASSWORD=YourStrongPassword@2025
+ */
+export const seedAdmin = async () => {
+  const seedEmail    = process.env.ADMIN_SEED_EMAIL    || "admin@system.com";
+  const seedPassword = process.env.ADMIN_SEED_PASSWORD || "Admin@123";
+
+  const adminExists = await userModel.findOne({ role: ROLES.ADMIN });
+
+  if (!adminExists) {
+    console.log("🚀 No admin found — creating initial admin account...");
+
+    const user = await userModel.create({
+      userName: "SuperAdmin",
+      email:    seedEmail,
+      password: seedPassword,
+      role:     ROLES.ADMIN,
+    });
+
+    await logModel.create({
+      user:    user._id,
+      action:  "ADMIN_SEED",
+      details: { userId: user._id, userName: user.userName },
+    });
+
+    console.log(`✅ Initial admin created: ${seedEmail}`);
+    console.log("⚠️  Change the default password immediately after first login!");
+  }
+
+  // ── Booking counter initialisation ─────────────────────────────────────────
+  // Finds the highest bookingID already in the DB so the counter never resets
+  // below existing data on a fresh deployment or server restart.
+  // $max is idempotent — safe to run on every startup.
+  const topBooking = await bookingModel
+    .findOne({}, { bookingID: 1 })
+    .sort({ bookingID: -1 })
+    .lean();
+
+  const currentMax = topBooking?.bookingID ?? 0;
+
+  await counterModel.findOneAndUpdate(
+    { _id: "booking" },
+    { $max: { seq: currentMax } },
+    { upsert: true },
+  );
+
+  if (currentMax > 0) {
+    console.log(`ℹ️  Booking counter initialised to ${currentMax} (existing max ID).`);
+  }
 };
 </file>
 
@@ -11096,572 +11323,6 @@ export const getActiveServices = asyncHandler(async (req, res) => {
 });
 </file>
 
-<file path="package.json">
-{
-  "name": "booking",
-  "version": "2.0.0",
-  "description": "Tourism booking management system",
-  "main": "app.js",
-  "scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
-    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/unit",
-    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/integration",
-    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --watch",
-    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage"
-  },
-  "type": "module",
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "bcrypt": "^6.0.0",
-    "cloudinary": "^2.8.0",
-    "cors": "^2.8.6",
-    "dotenv": "^17.2.3",
-    "exceljs": "^4.4.0",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.3.2",
-    "helmet": "^8.1.0",
-    "joi": "^18.0.2",
-    "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.1.2",
-    "multer": "^2.0.2",
-    "nanoid": "^5.1.6",
-    "nodemailer": "^7.0.12",
-    "pdfkit": "^0.18.0",
-    "svg-to-pdfkit": "^0.1.8"
-  },
-  "devDependencies": {
-    "jest": "^29.7.0",
-    "mongodb-memory-server": "^10.0.0",
-    "supertest": "^7.0.0"
-  }
-}
-</file>
-
-<file path="src/modules/auth/controller/auth.controller.js">
-import crypto from "crypto";
-import sendEmail from "../../../services/email.js";
-import { uploadImage, deleteImage } from "../../../services/cloudinary.js";
-import jwt from "jsonwebtoken";
-import userModel from "../../../../DB/model/user.model.js";
-import logModel from "../../../../DB/model/log.model.js";
-import refreshTokenModel from "../../../../DB/model/refreshToken.model.js";
-import { nanoid } from "nanoid";
-import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import { pagination } from "../../../services/pagination.js";
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-const ACCESS_TOKEN_EXPIRY      = process.env.ACCESS_TOKEN_EXPIRY || "1h";
-const REFRESH_TOKEN_EXPIRY_DAYS = 7;
-
-const signAccessToken = (userId) =>
-  jwt.sign({ id: userId }, process.env.SIGNINTOKEN, {
-    expiresIn: ACCESS_TOKEN_EXPIRY,
-  });
-
-const createRefreshToken = async (userId, req) => {
-  const raw  = crypto.randomBytes(40).toString("hex");
-  const hash = crypto.createHash("sha256").update(raw).digest("hex");
-
-  await refreshTokenModel.create({
-    user:      userId,
-    tokenHash: hash,
-    expiresAt: new Date(
-      Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
-    ),
-    userAgent: req.headers["user-agent"],
-    ip:        req.ip,
-  });
-
-  return raw;
-};
-
-// ── Controllers ───────────────────────────────────────────────────────────────
-
-export const signIn = asyncHandler(async (req, res, next) => {
-  const { email, password } = req.body;
-
-  const user = await userModel.findOne({ email });
-  if (!user)
-    return next(new Error("Invalid login credentials", { cause: 400 }));
-
-  if (user.blocked) {
-    return res
-      .status(403)
-      .json({ success: false, message: "Account is blocked" });
-  }
-
-  const isMatch = await user.comparePassword(password);
-  if (!isMatch)
-    return next(new Error("Invalid login credentials", { cause: 400 }));
-
-  const accessToken  = signAccessToken(user._id);
-  const refreshToken = await createRefreshToken(user._id, req);
-
-  return res.status(200).json({
-    success: true,
-    message: "Login successfully",
-    data: {
-      accessToken,
-      refreshToken,
-      expiresIn: ACCESS_TOKEN_EXPIRY,
-      user: {
-        id:       user._id,
-        userName: user.userName,
-        email:    user.email,
-        role:     user.role,
-        image:    user.image || null,
-      },
-    },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Refresh access token  —  with refresh token ROTATION
-//
-// Security model:
-//   On every successful refresh the used token is DELETED and a brand new
-//   refresh token is issued. This means each token can only be used once.
-//
-//   Attack detection: if a stolen token is used before the legitimate user
-//   refreshes, the legitimate user's next refresh finds no matching record
-//   and is forced to log in again — the window of abuse is at most one
-//   refresh cycle.
-//
-// Note on "double-spend" edge case:
-//   If the network drops after the server deletes the old token but before
-//   the client receives the response, the user is logged out and must
-//   re-authenticate. This is the accepted trade-off for rotation security.
-// ─────────────────────────────────────────────────────────────────────────────
-export const refreshToken = asyncHandler(async (req, res, next) => {
-  const { refreshToken: rawToken } = req.body;
-  if (!rawToken)
-    return next(new Error("Refresh token is required", { cause: 400 }));
-
-  const hash        = crypto.createHash("sha256").update(rawToken).digest("hex");
-  const storedToken = await refreshTokenModel.findOne({ tokenHash: hash });
-
-  if (!storedToken) {
-    return next(new Error("Invalid or expired refresh token", { cause: 401 }));
-  }
-
-  if (storedToken.expiresAt < new Date()) {
-    await storedToken.deleteOne();
-    return next(
-      new Error("Refresh token expired. Please log in again.", { cause: 401 }),
-    );
-  }
-
-  const user = await userModel
-    .findById(storedToken.user)
-    .select("_id role blocked");
-
-  if (!user || user.blocked) {
-    await storedToken.deleteOne();
-    return next(new Error("User unavailable", { cause: 401 }));
-  }
-
-  // ── Rotation: invalidate the used token, issue a fresh pair ──────────────
-  await storedToken.deleteOne();
-
-  const newAccessToken  = signAccessToken(user._id);
-  const newRefreshToken = await createRefreshToken(user._id, req);
-
-  return res.status(200).json({
-    success: true,
-    message: "Access token refreshed",
-    data: {
-      accessToken:  newAccessToken,
-      refreshToken: newRefreshToken,   // ← client must save this new token
-      expiresIn:    ACCESS_TOKEN_EXPIRY,
-    },
-    errors: null,
-  });
-});
-
-export const logout = asyncHandler(async (req, res, next) => {
-  const { refreshToken: rawToken } = req.body;
-  if (rawToken) {
-    const hash = crypto.createHash("sha256").update(rawToken).digest("hex");
-    await refreshTokenModel.deleteOne({ tokenHash: hash });
-  }
-
-  return res.status(200).json({
-    success: true,
-    message: "Logged out successfully",
-    data:    null,
-    errors:  null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Get current authenticated user's profile
-// ─────────────────────────────────────────────────────────────────────────────
-export const getMe = asyncHandler(async (req, res, next) => {
-  const user = await userModel
-    .findById(req.user._id)
-    .select("-password -passwordResetToken -passwordResetExpiry");
-
-  if (!user) return next(new Error("User not found", { cause: 404 }));
-
-  return res.status(200).json({
-    success: true,
-    message: "Profile retrieved successfully",
-    data:    { user },
-    errors:  null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Self-service profile update
-// ─────────────────────────────────────────────────────────────────────────────
-export const updateSelf = asyncHandler(async (req, res, next) => {
-  const user = await userModel.findById(req.user._id);
-  if (!user) return next(new Error("User not found", { cause: 404 }));
-
-  const allowedFields = ["userName", "phone", "password"];
-  for (const key of allowedFields) {
-    if (req.body[key] != null) user[key] = req.body[key];
-  }
-
-  await user.save();
-
-  await logModel.create({
-    user:   req.user._id,
-    action: "UPDATE_SELF_PROFILE",
-    details: {
-      updatedFields: Object.keys(req.body).filter(
-        (k) => allowedFields.includes(k) && k !== "password",
-      ),
-      passwordChanged: Boolean(req.body.password),
-    },
-  });
-
-  const safeUser = user.toObject();
-  delete safeUser.password;
-  delete safeUser.passwordResetToken;
-  delete safeUser.passwordResetExpiry;
-
-  return res.status(200).json({
-    success: true,
-    message: "Profile updated successfully",
-    data:    { user: safeUser },
-    errors:  null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Send password-reset OTP
-// ─────────────────────────────────────────────────────────────────────────────
-export const sendCode = asyncHandler(async (req, res, next) => {
-  const { email } = req.body;
-
-  const user = await userModel.findOne({ email }).select("_id email");
-  if (!user) {
-    // Respond identically whether the email exists or not (prevents enumeration)
-    return res.status(200).json({
-      success: true,
-      message: "If this email exists, a reset code has been sent.",
-      data:    null,
-      errors:  null,
-    });
-  }
-
-  const code     = nanoid(8);
-  const codeHash = crypto.createHash("sha256").update(code).digest("hex");
-  const expiry   = new Date(Date.now() + 60 * 60 * 1000);
-
-  await sendEmail(
-    email,
-    "Password Reset Code",
-    `<p>Your password reset code: <b>${code}</b></p>
-     <p>This code expires in <strong>1 hour</strong>.</p>`,
-  );
-
-  await userModel.updateOne(
-    { _id: user._id },
-    { passwordResetToken: codeHash, passwordResetExpiry: expiry },
-  );
-
-  const token = jwt.sign({ id: user._id }, process.env.FORGOTPASSWORDTOKEN, {
-    expiresIn: "1h",
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: "If this email exists, a reset code has been sent.",
-    data:    { token },
-    errors:  null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Reset password using OTP
-// ─────────────────────────────────────────────────────────────────────────────
-export const forgotPassword = asyncHandler(async (req, res, next) => {
-  const { otp, email, newPassword } = req.body;
-
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return next(new Error("Authorization header required", { cause: 400 }));
-  }
-
-  const rawToken = authHeader.slice(7).trim();
-  const decoded  = jwt.verify(rawToken, process.env.FORGOTPASSWORDTOKEN);
-
-  if (!otp || !decoded) {
-    return next(new Error("Invalid request", { cause: 400 }));
-  }
-
-  const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
-
-  const user = await userModel.findOne({
-    email,
-    passwordResetToken: otpHash,
-    _id: decoded.id,
-  });
-
-  if (!user) {
-    return next(new Error("Invalid OTP or email", { cause: 400 }));
-  }
-
-  if (user.passwordResetExpiry < new Date()) {
-    return next(
-      new Error("OTP has expired. Request a new one.", { cause: 400 }),
-    );
-  }
-
-  user.password             = newPassword;
-  user.passwordResetToken   = null;
-  user.passwordResetExpiry  = null;
-  await user.save();
-
-  return res.status(200).json({
-    success: true,
-    message: "Password changed successfully",
-    data:    null,
-    errors:  null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Create user (admin only)
-// ─────────────────────────────────────────────────────────────────────────────
-export const createUser = asyncHandler(async (req, res, next) => {
-  const { userName, email, password, role } = req.body;
-
-  const exists = await userModel.findOne({ email }).select("_id");
-  if (exists) {
-    return res
-      .status(409)
-      .json({ success: false, message: "Email already exists" });
-  }
-
-  const savedUser = await userModel.create({ userName, email, password, role });
-
-  await logModel.create({
-    user:   req.user._id,
-    action: "CREATE_USER",
-    details: {
-      userId:   savedUser._id,
-      userName: savedUser.userName,
-      email:    savedUser.email,
-      role:     savedUser.role,
-    },
-  });
-
-  return res.status(201).json({
-    success: true,
-    message: "User created successfully",
-    data:    { user_id: savedUser._id },
-    errors:  null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Update user (admin only)
-// ─────────────────────────────────────────────────────────────────────────────
-export const updateUser = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
-
-  const protectedFields = [
-    "_id", "passwordResetToken", "passwordResetExpiry", "image", "imagePublicId",
-  ];
-
-  const user = await userModel.findById(id);
-  if (!user) return next(new Error("User not found", { cause: 404 }));
-
-  const passwordChanged = Boolean(req.body.password);
-
-  for (const [key, value] of Object.entries(req.body)) {
-    if (!protectedFields.includes(key) && key !== "cPassword" && value != null) {
-      user[key] = value;
-    }
-  }
-
-  await user.save();
-
-  await logModel.create({
-    user:   req.user._id,
-    action: "UPDATE_USER",
-    details: {
-      userId: id,
-      updatedFields: Object.keys(req.body).filter(
-        (k) => !protectedFields.includes(k) && k !== "password" && k !== "cPassword",
-      ),
-      passwordChanged,
-    },
-  });
-
-  const safeUser = user.toObject();
-  delete safeUser.password;
-  delete safeUser.passwordResetToken;
-  delete safeUser.passwordResetExpiry;
-
-  return res.status(200).json({
-    success: true,
-    message: "User updated successfully",
-    data:    { user: safeUser },
-    errors:  null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Get all users (admin only)
-// ─────────────────────────────────────────────────────────────────────────────
-export const getAllUsers = asyncHandler(async (req, res, next) => {
-  const { role, blocked, page, size } = req.query;
-
-  const query = {};
-  if (role)               query.role    = role;
-  if (blocked !== undefined) query.blocked = blocked === "true";
-
-  const { limit, skip } = pagination(page, size);
-
-  const [users, totalCount] = await Promise.all([
-    userModel
-      .find(query)
-      .select("-password -passwordResetToken -passwordResetExpiry")
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .skip(skip),
-    userModel.countDocuments(query),
-  ]);
-
-  return res.status(200).json({
-    success: true,
-    message: "Data retrieved successfully",
-    data: {
-      totalCount,
-      totalPages: Math.ceil(totalCount / limit),
-      page: parseInt(page) || 1,
-      users,
-    },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Delete user (admin only)
-// ─────────────────────────────────────────────────────────────────────────────
-export const deleteUser = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
-
-  if (id === req.user._id.toString()) {
-    return next(
-      new Error("You cannot delete your own account", { cause: 400 }),
-    );
-  }
-
-  const user = await userModel.findByIdAndDelete(id);
-  if (!user) return next(new Error("User not found", { cause: 404 }));
-
-  await refreshTokenModel.deleteMany({ user: id });
-
-  await logModel.create({
-    user:   req.user._id,
-    action: "DELETE_USER",
-    details: {
-      userId:   id,
-      userName: user.userName,
-      email:    user.email,
-      role:     user.role,
-    },
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: "User deleted successfully",
-    data:    null,
-    errors:  null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Upload user profile image (admin only)
-// ─────────────────────────────────────────────────────────────────────────────
-export const uploadUserImage = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
-
-  if (!req.file) {
-    return next(new Error("No image file provided", { cause: 400 }));
-  }
-
-  const user = await userModel.findById(id);
-  if (!user) return next(new Error("User not found", { cause: 404 }));
-
-  if (user.imagePublicId) {
-    await deleteImage(user.imagePublicId).catch((e) =>
-      console.warn("⚠️  Could not delete old Cloudinary image:", e.message),
-    );
-  }
-
-  const result = await uploadImage(req.file.buffer, "profiles");
-
-  user.image         = result.secure_url;
-  user.imagePublicId = result.public_id;
-  await user.save();
-
-  await logModel.create({
-    user:   req.user._id,
-    action: "UPLOAD_USER_IMAGE",
-    details: { targetUserId: id, cloudinaryPublicId: result.public_id },
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: "Profile image uploaded successfully",
-    data:    { imageUrl: result.secure_url },
-    errors:  null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Logout all devices
-// ─────────────────────────────────────────────────────────────────────────────
-export const logoutAll = asyncHandler(async (req, res, next) => {
-  const deleted = await refreshTokenModel.deleteMany({ user: req.user._id });
-
-  await logModel.create({
-    user:   req.user._id,
-    action: "LOGOUT_ALL_SESSIONS",
-    details: { sessionsRevoked: deleted.deletedCount },
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: `Logged out from all devices. ${deleted.deletedCount} session(s) revoked.`,
-    data:    { sessionsRevoked: deleted.deletedCount },
-    errors:  null,
-  });
-});
-</file>
-
 <file path="src/modules/booking/booking.validation.js">
 import Joi from "joi";
 import { getMergedServiceTypeKeys } from "../../services/serviceTypeRegistry.js";
@@ -11734,15 +11395,18 @@ const serviceSchema = Joi.object({
     "string.hex": "Invalid provider ID format",
     "string.length": "Invalid provider ID length",
   }),
-  buy: Joi.number().min(0).default(0),
+  buy:  Joi.number().min(0).default(0),
   sell: Joi.number().min(0).default(0),
-  // details holds all type-specific fields; unknown keys are allowed
+  // details holds all type-specific fields (checkIn, checkOut, brand, etc.)
   details: Joi.object().unknown(true).default({}),
+  // notes: free-text field available on every service, never required.
+  // Allows staff to record context, special requests, or internal remarks.
+  notes: Joi.string().trim().max(1000).allow("").optional().default(""),
 });
 
 const totalPaxSchema = Joi.object({
   adults: Joi.number().integer().min(0).default(0),
-  kids: Joi.number().integer().min(0).default(0),
+  kids:   Joi.number().integer().min(0).default(0),
 });
 
 // ── Route schemas ─────────────────────────────────────────────────────────────
@@ -11751,15 +11415,15 @@ export const createBooking = {
   body: Joi.object({
     provider: objectId.required().messages({
       "any.required": "Main provider is required",
-      "string.hex": "Invalid provider ID format",
-      "string.length": "Invalid provider ID length",
+      "string.hex":   "Invalid provider ID format",
+      "string.length":"Invalid provider ID length",
     }),
     status: Joi.string()
       .valid("pending", "confirmed", "cancelled", "completed")
       .default("pending"),
     customers: Joi.array().items(customerSchema).min(1).required().messages({
       "any.required": "At least one customer is required",
-      "array.min": "At least one customer is required",
+      "array.min":    "At least one customer is required",
     }),
     services: Joi.array().items(serviceSchema).default([]),
     totalPax: totalPaxSchema.optional(),
@@ -11769,21 +11433,18 @@ export const createBooking = {
 export const updateBooking = {
   body: Joi.object({
     status: Joi.string().valid(
-      "pending",
-      "confirmed",
-      "cancelled",
-      "completed",
+      "pending", "confirmed", "cancelled", "completed",
     ),
     customers: Joi.array().items(customerSchema).min(1),
-    services: Joi.array().items(serviceSchema),
-    totalPax: totalPaxSchema,
+    services:  Joi.array().items(serviceSchema),
+    totalPax:  totalPaxSchema,
   })
     .min(1)
     .messages({ "object.min": "At least one field is required to update" }),
   params: Joi.object({
     id: objectId.required().messages({
-      "string.hex": "Invalid booking ID",
-      "string.length": "Invalid booking ID",
+      "string.hex":   "Invalid booking ID",
+      "string.length":"Invalid booking ID",
     }),
   }),
 };
@@ -11816,13 +11477,13 @@ export const getAllBookingsQuery = {
   query: Joi.object({
     bookingID:     Joi.number().integer().min(1),
     provider:      objectId,
-    serviceType:   serviceTypeQueryValidator,  // dynamic — accepts any registered type
+    serviceType:   serviceTypeQueryValidator,
     status:        Joi.string().valid("pending", "confirmed", "cancelled", "completed"),
     paymentStatus: Joi.string().valid("unpaid", "partial", "paid"),
     customerName:  Joi.string().trim().min(1).max(100),
     fromDate:      Joi.date(),
     toDate:        Joi.date().when("fromDate", {
-      is: Joi.exist(),
+      is:   Joi.exist(),
       then: Joi.date().min(Joi.ref("fromDate")).messages({
         "date.min": "toDate must be after fromDate",
       }),
@@ -11837,429 +11498,50 @@ export const getAllBookingsQuery = {
 };
 </file>
 
-<file path="DB/model/booking.model.js">
-import mongoose from "mongoose";
-import {
-  assignBookingSequences,
-  calculateBookingTotals,
-} from "../../src/services/bookingService.js";
-import {
-  applyProviderSummaryDelta,
-  computeServiceDeltas,
-} from "../../src/services/providerSummaryService.js";
-import { getMergedServiceTypeKeys } from "../../src/services/serviceTypeRegistry.js";
-
-const bookingSchema = new mongoose.Schema(
-  {
-    bookingID: Number,
-    provider: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Provider",
-      required: true,
-    },
-    createdBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
-    status: {
-      type: String,
-      enum: ["pending", "confirmed", "cancelled", "completed"],
-      default: "pending",
-    },
-    totalToPay: { type: Number, default: 0 },
-    totalToBuy: { type: Number, default: 0 },
-    totalProfit: { type: Number, default: 0 },
-    totalPaid: { type: Number, default: 0 },
-    remainingBalance: { type: Number, default: 0 },
-    paymentStatus: {
-      type: String,
-      enum: ["unpaid", "partial", "paid"],
-      default: "unpaid",
-    },
-    customers: [{ name: String, ageType: String }],
-
-    /**
-     * Unified services array — replaces the former named arrays
-     * (accommodations, carRentals, carWithDriver).
-     *
-     * serviceType drives all processing logic via the SERVICE_TYPES registry.
-     * details holds every type-specific field (checkIn/checkOut, brand, etc.).
-     *
-     * Built-in types live in src/config/serviceTypes.js; office-defined
-     * types are stored in OfficeServiceType and merged at runtime.
-     */
-    services: [
-      {
-        serviceType: {
-          type: String,
-          required: true,
-          validate: {
-            validator(v) {
-              return getMergedServiceTypeKeys().includes(v);
-            },
-            message: "Invalid service type",
-          },
-        },
-        serviceNumber: Number,
-        provider: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: "Provider",
-          required: true,
-        },
-        buy: { type: Number, default: 0 },
-        sell: { type: Number, default: 0 },
-        profit: { type: Number, default: 0 },
-        // Auto-calculated for service types that define durationFields
-        duration: Number,
-        // All type-specific fields (checkIn, checkOut, brand, driverName, etc.)
-        details: { type: mongoose.Schema.Types.Mixed, default: {} },
-      },
-    ],
-
-    totalPax: { adults: Number, kids: Number, total: Number },
+<file path="package.json">
+{
+  "name": "booking",
+  "version": "2.0.0",
+  "description": "Tourism booking management system",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
+    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/unit",
+    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/integration",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage"
   },
-  { timestamps: true },
-);
-
-bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
-
-// ── pre-save ──────────────────────────────────────────────────────────────────
-bookingSchema.pre("save", async function () {
-  this._wasNew = this.isNew;
-
-  if (!this.isNew) {
-    const oldDoc = await this.constructor.findById(this._id).lean();
-    this._oldServiceDeltas = oldDoc ? computeServiceDeltas(oldDoc) : new Map();
-  }
-
-  await assignBookingSequences(this);
-  calculateBookingTotals(this);
-});
-
-// ── post-save ─────────────────────────────────────────────────────────────────
-bookingSchema.post("save", async function () {
-  try {
-    const newDeltas = computeServiceDeltas(this);
-
-    if (this._wasNew) {
-      for (const [pid, delta] of newDeltas) {
-        await applyProviderSummaryDelta(pid, {
-          totalBuy: delta.buy,
-          totalSell: delta.sell,
-        });
-      }
-    } else if (this._oldServiceDeltas) {
-      const allProviderIds = new Set([
-        ...newDeltas.keys(),
-        ...this._oldServiceDeltas.keys(),
-      ]);
-
-      for (const pid of allProviderIds) {
-        const oldD = this._oldServiceDeltas.get(pid) || { buy: 0, sell: 0 };
-        const newD = newDeltas.get(pid) || { buy: 0, sell: 0 };
-        const diffBuy = newD.buy - oldD.buy;
-        const diffSell = newD.sell - oldD.sell;
-
-        if (diffBuy !== 0 || diffSell !== 0) {
-          await applyProviderSummaryDelta(pid, {
-            totalBuy: diffBuy,
-            totalSell: diffSell,
-          });
-        }
-      }
-    }
-  } catch (err) {
-    console.error(
-      "❌ Provider summary sync failed after booking save:",
-      err.message,
-    );
-  }
-});
-
-// ── post-deleteOne ────────────────────────────────────────────────────────────
-bookingSchema.post(
-  "deleteOne",
-  { document: true, query: false },
-  async function () {
-    try {
-      const deltas = computeServiceDeltas(this);
-      for (const [pid, delta] of deltas) {
-        await applyProviderSummaryDelta(pid, {
-          totalBuy: -delta.buy,
-          totalSell: -delta.sell,
-        });
-      }
-    } catch (err) {
-      console.error(
-        "❌ Provider summary sync failed after booking delete:",
-        err.message,
-      );
-    }
+  "type": "module",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cloudinary": "^2.8.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.3.2",
+    "helmet": "^8.1.0",
+    "joi": "^18.0.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.1.2",
+    "multer": "^2.0.2",
+    "nanoid": "^5.1.6",
+    "nodemailer": "^7.0.12",
+    "pdfkit": "^0.18.0",
+    "svg-to-pdfkit": "^0.1.8"
   },
-);
-
-export default mongoose.model("Booking", bookingSchema);
-</file>
-
-<file path="src/modules/provider/controller/provider.controller.js">
-import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import providerModel from "../../../../DB/model/provider.model.js";
-import logModel from "../../../../DB/model/log.model.js";
-import mongoose from "mongoose";
-import { pagination } from "../../../services/pagination.js";
-import { resyncProviderSummary } from "../../../services/providerSummaryService.js";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Create provider
-// POST /api/v1/provider/create
-// ─────────────────────────────────────────────────────────────────────────────
-export const createProvider = asyncHandler(async (req, res, next) => {
-  const { name, type, phone, address } = req.body;
-
-  const isExist = await providerModel.findOne({ name });
-  if (isExist)
-    return next(new Error("Provider name already exists", { cause: 400 }));
-
-  const provider = await providerModel.create({
-    name,
-    type,
-    phone,
-    address,
-    currentSequence: 0,
-  });
-
-  await logModel.create({
-    user: req.user._id,
-    action: "CREATE_PROVIDER",
-    details: { providerId: provider._id, providerName: provider.name },
-  });
-
-  res.status(201).json({
-    success: true,
-    message: "Provider created successfully",
-    data: { provider },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Delete provider
-// DELETE /api/v1/provider/delete/:id
-// ─────────────────────────────────────────────────────────────────────────────
-export const deleteProvider = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
-
-  const hasBookings = await mongoose.model("Booking").findOne({
-    $or: [{ provider: id }, { "services.provider": id }],
-  });
-
-  if (hasBookings) {
-    return next(
-      new Error(
-        "Cannot delete provider with active bookings. " +
-          "Remove all linked bookings first.",
-        { cause: 400 },
-      ),
-    );
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^10.0.0",
+    "supertest": "^7.0.0"
   }
-
-  const provider = await providerModel.findByIdAndDelete(id);
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  await logModel.create({
-    user: req.user._id,
-    action: "DELETE_PROVIDER",
-    details: { providerId: id, providerName: provider.name },
-  });
-
-  res.status(200).json({
-    success: true,
-    message: "Provider deleted successfully",
-    data: null,
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Get all providers (paginated + filtered)
-// GET /api/v1/provider/getAll
-//
-// Query params:
-//   type   — filter by provider type (hotel, car_rental, etc.)
-//   name   — partial name search (case-insensitive)  ← NEW
-//   page, size
-// ─────────────────────────────────────────────────────────────────────────────
-export const getAllProviders = asyncHandler(async (req, res, next) => {
-  const { type, name, page, size } = req.query;
-
-  const query = {};
-  if (type) query.type = type;
-  // Bug fix: allow partial name search for dropdowns / autocomplete
-  if (name) query.name = { $regex: name.trim(), $options: "i" };
-
-  const { limit, skip } = pagination(page, size || 50);
-
-  const [providers, totalCount] = await Promise.all([
-    providerModel.find(query).sort({ name: 1 }).limit(limit).skip(skip),
-    providerModel.countDocuments(query),
-  ]);
-
-  res.status(200).json({
-    success: true,
-    message: "Data retrieved successfully",
-    data: {
-      totalCount,
-      totalPages: Math.ceil(totalCount / limit),
-      page: parseInt(page) || 1,
-      count: providers.length,
-      providers,
-    },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Get provider by ID
-// GET /api/v1/provider/get/:id
-// ─────────────────────────────────────────────────────────────────────────────
-export const getProviderById = asyncHandler(async (req, res, next) => {
-  const provider = await providerModel.findById(req.params.id);
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  res.status(200).json({
-    success: true,
-    message: "Data retrieved successfully",
-    data: { provider },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Update provider
-// PATCH /api/v1/provider/update/:id
-//
-// Bug 5 fix: duplicate name check excludes the current document.
-// ─────────────────────────────────────────────────────────────────────────────
-export const updateProvider = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
-  const update = {};
-
-  for (const [key, value] of Object.entries(req.body)) {
-    if (
-      key !== "_id" &&
-      key !== "currentSequence" &&
-      key !== "totalBookings" &&
-      key !== "summary" &&
-      value != null
-    ) {
-      update[key] = value;
-    }
-  }
-
-  // Prevent renaming to an already-taken name
-  if (update.name) {
-    const duplicate = await providerModel.findOne({
-      name: update.name,
-      _id: { $ne: id },
-    });
-    if (duplicate) {
-      return next(
-        new Error(
-          `Provider name "${update.name}" is already taken by another provider.`,
-          { cause: 400 },
-        ),
-      );
-    }
-  }
-
-  const provider = await providerModel.findByIdAndUpdate(
-    id,
-    { $set: update },
-    { new: true, runValidators: true },
-  );
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  await logModel.create({
-    user: req.user._id,
-    action: "UPDATE_PROVIDER",
-    details: { providerId: id, updatedFields: Object.keys(req.body) },
-  });
-
-  res.status(200).json({
-    success: true,
-    message: "Provider updated successfully",
-    data: { provider },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Resync a single provider summary
-// POST /api/v1/provider/:id/resync
-// ─────────────────────────────────────────────────────────────────────────────
-export const resyncProvider = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
-
-  const provider = await providerModel.findById(id).select("_id name");
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  const summary = await resyncProviderSummary(id);
-
-  await logModel.create({
-    user: req.user._id,
-    action: "RESYNC_PROVIDER_SUMMARY",
-    details: { providerId: id, providerName: provider.name, summary },
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: `Provider "${provider.name}" summary resynced successfully`,
-    data: { summary },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Resync ALL providers
-// POST /api/v1/provider/resync-all
-// ─────────────────────────────────────────────────────────────────────────────
-export const resyncAllProviders = asyncHandler(async (req, res, next) => {
-  const providers = await providerModel.find({}).select("_id name").lean();
-
-  const results = [];
-  const errors = [];
-
-  for (const provider of providers) {
-    try {
-      const summary = await resyncProviderSummary(provider._id.toString());
-      results.push({ providerId: provider._id, name: provider.name, summary });
-    } catch (err) {
-      errors.push({
-        providerId: provider._id,
-        name: provider.name,
-        error: err.message,
-      });
-    }
-  }
-
-  await logModel.create({
-    user: req.user._id,
-    action: "RESYNC_ALL_PROVIDER_SUMMARIES",
-    details: {
-      total: providers.length,
-      succeeded: results.length,
-      failed: errors.length,
-    },
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: `Resynced ${results.length} of ${providers.length} providers`,
-    data: { results, errors },
-    errors: errors.length ? errors : null,
-  });
-});
+}
 </file>
 
 <file path="src/modules/statement/controller/statement.controller.js">
@@ -12869,129 +12151,398 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
 });
 </file>
 
-<file path="src/services/bookingService.js">
-import mongoose from "mongoose";
-import { getMergedServiceTypes } from "./serviceTypeRegistry.js";
-import {
-  applyProviderSummaryDelta,
-  computeServiceDeltas,
-} from "./providerSummaryService.js";
+<file path="src/modules/auth/controller/auth.controller.js">
+import crypto       from "crypto";
+import jwt           from "jsonwebtoken";
+import { nanoid }    from "nanoid";
+import { asyncHandler }   from "../../../middleware/asyncHandler.js";
+import { pagination }     from "../../../services/pagination.js";
+import { ROLES }          from "../../../config/roles.js";
+import { uploadImage, deleteImage } from "../../../services/cloudinary.js";
+import sendEmail          from "../../../services/email.js";
+import userModel          from "../../../../DB/model/user.model.js";
+import logModel           from "../../../../DB/model/log.model.js";
+import refreshTokenModel  from "../../../../DB/model/refreshToken.model.js";
 
-const getProvider = () => mongoose.model("Provider");
-const getBooking  = () => mongoose.model("Booking");
-const getCounter  = () => mongoose.model("Counter");
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-/**
- * Assigns bookingID and serviceNumbers.
- *
- * bookingID  → global auto-increment counter (unique across ALL bookings,
- *              regardless of provider). Sequence: 1, 2, 3, 4, …
- *
- * serviceNumber → still per service-provider sequence.
- *   Each provider keeps their own currentSequence so a hotel's vouchers
- *   are numbered 1, 2, 3, … independently of the booking ID.
- *
- * provider.totalBookings  → stat counter (decremented on deletion).
- * provider.currentSequence → service-numbering high-water mark (never decremented).
- */
-export const assignBookingSequences = async (doc) => {
-  const Provider = getProvider();
-  const Booking  = getBooking();
-  const Counter  = getCounter();
+const ACCESS_TOKEN_EXPIRY       = process.env.ACCESS_TOKEN_EXPIRY || "1h";
+const REFRESH_TOKEN_EXPIRY_DAYS = 7;
 
-  if (doc.isNew) {
-    // ── Global booking ID ────────────────────────────────────────────────────
-    const counter = await Counter.findOneAndUpdate(
-      { _id: "booking" },
-      { $inc: { seq: 1 } },
-      { new: true, upsert: true },
-    );
-    doc.bookingID = counter.seq;
+// Cookie scoped to the auth sub-path — never sent to /booking, /provider, etc.
+const REFRESH_COOKIE_PATH = `${process.env.BASEURL || "/api/v1"}/auth`;
 
-    // Update provider stats (totalBookings only — currentSequence is for services)
-    const mainProvider = await Provider.findByIdAndUpdate(
-      doc.provider,
-      { $inc: { totalBookings: 1 } },
-      { new: true },
-    );
-    if (!mainProvider) throw new Error("Main Provider not found");
-
-  } else if (doc.isModified("provider")) {
-    // Provider changed on an existing booking — adjust totalBookings on both sides
-    const oldDoc = await Booking.findById(doc._id).lean();
-    if (oldDoc && oldDoc.provider.toString() !== doc.provider.toString()) {
-      await Provider.findByIdAndUpdate(oldDoc.provider, { $inc: { totalBookings: -1 } });
-      const newProvider = await Provider.findByIdAndUpdate(
-        doc.provider,
-        { $inc: { totalBookings: 1 } },
-        { new: true },
-      );
-      if (!newProvider) throw new Error("New provider not found");
-      // bookingID stays unchanged when provider is swapped
-    }
-  }
-
-  // ── Service numbers ───────────────────────────────────────────────────────
-  // Every service (including those whose provider is the main booking provider)
-  // gets a number from that service-provider's own sequence.
-  const services = doc.services || [];
-  for (let i = 0; i < services.length; i++) {
-    const service = services[i];
-    if (!service.provider) continue;
-    if (service.serviceNumber != null) continue; // already assigned — preserve
-
-    const svcProvider = await Provider.findByIdAndUpdate(
-      service.provider,
-      { $inc: { currentSequence: 1 } },
-      { new: true },
-    );
-    if (!svcProvider) {
-      throw new Error(
-        `Service provider ${service.provider} not found during sequence assignment`,
-      );
-    }
-    doc.services[i].serviceNumber = svcProvider.currentSequence;
-  }
-
-  doc.markModified("services");
+const REFRESH_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure:   process.env.NODE_ENV === "production",
+  sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
+  maxAge:   REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
+  path:     REFRESH_COOKIE_PATH,
 };
 
-/**
- * Recalculates all financial totals from the services array.
- * Also auto-calculates duration for service types that define durationFields.
- */
-export const calculateBookingTotals = (doc) => {
-  (doc.services || []).forEach((service) => {
-    const typeDef = getMergedServiceTypes()[service.serviceType];
-    if (typeDef?.durationFields && service.details) {
-      const fromVal = service.details[typeDef.durationFields.from];
-      const toVal   = service.details[typeDef.durationFields.to];
-      if (fromVal && toVal) {
-        service.duration = Math.ceil(
-          (new Date(toVal) - new Date(fromVal)) / (1000 * 60 * 60 * 24),
-        );
-      }
-    }
+// Allowlist for fields an admin may change on another user.
+// Anything not in this array is silently ignored — prevents privilege
+// escalation via injected fields (Phase 1 security fix).
+const ADMIN_UPDATABLE_USER_FIELDS = [
+  "userName", "email", "password", "role", "blocked", "phone",
+];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+const signAccessToken = (userId) =>
+  jwt.sign({ id: userId }, process.env.SIGNINTOKEN, {
+    expiresIn: ACCESS_TOKEN_EXPIRY,
   });
 
-  let totalSell = 0;
-  let totalBuy  = 0;
+const createRefreshToken = async (userId, req) => {
+  const raw  = crypto.randomBytes(40).toString("hex");
+  const hash = crypto.createHash("sha256").update(raw).digest("hex");
 
-  (doc.services || []).forEach((service) => {
-    service.profit = (Number(service.sell) || 0) - (Number(service.buy) || 0);
-    totalSell     += Number(service.sell) || 0;
-    totalBuy      += Number(service.buy)  || 0;
+  await refreshTokenModel.create({
+    user:      userId,
+    tokenHash: hash,
+    expiresAt: new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000),
+    userAgent: req.headers["user-agent"],
+    ip:        req.ip,
   });
 
-  doc.totalToPay      = totalSell;
-  doc.totalToBuy      = totalBuy;
-  doc.totalProfit     = totalSell - totalBuy;
-  doc.remainingBalance = doc.totalToPay - (doc.totalPaid || 0);
-
-  if ((doc.totalPaid || 0) <= 0)             doc.paymentStatus = "unpaid";
-  else if (doc.totalPaid >= doc.totalToPay)  doc.paymentStatus = "paid";
-  else                                        doc.paymentStatus = "partial";
+  return raw;
 };
+
+const setRefreshCookie  = (res, raw) => res.cookie("refreshToken", raw, REFRESH_COOKIE_OPTIONS);
+const clearRefreshCookie = (res) =>
+  res.clearCookie("refreshToken", {
+    httpOnly: true,
+    secure:   process.env.NODE_ENV === "production",
+    sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
+    path:     REFRESH_COOKIE_PATH,
+  });
+
+// ── Controllers ───────────────────────────────────────────────────────────────
+
+export const signIn = asyncHandler(async (req, res, next) => {
+  const { email, password } = req.body;
+
+  const user = await userModel.findOne({ email });
+  if (!user) return next(new Error("Invalid login credentials", { cause: 400 }));
+
+  if (user.blocked)
+    return res.status(403).json({ success: false, message: "Account is blocked" });
+
+  const isMatch = await user.comparePassword(password);
+  if (!isMatch) return next(new Error("Invalid login credentials", { cause: 400 }));
+
+  const accessToken = signAccessToken(user._id);
+  const rawRefresh  = await createRefreshToken(user._id, req);
+  setRefreshCookie(res, rawRefresh);
+
+  return res.status(200).json({
+    success: true,
+    message: "Login successfully",
+    data: {
+      accessToken,
+      expiresIn: ACCESS_TOKEN_EXPIRY,
+      user: {
+        id:       user._id,
+        userName: user.userName,
+        email:    user.email,
+        role:     user.role,
+        image:    user.image || null,
+      },
+    },
+    errors: null,
+  });
+});
+
+export const refreshToken = asyncHandler(async (req, res, next) => {
+  const rawToken = req.cookies?.refreshToken;
+  if (!rawToken) return next(new Error("Refresh token is required", { cause: 400 }));
+
+  const hash        = crypto.createHash("sha256").update(rawToken).digest("hex");
+  const storedToken = await refreshTokenModel.findOne({ tokenHash: hash });
+
+  if (!storedToken) return next(new Error("Invalid or expired refresh token", { cause: 401 }));
+
+  if (storedToken.expiresAt < new Date()) {
+    await storedToken.deleteOne();
+    clearRefreshCookie(res);
+    return next(new Error("Refresh token expired. Please log in again.", { cause: 401 }));
+  }
+
+  const user = await userModel.findById(storedToken.user).select("_id role blocked");
+  if (!user || user.blocked) {
+    await storedToken.deleteOne();
+    clearRefreshCookie(res);
+    return next(new Error("User unavailable", { cause: 401 }));
+  }
+
+  await storedToken.deleteOne();
+  const newAccessToken = signAccessToken(user._id);
+  const newRawRefresh  = await createRefreshToken(user._id, req);
+  setRefreshCookie(res, newRawRefresh);
+
+  return res.status(200).json({
+    success: true,
+    message: "Access token refreshed",
+    data:    { accessToken: newAccessToken, expiresIn: ACCESS_TOKEN_EXPIRY },
+    errors:  null,
+  });
+});
+
+export const logout = asyncHandler(async (req, res) => {
+  const rawToken = req.cookies?.refreshToken;
+  if (rawToken) {
+    const hash = crypto.createHash("sha256").update(rawToken).digest("hex");
+    await refreshTokenModel.deleteOne({ tokenHash: hash });
+  }
+  clearRefreshCookie(res);
+  return res.status(200).json({ success: true, message: "Logged out successfully", data: null, errors: null });
+});
+
+export const getMe = asyncHandler(async (req, res, next) => {
+  const user = await userModel
+    .findById(req.user._id)
+    .select("-password -passwordResetToken -passwordResetExpiry");
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  return res.status(200).json({ success: true, message: "Profile retrieved", data: { user }, errors: null });
+});
+
+export const updateSelf = asyncHandler(async (req, res, next) => {
+  const user = await userModel.findById(req.user._id);
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  const allowed = ["userName", "phone", "password"];
+  for (const key of allowed) {
+    if (req.body[key] != null) user[key] = req.body[key];
+  }
+  await user.save();
+
+  await logModel.create({
+    user:    req.user._id,
+    action:  "UPDATE_SELF_PROFILE",
+    details: {
+      updatedFields:   allowed.filter((k) => req.body[k] != null && k !== "password"),
+      passwordChanged: Boolean(req.body.password),
+    },
+  });
+
+  const safe = user.toObject();
+  delete safe.password;
+  delete safe.passwordResetToken;
+  delete safe.passwordResetExpiry;
+
+  return res.status(200).json({ success: true, message: "Profile updated", data: { user: safe }, errors: null });
+});
+
+export const sendCode = asyncHandler(async (req, res) => {
+  const { email } = req.body;
+
+  const user = await userModel.findOne({ email }).select("_id email");
+  // Respond identically whether email exists or not — prevents enumeration
+  if (!user) {
+    return res.status(200).json({
+      success: true,
+      message: "If this email exists, a reset code has been sent.",
+      data:    null,
+      errors:  null,
+    });
+  }
+
+  const code     = nanoid(8);
+  const codeHash = crypto.createHash("sha256").update(code).digest("hex");
+  const expiry   = new Date(Date.now() + 60 * 60 * 1000);
+
+  await sendEmail(
+    email,
+    "Password Reset Code",
+    `<p>Your password reset code: <b>${code}</b></p>
+     <p>This code expires in <strong>1 hour</strong>.</p>`,
+  );
+
+  await userModel.updateOne(
+    { _id: user._id },
+    { passwordResetToken: codeHash, passwordResetExpiry: expiry },
+  );
+
+  const token = jwt.sign({ id: user._id }, process.env.FORGOTPASSWORDTOKEN, {
+    expiresIn: "1h",
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "If this email exists, a reset code has been sent.",
+    data:    { token },
+    errors:  null,
+  });
+});
+
+export const forgotPassword = asyncHandler(async (req, res, next) => {
+  const { otp, email, newPassword } = req.body;
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer "))
+    return next(new Error("Authorization header required", { cause: 400 }));
+
+  const rawToken = authHeader.slice(7).trim();
+
+  // Phase 1 fix: wrap jwt.verify — throws JsonWebTokenError on bad/expired tokens.
+  let decoded;
+  try {
+    decoded = jwt.verify(rawToken, process.env.FORGOTPASSWORDTOKEN);
+  } catch {
+    return next(new Error("Reset link is invalid or has expired", { cause: 400 }));
+  }
+
+  const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+  const user    = await userModel.findOne({ email, passwordResetToken: otpHash, _id: decoded.id });
+  if (!user)                          return next(new Error("Invalid OTP or email",              { cause: 400 }));
+  if (user.passwordResetExpiry < new Date()) return next(new Error("OTP has expired. Request a new one.", { cause: 400 }));
+
+  user.password            = newPassword;
+  user.passwordResetToken  = null;
+  user.passwordResetExpiry = null;
+  await user.save();
+
+  return res.status(200).json({ success: true, message: "Password changed successfully", data: null, errors: null });
+});
+
+export const createUser = asyncHandler(async (req, res, next) => {
+  const { userName, email, password, role } = req.body;
+
+  const exists = await userModel.findOne({ email }).select("_id");
+  if (exists) return res.status(409).json({ success: false, message: "Email already exists" });
+
+  const savedUser = await userModel.create({ userName, email, password, role });
+
+  await logModel.create({
+    user:    req.user._id,
+    action:  "CREATE_USER",
+    details: { userId: savedUser._id, userName: savedUser.userName, email: savedUser.email, role: savedUser.role },
+  });
+
+  return res.status(201).json({ success: true, message: "User created successfully", data: { user_id: savedUser._id }, errors: null });
+});
+
+export const updateUser = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+
+  const user = await userModel.findById(id);
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  const passwordChanged = Boolean(req.body.password);
+
+  for (const key of ADMIN_UPDATABLE_USER_FIELDS) {
+    if (req.body[key] != null) user[key] = req.body[key];
+  }
+  await user.save();
+
+  await logModel.create({
+    user:    req.user._id,
+    action:  "UPDATE_USER",
+    details: {
+      userId:        id,
+      updatedFields: ADMIN_UPDATABLE_USER_FIELDS.filter((k) => req.body[k] != null && k !== "password"),
+      passwordChanged,
+    },
+  });
+
+  const safe = user.toObject();
+  delete safe.password;
+  delete safe.passwordResetToken;
+  delete safe.passwordResetExpiry;
+
+  return res.status(200).json({ success: true, message: "User updated successfully", data: { user: safe }, errors: null });
+});
+
+export const getAllUsers = asyncHandler(async (req, res) => {
+  const { role, blocked, page, size } = req.query;
+
+  const query = {};
+  if (role)                  query.role    = role;
+  if (blocked !== undefined) query.blocked = blocked === "true";
+
+  const { limit, skip } = pagination(page, size);
+  const [users, totalCount] = await Promise.all([
+    userModel
+      .find(query)
+      .select("-password -passwordResetToken -passwordResetExpiry")
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .skip(skip),
+    userModel.countDocuments(query),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: { totalCount, totalPages: Math.ceil(totalCount / limit), page: parseInt(page) || 1, users },
+    errors: null,
+  });
+});
+
+export const deleteUser = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  if (id === req.user._id.toString())
+    return next(new Error("You cannot delete your own account", { cause: 400 }));
+
+  const user = await userModel.findByIdAndDelete(id);
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  await refreshTokenModel.deleteMany({ user: id });
+  await logModel.create({
+    user:    req.user._id,
+    action:  "DELETE_USER",
+    details: { userId: id, userName: user.userName, email: user.email, role: user.role },
+  });
+
+  return res.status(200).json({ success: true, message: "User deleted successfully", data: null, errors: null });
+});
+
+export const uploadUserImage = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  if (!req.file) return next(new Error("No image file provided", { cause: 400 }));
+
+  const user = await userModel.findById(id);
+  if (!user) return next(new Error("User not found", { cause: 404 }));
+
+  if (user.imagePublicId) {
+    await deleteImage(user.imagePublicId).catch((e) =>
+      console.warn("⚠️  Could not delete old Cloudinary image:", e.message),
+    );
+  }
+
+  const result       = await uploadImage(req.file.buffer, "profiles");
+  user.image         = result.secure_url;
+  user.imagePublicId = result.public_id;
+  await user.save();
+
+  await logModel.create({
+    user:    req.user._id,
+    action:  "UPLOAD_USER_IMAGE",
+    details: { targetUserId: id, cloudinaryPublicId: result.public_id },
+  });
+
+  return res.status(200).json({ success: true, message: "Image uploaded", data: { imageUrl: result.secure_url }, errors: null });
+});
+
+export const logoutAll = asyncHandler(async (req, res) => {
+  const deleted = await refreshTokenModel.deleteMany({ user: req.user._id });
+  clearRefreshCookie(res);
+
+  await logModel.create({
+    user:    req.user._id,
+    action:  "LOGOUT_ALL_SESSIONS",
+    details: { sessionsRevoked: deleted.deletedCount },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: `Logged out from all devices. ${deleted.deletedCount} session(s) revoked.`,
+    data:    { sessionsRevoked: deleted.deletedCount },
+    errors:  null,
+  });
+});
 </file>
 
 <file path="src/modules/indexRouter.js">
@@ -13543,6 +13094,564 @@ export const editPayment = asyncHandler(async (req, res, next) => {
 });
 </file>
 
+<file path="src/services/bookingService.js">
+import mongoose from "mongoose";
+import { getMergedServiceTypes } from "./serviceTypeRegistry.js";
+import {
+  applyProviderSummaryDelta,
+  computeServiceDeltas,
+} from "./providerSummaryService.js";
+
+const getProvider = () => mongoose.model("Provider");
+const getBooking = () => mongoose.model("Booking");
+const getCounter = () => mongoose.model("Counter");
+
+/**
+ * Assigns bookingID and serviceNumbers.
+ *
+ * bookingID  → global auto-increment counter (unique across ALL bookings,
+ *              regardless of provider). Sequence: 1, 2, 3, 4, …
+ *
+ * serviceNumber → per service-provider sequence.
+ *   Each provider keeps their own currentSequence so a hotel's vouchers
+ *   are numbered 1, 2, 3, … independently of the booking ID.
+ *
+ * provider.totalBookings   → stat counter (decremented on deletion).
+ * provider.currentSequence → service-numbering HIGH-WATER MARK.
+ *
+ * ⚠️  currentSequence is intentionally NEVER decremented, even when a booking
+ *     is deleted. Decrementing it would cause the next created service for
+ *     that provider to receive a number already issued to a previous (now
+ *     deleted) service — a duplicate service-number collision.
+ *     Only totalBookings (a display stat) is decremented on delete.
+ *
+ * Case 4 fix: replaced all `{ new: true }` options with
+ * `{ returnDocument: 'after' }`. `new: true` is deprecated in Mongoose 9
+ * and triggers a console warning on every call. Both options are equivalent
+ * — they both return the document AFTER the update is applied.
+ */
+export const assignBookingSequences = async (doc) => {
+  const Provider = getProvider();
+  const Booking = getBooking();
+  const Counter = getCounter();
+
+  if (doc.isNew) {
+    // ── Global booking ID ────────────────────────────────────────────────────
+    const counter = await Counter.findOneAndUpdate(
+      { _id: "booking" },
+      { $inc: { seq: 1 } },
+      { returnDocument: "after", upsert: true },
+    );
+    doc.bookingID = counter.seq;
+
+    // Update provider stats (totalBookings only — currentSequence is for services)
+    const mainProvider = await Provider.findByIdAndUpdate(
+      doc.provider,
+      { $inc: { totalBookings: 1 } },
+      { returnDocument: "after" },
+    );
+    if (!mainProvider) throw new Error("Main Provider not found");
+  } else if (doc.isModified("provider")) {
+    // Provider changed on an existing booking — adjust totalBookings on both sides
+    const oldDoc = await Booking.findById(doc._id).lean();
+    if (oldDoc && oldDoc.provider.toString() !== doc.provider.toString()) {
+      await Provider.findByIdAndUpdate(oldDoc.provider, {
+        $inc: { totalBookings: -1 },
+      });
+      const newProvider = await Provider.findByIdAndUpdate(
+        doc.provider,
+        { $inc: { totalBookings: 1 } },
+        { returnDocument: "after" },
+      );
+      if (!newProvider) throw new Error("New provider not found");
+      // bookingID stays unchanged when provider is swapped
+    }
+  }
+
+  // ── Service numbers ───────────────────────────────────────────────────────
+  // Every service (including those whose provider is the main booking provider)
+  // gets a number from that service-provider's own sequence.
+  const services = doc.services || [];
+  for (let i = 0; i < services.length; i++) {
+    const service = services[i];
+    if (!service.provider) continue;
+    if (service.serviceNumber != null) continue; // already assigned — preserve
+
+    const svcProvider = await Provider.findByIdAndUpdate(
+      service.provider,
+      { $inc: { currentSequence: 1 } },
+      { returnDocument: "after" },
+    );
+    if (!svcProvider) {
+      throw new Error(
+        `Service provider ${service.provider} not found during sequence assignment`,
+      );
+    }
+    doc.services[i].serviceNumber = svcProvider.currentSequence;
+  }
+
+  doc.markModified("services");
+};
+
+/**
+ * Recalculates all financial totals from the services array.
+ * Also auto-calculates duration for service types that define durationFields.
+ */
+export const calculateBookingTotals = (doc) => {
+  (doc.services || []).forEach((service) => {
+    const typeDef = getMergedServiceTypes()[service.serviceType];
+    if (typeDef?.durationFields && service.details) {
+      const fromVal = service.details[typeDef.durationFields.from];
+      const toVal = service.details[typeDef.durationFields.to];
+      if (fromVal && toVal) {
+        service.duration = Math.ceil(
+          (new Date(toVal) - new Date(fromVal)) / (1000 * 60 * 60 * 24),
+        );
+      }
+    }
+  });
+
+  let totalSell = 0;
+  let totalBuy = 0;
+
+  (doc.services || []).forEach((service) => {
+    service.profit = (Number(service.sell) || 0) - (Number(service.buy) || 0);
+    totalSell += Number(service.sell) || 0;
+    totalBuy += Number(service.buy) || 0;
+  });
+
+  doc.totalToPay = totalSell;
+  doc.totalToBuy = totalBuy;
+  doc.totalProfit = totalSell - totalBuy;
+  doc.remainingBalance = doc.totalToPay - (doc.totalPaid || 0);
+
+  if ((doc.totalPaid || 0) <= 0) doc.paymentStatus = "unpaid";
+  else if (doc.totalPaid >= doc.totalToPay) doc.paymentStatus = "paid";
+  else doc.paymentStatus = "partial";
+};
+</file>
+
+<file path="DB/model/booking.model.js">
+import mongoose from "mongoose";
+import {
+  assignBookingSequences,
+  calculateBookingTotals,
+} from "../../src/services/bookingService.js";
+import {
+  applyProviderSummaryDelta,
+  computeServiceDeltas,
+} from "../../src/services/providerSummaryService.js";
+import { getMergedServiceTypeKeys } from "../../src/services/serviceTypeRegistry.js";
+
+const bookingSchema = new mongoose.Schema(
+  {
+    bookingID: Number,
+    provider: {
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      "Provider",
+      required: true,
+    },
+    createdBy: {
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      "User",
+      required: true,
+    },
+    status: {
+      type:    String,
+      enum:    ["pending", "confirmed", "cancelled", "completed"],
+      default: "pending",
+    },
+    totalToPay:       { type: Number, default: 0 },
+    totalToBuy:       { type: Number, default: 0 },
+    totalProfit:      { type: Number, default: 0 },
+    totalPaid:        { type: Number, default: 0 },
+    remainingBalance: { type: Number, default: 0 },
+    paymentStatus: {
+      type:    String,
+      enum:    ["unpaid", "partial", "paid"],
+      default: "unpaid",
+    },
+    customers: [{ name: String, ageType: String }],
+
+    /**
+     * Unified services array — replaces the former named arrays
+     * (accommodations, carRentals, carWithDriver).
+     *
+     * serviceType drives all processing logic via the SERVICE_TYPES registry.
+     * details holds every type-specific field (checkIn/checkOut, brand, etc.).
+     * notes  is a free-text optional field available on every service type,
+     *        regardless of whether it is built-in or office-defined.
+     */
+    services: [
+      {
+        serviceType: {
+          type:     String,
+          required: true,
+          validate: {
+            validator(v) {
+              return getMergedServiceTypeKeys().includes(v);
+            },
+            message: "Invalid service type",
+          },
+        },
+        serviceNumber: Number,
+        provider: {
+          type:     mongoose.Schema.Types.ObjectId,
+          ref:      "Provider",
+          required: true,
+        },
+        buy:    { type: Number, default: 0 },
+        sell:   { type: Number, default: 0 },
+        profit: { type: Number, default: 0 },
+        // Auto-calculated for service types that define durationFields
+        duration: Number,
+        // All type-specific fields (checkIn, checkOut, brand, driverName, etc.)
+        details: { type: mongoose.Schema.Types.Mixed, default: {} },
+        // Free-text note for this specific service — not required, any length
+        // up to 1 000 characters. Available on every service type.
+        notes: { type: String, default: "" },
+      },
+    ],
+
+    totalPax: { adults: Number, kids: Number, total: Number },
+  },
+  { timestamps: true },
+);
+
+bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
+
+// ── pre-save ──────────────────────────────────────────────────────────────────
+bookingSchema.pre("save", async function () {
+  this._wasNew = this.isNew;
+
+  if (!this.isNew) {
+    const oldDoc = await this.constructor.findById(this._id).lean();
+    this._oldServiceDeltas = oldDoc ? computeServiceDeltas(oldDoc) : new Map();
+  }
+
+  await assignBookingSequences(this);
+  calculateBookingTotals(this);
+});
+
+// ── post-save ─────────────────────────────────────────────────────────────────
+bookingSchema.post("save", async function () {
+  try {
+    const newDeltas = computeServiceDeltas(this);
+
+    if (this._wasNew) {
+      for (const [pid, delta] of newDeltas) {
+        await applyProviderSummaryDelta(pid, {
+          totalBuy:  delta.buy,
+          totalSell: delta.sell,
+        });
+      }
+    } else if (this._oldServiceDeltas) {
+      const allProviderIds = new Set([
+        ...newDeltas.keys(),
+        ...this._oldServiceDeltas.keys(),
+      ]);
+
+      for (const pid of allProviderIds) {
+        const oldD    = this._oldServiceDeltas.get(pid) || { buy: 0, sell: 0 };
+        const newD    = newDeltas.get(pid)              || { buy: 0, sell: 0 };
+        const diffBuy  = newD.buy  - oldD.buy;
+        const diffSell = newD.sell - oldD.sell;
+
+        if (diffBuy !== 0 || diffSell !== 0) {
+          await applyProviderSummaryDelta(pid, {
+            totalBuy:  diffBuy,
+            totalSell: diffSell,
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.error(
+      "❌ Provider summary sync failed after booking save:",
+      err.message,
+    );
+  }
+});
+
+// ── post-deleteOne ────────────────────────────────────────────────────────────
+bookingSchema.post(
+  "deleteOne",
+  { document: true, query: false },
+  async function () {
+    try {
+      const deltas = computeServiceDeltas(this);
+      for (const [pid, delta] of deltas) {
+        await applyProviderSummaryDelta(pid, {
+          totalBuy:  -delta.buy,
+          totalSell: -delta.sell,
+        });
+      }
+    } catch (err) {
+      console.error(
+        "❌ Provider summary sync failed after booking delete:",
+        err.message,
+      );
+    }
+  },
+);
+
+export default mongoose.model("Booking", bookingSchema);
+</file>
+
+<file path="src/modules/provider/controller/provider.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+import logModel from "../../../../DB/model/log.model.js";
+import mongoose from "mongoose";
+import { pagination } from "../../../services/pagination.js";
+import { resyncProviderSummary } from "../../../services/providerSummaryService.js";
+
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export const createProvider = asyncHandler(async (req, res, next) => {
+  const { name, type, phone, address } = req.body;
+  const isExist = await providerModel.findOne({ name });
+  if (isExist)
+    return next(new Error("Provider name already exists", { cause: 400 }));
+  const provider = await providerModel.create({
+    name,
+    type,
+    phone,
+    address,
+    currentSequence: 0,
+  });
+  await logModel.create({
+    user: req.user._id,
+    action: "CREATE_PROVIDER",
+    details: { providerId: provider._id, providerName: provider.name },
+  });
+  res
+    .status(201)
+    .json({
+      success: true,
+      message: "Provider created successfully",
+      data: { provider },
+      errors: null,
+    });
+});
+
+export const deleteProvider = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const hasBookings = await mongoose
+    .model("Booking")
+    .findOne({ $or: [{ provider: id }, { "services.provider": id }] });
+  if (hasBookings)
+    return next(
+      new Error(
+        "Cannot delete provider with active bookings. Remove all linked bookings first.",
+        { cause: 400 },
+      ),
+    );
+  const provider = await providerModel.findByIdAndDelete(id);
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+  await logModel.create({
+    user: req.user._id,
+    action: "DELETE_PROVIDER",
+    details: { providerId: id, providerName: provider.name },
+  });
+  res
+    .status(200)
+    .json({
+      success: true,
+      message: "Provider deleted successfully",
+      data: null,
+      errors: null,
+    });
+});
+
+// Phase 1: name escaped before $regex
+export const getAllProviders = asyncHandler(async (req, res) => {
+  const { type, name, page, size } = req.query;
+  const query = {};
+  if (type) query.type = type;
+  if (name) query.name = { $regex: escapeRegex(name.trim()), $options: "i" };
+  const { limit, skip } = pagination(page, size || 50);
+  const [providers, totalCount] = await Promise.all([
+    providerModel.find(query).sort({ name: 1 }).limit(limit).skip(skip),
+    providerModel.countDocuments(query),
+  ]);
+  res
+    .status(200)
+    .json({
+      success: true,
+      message: "Data retrieved successfully",
+      data: {
+        totalCount,
+        totalPages: Math.ceil(totalCount / limit),
+        page: parseInt(page) || 1,
+        count: providers.length,
+        providers,
+      },
+      errors: null,
+    });
+});
+
+export const getProviderById = asyncHandler(async (req, res, next) => {
+  const provider = await providerModel.findById(req.params.id);
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+  res
+    .status(200)
+    .json({
+      success: true,
+      message: "Data retrieved successfully",
+      data: { provider },
+      errors: null,
+    });
+});
+
+export const updateProvider = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const update = {};
+  for (const [key, value] of Object.entries(req.body)) {
+    if (
+      key !== "_id" &&
+      key !== "currentSequence" &&
+      key !== "totalBookings" &&
+      key !== "summary" &&
+      value != null
+    ) {
+      update[key] = value;
+    }
+  }
+  if (update.name) {
+    const duplicate = await providerModel.findOne({
+      name: update.name,
+      _id: { $ne: id },
+    });
+    if (duplicate)
+      return next(
+        new Error(`Provider name "${update.name}" is already taken.`, {
+          cause: 400,
+        }),
+      );
+  }
+  const provider = await providerModel.findByIdAndUpdate(
+    id,
+    { $set: update },
+    { new: true, runValidators: true },
+  );
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+  await logModel.create({
+    user: req.user._id,
+    action: "UPDATE_PROVIDER",
+    details: { providerId: id, updatedFields: Object.keys(req.body) },
+  });
+  res
+    .status(200)
+    .json({
+      success: true,
+      message: "Provider updated successfully",
+      data: { provider },
+      errors: null,
+    });
+});
+
+export const resyncProvider = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  const provider = await providerModel.findById(id).select("_id name");
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+  const summary = await resyncProviderSummary(id);
+  await logModel.create({
+    user: req.user._id,
+    action: "RESYNC_PROVIDER_SUMMARY",
+    details: { providerId: id, providerName: provider.name, summary },
+  });
+  return res
+    .status(200)
+    .json({
+      success: true,
+      message: `Provider "${provider.name}" summary resynced successfully`,
+      data: { summary },
+      errors: null,
+    });
+});
+
+export const resyncAllProviders = asyncHandler(async (req, res) => {
+  const providers = await providerModel.find({}).select("_id name").lean();
+  const results = [],
+    errors = [];
+  for (const p of providers) {
+    try {
+      results.push({
+        providerId: p._id,
+        name: p.name,
+        summary: await resyncProviderSummary(p._id.toString()),
+      });
+    } catch (err) {
+      errors.push({ providerId: p._id, name: p.name, error: err.message });
+    }
+  }
+  await logModel.create({
+    user: req.user._id,
+    action: "RESYNC_ALL_PROVIDER_SUMMARIES",
+    details: {
+      total: providers.length,
+      succeeded: results.length,
+      failed: errors.length,
+    },
+  });
+  return res
+    .status(200)
+    .json({
+      success: true,
+      message: `Resynced ${results.length} of ${providers.length} providers`,
+      data: { results, errors },
+      errors: errors.length ? errors : null,
+    });
+});
+
+/**
+ * GET /api/v1/provider/sync-failures
+ *
+ * Returns provider summary drift events written by applyProviderSummaryDelta
+ * whenever a delta update fails. Requires Phase 4 SyncFailure model.
+ *
+ * Query params:
+ *   resolved  "false" (default) | "true" | "all"
+ *   providerId  optional — filter by specific provider ObjectId
+ *   page, size  pagination
+ */
+export const getSyncFailures = asyncHandler(async (req, res) => {
+  const { resolved = "false", providerId, page, size } = req.query;
+  const SyncFailure = mongoose.model("SyncFailure");
+
+  const query = {};
+  if (resolved !== "all") query.resolved = resolved === "true";
+  if (providerId) query.providerId = new mongoose.Types.ObjectId(providerId);
+
+  const { limit, skip } = pagination(page, size || 20);
+
+  const [failures, totalCount, unresolvedCount] = await Promise.all([
+    SyncFailure.find(query)
+      .populate("providerId", "name type")
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .skip(skip)
+      .lean(),
+    SyncFailure.countDocuments(query),
+    SyncFailure.countDocuments({ resolved: false }),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Sync failures retrieved",
+    data: {
+      totalCount,
+      unresolvedCount,
+      totalPages: Math.ceil(totalCount / limit),
+      page: parseInt(page) || 1,
+      failures,
+    },
+    errors: null,
+  });
+});
+</file>
+
 <file path="src/modules/booking/controller/booking.controller.js">
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
@@ -13554,6 +13663,19 @@ import { pagination } from "../../../services/pagination.js";
 import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
 import mongoose from "mongoose";
 
+// ── Security helper ───────────────────────────────────────────────────────────
+/**
+ * Escapes regex metacharacters so user-supplied strings cannot be used as
+ * injection vectors inside MongoDB $regex queries.
+ *
+ * Without this: ?customerName=.* → full collection scan
+ *               ?customerName=(?i)secret → data enumeration
+ *
+ * Phase 1 security fix — the ONLY change to this file vs. the original.
+ */
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// ── Protected fields ──────────────────────────────────────────────────────────
 const PROTECTED_BOOKING_FIELDS = [
   "bookingID",
   "createdBy",
@@ -13564,7 +13686,8 @@ const PROTECTED_BOOKING_FIELDS = [
   "totalProfit",
 ];
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Local validation helpers ──────────────────────────────────────────────────
+// These are private to this controller — NOT exported, NOT imported from bookingService.
 
 /**
  * Validates type-specific required fields inside service.details.
@@ -13598,7 +13721,10 @@ const validateServiceDetails = (service) => {
   }
 
   for (const field of typeDef.detailFields ?? []) {
-    if (field.required && (details[field.key] == null || details[field.key] === "")) {
+    if (
+      field.required &&
+      (details[field.key] == null || details[field.key] === "")
+    ) {
       const err = new Error(
         `Service type "${serviceType}" requires details.${field.key}`,
       );
@@ -13633,6 +13759,61 @@ const validateSubProviders = async (services = []) => {
   }
 
   return null;
+};
+
+// ── Sequence resync helper ────────────────────────────────────────────────────
+/**
+ * Resyncs `currentSequence` for each provider in `providerIds` to the
+ * actual maximum `serviceNumber` still assigned across all remaining bookings.
+ *
+ * Why not just `$inc: -1`?
+ *   A naive decrement causes E11000 duplicate-key errors when the next
+ *   booking is created — two services end up with the same number.
+ *
+ * Why this approach is safe:
+ *   We always set `currentSequence` to `MAX(serviceNumber)` of live data.
+ *   The next service created for this provider gets `currentSequence + 1`,
+ *   which is guaranteed unique because it is strictly greater than any
+ *   serviceNumber currently in the database.
+ *
+ * Example:
+ *   Provider has services 1, 2, 3, 4, 5.
+ *   Booking with services 4 and 5 is deleted.
+ *   MAX of remaining = 3 → currentSequence = 3.
+ *   Next service gets 4 → no gap visible to users, no duplicate.
+ *
+ * Performance note:
+ *   Runs one lightweight $group aggregation per unique provider.
+ *   Deletions are infrequent; the extra aggregation cost is acceptable
+ *   and far cheaper than a full resync of all financial summaries.
+ *
+ * @param {string[]} providerIds - Array of provider ObjectId strings.
+ */
+const resyncProviderSequences = async (providerIds) => {
+  if (!providerIds.length) return;
+
+  await Promise.all(
+    providerIds.map(async (providerId) => {
+      const providerObjId = new mongoose.Types.ObjectId(providerId);
+
+      // Find the highest serviceNumber still in use for this provider
+      // across all bookings that still exist in the database.
+      const [result] = await bookingModel.aggregate([
+        { $match: { "services.provider": providerObjId } },
+        { $unwind: "$services" },
+        { $match: { "services.provider": providerObjId } },
+        { $group: { _id: null, maxSeq: { $max: "$services.serviceNumber" } } },
+      ]);
+
+      // If no services remain at all for this provider, reset to 0 so the
+      // next service gets number 1 (clean slate).
+      const newSequence = result?.maxSeq ?? 0;
+
+      await providerModel.findByIdAndUpdate(providerId, {
+        $set: { currentSequence: newSequence },
+      });
+    }),
+  );
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -13684,6 +13865,7 @@ export const createBooking = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Get all bookings
+// Phase 1 change: customerName is now escaped before use in $regex.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getAllBookings = asyncHandler(async (req, res) => {
   const {
@@ -13710,8 +13892,13 @@ export const getAllBookings = asyncHandler(async (req, res) => {
   if (serviceType) query["services.serviceType"] = serviceType;
   if (status) query.status = status;
   if (paymentStatus) query.paymentStatus = paymentStatus;
+
+  // Phase 1 security fix: escape user input before using as regex pattern
   if (customerName)
-    query["customers.name"] = { $regex: customerName, $options: "i" };
+    query["customers.name"] = {
+      $regex: escapeRegex(customerName.trim()),
+      $options: "i",
+    };
 
   if (fromDate || toDate) {
     query.createdAt = {};
@@ -13793,9 +13980,6 @@ export const getBookingById = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Update booking
-// FIX Bug 2: validateSubProviders + validateServiceDetails are now called
-// for any incoming services array, closing the validation gap that existed
-// when updating vs creating a booking.
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
@@ -13806,7 +13990,6 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
     .populate("createdBy", "userName email");
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  // ── Bug 2 fix: validate services before merging ───────────────────────────
   if (data.services && Array.isArray(data.services)) {
     const subProviderError = await validateSubProviders(data.services);
     if (subProviderError) return next(subProviderError);
@@ -13889,11 +14072,10 @@ export const addServiceToBooking = asyncHandler(async (req, res, next) => {
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
   const providerDoc = await providerModel.findById(provider).select("_id");
-  if (!providerDoc) {
+  if (!providerDoc)
     return next(
       new Error(`Provider ${provider} does not exist.`, { cause: 404 }),
     );
-  }
 
   const detailError = validateServiceDetails({
     serviceType,
@@ -13946,7 +14128,10 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   );
   if (!serviceItem) return next(new Error("Service not found", { cause: 404 }));
 
-  // currentSequence is a high-water mark — never decrement on remove.
+  // Capture the provider ID before removing the service so we can
+  // resync currentSequence after the save.
+  const removedProviderId = serviceItem.provider?.toString();
+
   await logModel.create({
     user: req.user._id,
     action: "REMOVE_SERVICE",
@@ -13962,6 +14147,14 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
     (item) => item._id.toString() !== serviceId,
   );
   await booking.save();
+
+  // Resync the affected provider's currentSequence to the actual maximum
+  // serviceNumber still in use. This allows the sequence to decrease when
+  // services are removed, so the next service gets a sensibly low number
+  // instead of continuing from the old high-water mark.
+  if (removedProviderId) {
+    await resyncProviderSequences([removedProviderId]);
+  }
 
   return res.status(200).json({
     success: true,
@@ -13979,6 +14172,16 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
+  // Collect unique provider IDs from this booking's services BEFORE deletion
+  // so we know which providers need their sequence resynced afterwards.
+  const affectedProviderIds = [
+    ...new Set(
+      (booking.services || [])
+        .map((s) => s.provider?.toString())
+        .filter(Boolean),
+    ),
+  ];
+
   await mongoose.model("Provider").findByIdAndUpdate(booking.provider, {
     $inc: { totalBookings: -1 },
   });
@@ -13994,7 +14197,15 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
     },
   });
 
+  // Delete the booking document first so the subsequent aggregation
+  // reflects its services as gone and computes the correct new max.
   await booking.deleteOne();
+
+  // Resync currentSequence for every provider whose services appeared in
+  // this booking. Each provider's sequence is set to MAX(serviceNumber)
+  // of its remaining services across all other bookings. If a provider
+  // has no remaining services, its sequence resets to 0 (next gets 1).
+  await resyncProviderSequences(affectedProviderIds);
 
   return res.status(200).json({
     success: true,
@@ -14005,21 +14216,16 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Change Booking Status
-// FIX Bug 8: validation now runs BEFORE writing to DB.
-// Old code called findByIdAndUpdate first, then checked the guard — meaning
-// the DB could already hold status:"completed" before the 400 fired.
+// Change booking status
 // ─────────────────────────────────────────────────────────────────────────────
 export const editStatus = asyncHandler(async (req, res, next) => {
   const { newStatus } = req.body;
   if (!newStatus)
     return next(new Error("Enter the new status", { cause: 400 }));
 
-  // Fetch first so we can validate before touching the DB
   const booking = await bookingModel.findById(req.params.id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  // Guard runs BEFORE the write
   if (newStatus === "completed" && booking.paymentStatus !== "paid") {
     return next(
       new Error(
@@ -14042,16 +14248,18 @@ export const editStatus = asyncHandler(async (req, res, next) => {
 </file>
 
 <file path="app.js">
-import express from "express";
-import dotenv from "dotenv";
-import cors from "cors";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
-import connectDB from "./DB/connection.js";
+import express      from "express";
+import dotenv       from "dotenv";
+import cors         from "cors";
+import helmet       from "helmet";
+import cookieParser from "cookie-parser";
+import rateLimit    from "express-rate-limit";
+import connectDB    from "./DB/connection.js";
 import * as indexRouter from "./src/modules/indexRouter.js";
 
 dotenv.config({ path: "./config/.env" });
 
+// ── Required environment guard ────────────────────────────────────────────────
 const REQUIRED_ENV = [
   "DBURI", "SIGNINTOKEN", "FORGOTPASSWORDTOKEN", "SALTROUND",
   "SENDEREMAIL", "SENDEREMAILPASSWORD",
@@ -14066,6 +14274,7 @@ if (missingEnv.length) {
 const app  = express();
 const port = process.env.PORT || 3000;
 
+// ── Core middleware ───────────────────────────────────────────────────────────
 app.use(helmet());
 app.set("trust proxy", 1);
 
@@ -14078,30 +14287,43 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
     callback(new Error("Not allowed by CORS"));
   },
-  credentials: true,
+  credentials: true, // required for httpOnly cookie exchange
 }));
 
 app.use(express.json({ limit: "10kb" }));
 
+// cookieParser is required to read req.cookies.refreshToken set by the
+// auth controller. Must be registered before any route handler.
+app.use(cookieParser());
+
 // ── Rate limiters ─────────────────────────────────────────────────────────────
+// Auth: reduced to 8 attempts per 15 min (was 20).
+// At 8 attempts the brute-force window is ~2,304 guesses/day per IP —
+// still allows legitimate typos while making password spraying impractical.
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 20,
-  message: { success: false, message: "Too many requests from this IP, please try again later." },
-  standardHeaders: true, legacyHeaders: false,
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  message: { success: false, message: "Too many login attempts. Please try again in 15 minutes." },
+  standardHeaders: true,
+  legacyHeaders:   false,
 });
 
-// Export shares the heavy limiter — it runs a full DB scan and is
-// admin-only, so one request at a time per IP is entirely appropriate.
+// Heavy: aggregation, reports, and full exports — low throughput by design.
 const heavyLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 10,
+  windowMs: 60 * 1000,
+  max: 10,
   message: { success: false, message: "Too many requests. Please wait before retrying." },
-  standardHeaders: true, legacyHeaders: false,
+  standardHeaders: true,
+  legacyHeaders:   false,
 });
 
+// General: all other authenticated endpoints.
 const generalLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 120,
+  windowMs: 60 * 1000,
+  max: 120,
   message: { success: false, message: "Too many requests. Please slow down." },
-  standardHeaders: true, legacyHeaders: false,
+  standardHeaders: true,
+  legacyHeaders:   false,
 });
 
 // ── DB ────────────────────────────────────────────────────────────────────────
@@ -14113,9 +14335,7 @@ const baseUrl = process.env.BASEURL || "/api/v1";
 app.use(`${baseUrl}/auth`,                authLimiter,    indexRouter.authRouter);
 app.use(`${baseUrl}/view-board`,          heavyLimiter,   indexRouter.viewBoardRouter);
 app.use(`${baseUrl}/report`,              heavyLimiter,   indexRouter.reportRouter);
-// Export streams a full DB scan — treat it like a heavy aggregation endpoint
 app.use(`${baseUrl}/export`,              heavyLimiter,   indexRouter.exportRouter);
-
 app.use(`${baseUrl}/booking`,             generalLimiter, indexRouter.bookingRouter);
 app.use(`${baseUrl}/booking`,             generalLimiter, indexRouter.paymentRouter);
 app.use(`${baseUrl}/provider`,            generalLimiter, indexRouter.providerRouter);
@@ -14129,6 +14349,7 @@ app.use(`${baseUrl}/office-settings`,     generalLimiter, indexRouter.officeSett
 app.use(`${baseUrl}/service-types`,       generalLimiter, indexRouter.serviceTypeRouter);
 
 // ── Error handlers ────────────────────────────────────────────────────────────
+// Central error handler — asyncHandler forwards all thrown errors here.
 app.use((err, req, res, next) => {
   const status = err.cause || 500;
   return res.status(status).json({
@@ -14139,6 +14360,7 @@ app.use((err, req, res, next) => {
   });
 });
 
+// 404 fallback
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });

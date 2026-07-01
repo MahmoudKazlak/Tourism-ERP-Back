@@ -106,6 +106,61 @@ const validateSubProviders = async (services = []) => {
   return null;
 };
 
+// ── Sequence resync helper ────────────────────────────────────────────────────
+/**
+ * Resyncs `currentSequence` for each provider in `providerIds` to the
+ * actual maximum `serviceNumber` still assigned across all remaining bookings.
+ *
+ * Why not just `$inc: -1`?
+ *   A naive decrement causes E11000 duplicate-key errors when the next
+ *   booking is created — two services end up with the same number.
+ *
+ * Why this approach is safe:
+ *   We always set `currentSequence` to `MAX(serviceNumber)` of live data.
+ *   The next service created for this provider gets `currentSequence + 1`,
+ *   which is guaranteed unique because it is strictly greater than any
+ *   serviceNumber currently in the database.
+ *
+ * Example:
+ *   Provider has services 1, 2, 3, 4, 5.
+ *   Booking with services 4 and 5 is deleted.
+ *   MAX of remaining = 3 → currentSequence = 3.
+ *   Next service gets 4 → no gap visible to users, no duplicate.
+ *
+ * Performance note:
+ *   Runs one lightweight $group aggregation per unique provider.
+ *   Deletions are infrequent; the extra aggregation cost is acceptable
+ *   and far cheaper than a full resync of all financial summaries.
+ *
+ * @param {string[]} providerIds - Array of provider ObjectId strings.
+ */
+const resyncProviderSequences = async (providerIds) => {
+  if (!providerIds.length) return;
+
+  await Promise.all(
+    providerIds.map(async (providerId) => {
+      const providerObjId = new mongoose.Types.ObjectId(providerId);
+
+      // Find the highest serviceNumber still in use for this provider
+      // across all bookings that still exist in the database.
+      const [result] = await bookingModel.aggregate([
+        { $match: { "services.provider": providerObjId } },
+        { $unwind: "$services" },
+        { $match: { "services.provider": providerObjId } },
+        { $group: { _id: null, maxSeq: { $max: "$services.serviceNumber" } } },
+      ]);
+
+      // If no services remain at all for this provider, reset to 0 so the
+      // next service gets number 1 (clean slate).
+      const newSequence = result?.maxSeq ?? 0;
+
+      await providerModel.findByIdAndUpdate(providerId, {
+        $set: { currentSequence: newSequence },
+      });
+    }),
+  );
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Create booking
 // ─────────────────────────────────────────────────────────────────────────────
@@ -418,7 +473,10 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   );
   if (!serviceItem) return next(new Error("Service not found", { cause: 404 }));
 
-  // currentSequence is a high-water mark — never decrement on remove.
+  // Capture the provider ID before removing the service so we can
+  // resync currentSequence after the save.
+  const removedProviderId = serviceItem.provider?.toString();
+
   await logModel.create({
     user: req.user._id,
     action: "REMOVE_SERVICE",
@@ -434,6 +492,14 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
     (item) => item._id.toString() !== serviceId,
   );
   await booking.save();
+
+  // Resync the affected provider's currentSequence to the actual maximum
+  // serviceNumber still in use. This allows the sequence to decrease when
+  // services are removed, so the next service gets a sensibly low number
+  // instead of continuing from the old high-water mark.
+  if (removedProviderId) {
+    await resyncProviderSequences([removedProviderId]);
+  }
 
   return res.status(200).json({
     success: true,
@@ -451,6 +517,16 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
+  // Collect unique provider IDs from this booking's services BEFORE deletion
+  // so we know which providers need their sequence resynced afterwards.
+  const affectedProviderIds = [
+    ...new Set(
+      (booking.services || [])
+        .map((s) => s.provider?.toString())
+        .filter(Boolean),
+    ),
+  ];
+
   await mongoose.model("Provider").findByIdAndUpdate(booking.provider, {
     $inc: { totalBookings: -1 },
   });
@@ -466,7 +542,15 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
     },
   });
 
+  // Delete the booking document first so the subsequent aggregation
+  // reflects its services as gone and computes the correct new max.
   await booking.deleteOne();
+
+  // Resync currentSequence for every provider whose services appeared in
+  // this booking. Each provider's sequence is set to MAX(serviceNumber)
+  // of its remaining services across all other bookings. If a provider
+  // has no remaining services, its sequence resets to 0 (next gets 1).
+  await resyncProviderSequences(affectedProviderIds);
 
   return res.status(200).json({
     success: true,

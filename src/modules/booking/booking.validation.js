@@ -69,15 +69,18 @@ const serviceSchema = Joi.object({
     "string.hex": "Invalid provider ID format",
     "string.length": "Invalid provider ID length",
   }),
-  buy: Joi.number().min(0).default(0),
+  buy:  Joi.number().min(0).default(0),
   sell: Joi.number().min(0).default(0),
-  // details holds all type-specific fields; unknown keys are allowed
+  // details holds all type-specific fields (checkIn, checkOut, brand, etc.)
   details: Joi.object().unknown(true).default({}),
+  // notes: free-text field available on every service, never required.
+  // Allows staff to record context, special requests, or internal remarks.
+  notes: Joi.string().trim().max(1000).allow("").optional().default(""),
 });
 
 const totalPaxSchema = Joi.object({
   adults: Joi.number().integer().min(0).default(0),
-  kids: Joi.number().integer().min(0).default(0),
+  kids:   Joi.number().integer().min(0).default(0),
 });
 
 // ── Route schemas ─────────────────────────────────────────────────────────────
@@ -86,15 +89,15 @@ export const createBooking = {
   body: Joi.object({
     provider: objectId.required().messages({
       "any.required": "Main provider is required",
-      "string.hex": "Invalid provider ID format",
-      "string.length": "Invalid provider ID length",
+      "string.hex":   "Invalid provider ID format",
+      "string.length":"Invalid provider ID length",
     }),
     status: Joi.string()
       .valid("pending", "confirmed", "cancelled", "completed")
       .default("pending"),
     customers: Joi.array().items(customerSchema).min(1).required().messages({
       "any.required": "At least one customer is required",
-      "array.min": "At least one customer is required",
+      "array.min":    "At least one customer is required",
     }),
     services: Joi.array().items(serviceSchema).default([]),
     totalPax: totalPaxSchema.optional(),
@@ -104,21 +107,18 @@ export const createBooking = {
 export const updateBooking = {
   body: Joi.object({
     status: Joi.string().valid(
-      "pending",
-      "confirmed",
-      "cancelled",
-      "completed",
+      "pending", "confirmed", "cancelled", "completed",
     ),
     customers: Joi.array().items(customerSchema).min(1),
-    services: Joi.array().items(serviceSchema),
-    totalPax: totalPaxSchema,
+    services:  Joi.array().items(serviceSchema),
+    totalPax:  totalPaxSchema,
   })
     .min(1)
     .messages({ "object.min": "At least one field is required to update" }),
   params: Joi.object({
     id: objectId.required().messages({
-      "string.hex": "Invalid booking ID",
-      "string.length": "Invalid booking ID",
+      "string.hex":   "Invalid booking ID",
+      "string.length":"Invalid booking ID",
     }),
   }),
 };
@@ -151,13 +151,13 @@ export const getAllBookingsQuery = {
   query: Joi.object({
     bookingID:     Joi.number().integer().min(1),
     provider:      objectId,
-    serviceType:   serviceTypeQueryValidator,  // dynamic — accepts any registered type
+    serviceType:   serviceTypeQueryValidator,
     status:        Joi.string().valid("pending", "confirmed", "cancelled", "completed"),
     paymentStatus: Joi.string().valid("unpaid", "partial", "paid"),
     customerName:  Joi.string().trim().min(1).max(100),
     fromDate:      Joi.date(),
     toDate:        Joi.date().when("fromDate", {
-      is: Joi.exist(),
+      is:   Joi.exist(),
       then: Joi.date().min(Joi.ref("fromDate")).messages({
         "date.min": "toDate must be after fromDate",
       }),

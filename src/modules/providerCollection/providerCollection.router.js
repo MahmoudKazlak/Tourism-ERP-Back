@@ -19,7 +19,7 @@ router.get(
 // DELETE /api/v1/provider-collection/:collectionId — Admin only
 router.delete(
   "/:collectionId",
-  auth(endpoint.AdminOnly),
+  auth(endpoint.AdminOnly), 
   validation(validators.deleteProviderCollection),
   providerCollectionController.deleteProviderCollection,
 );
