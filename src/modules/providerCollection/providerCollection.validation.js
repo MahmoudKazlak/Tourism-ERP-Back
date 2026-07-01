@@ -40,6 +40,28 @@ export const deleteProviderCollection = {
   }),
 };
 
+// NEW: edit a provider collection (Admin only) — mirrors editProviderPayment
+export const editProviderCollection = {
+  body: Joi.object({
+    amount: Joi.number().positive().messages({
+      "number.positive": "Amount must be greater than 0",
+    }),
+    date: Joi.date().max("now").messages({
+      "date.max": "Collection date cannot be in the future",
+    }),
+    method: Joi.string().valid("cash", "bank_transfer", "check", "other"),
+    notes: Joi.string().trim().max(300).allow(""),
+    reference: Joi.string().trim().max(100).allow(""),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    collectionId: objectId.required().messages({
+      "string.hex": "Invalid collection ID",
+    }),
+  }),
+};
+
 export const getProviderCollections = {
   params: Joi.object({
     providerId: objectId.required().messages({

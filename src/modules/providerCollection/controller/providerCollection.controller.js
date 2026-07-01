@@ -4,6 +4,7 @@ import providerModel from "../../../../DB/model/provider.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
+import { applyProviderSummaryDelta } from "../../../services/providerSummaryService.js";
 import mongoose from "mongoose";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -136,6 +137,69 @@ export const createProviderCollection = asyncHandler(async (req, res, next) => {
         remainingOwed: +(providerOwesUs - numAmount).toFixed(2),
       },
     },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: Edit a provider collection (Admin only)
+// PATCH /api/v1/provider-collection/:collectionId
+//
+// Mirrors editProviderPayment: the model's post-save hook only increments the
+// summary on document CREATION (isNew), so saving an existing document here
+// is a no-op for that hook — the amount delta must be pushed manually via
+// applyProviderSummaryDelta.
+// ─────────────────────────────────────────────────────────────────────────────
+export const editProviderCollection = asyncHandler(async (req, res, next) => {
+  const { collectionId } = req.params;
+  const { amount, date, method, notes, reference } = req.body;
+
+  const collection = await providerCollectionModel
+    .findById(collectionId)
+    .populate("provider", "name");
+  if (!collection) return next(new Error("Collection not found", { cause: 404 }));
+
+  const oldAmount = collection.amount;
+  const newAmount = amount !== undefined ? Number(amount) : oldAmount;
+  const amountChanged = newAmount !== oldAmount;
+
+  if (amount !== undefined) collection.amount = newAmount;
+  if (date !== undefined) collection.date = date;
+  if (method !== undefined) collection.method = method;
+  if (notes !== undefined) collection.notes = notes;
+  if (reference !== undefined) collection.reference = reference;
+
+  await collection.save();
+
+  if (amountChanged) {
+    await applyProviderSummaryDelta(
+      collection.provider._id,
+      { totalCollectedFromProvider: newAmount - oldAmount },
+      "providerCollection_edit",
+    );
+  }
+
+  await logModel.create({
+    user: req.user._id,
+    action: "EDIT_PROVIDER_COLLECTION",
+    details: {
+      collectionId,
+      providerId: collection.provider._id,
+      providerName: collection.provider?.name,
+      changes: {
+        ...(amountChanged && { amount: { from: oldAmount, to: newAmount } }),
+        ...(method !== undefined && { method }),
+        ...(date !== undefined && { date }),
+        ...(notes !== undefined && { notes }),
+        ...(reference !== undefined && { reference }),
+      },
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Provider collection updated successfully",
+    data: { collection },
     errors: null,
   });
 });

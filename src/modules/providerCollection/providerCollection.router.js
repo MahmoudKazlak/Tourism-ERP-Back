@@ -16,6 +16,14 @@ router.get(
   providerCollectionController.getAllProviderCollections,
 );
 
+// PATCH /api/v1/provider-collection/:collectionId — Admin only
+router.patch(
+  "/:collectionId",
+  auth(endpoint.AdminOnly),
+  validation(validators.editProviderCollection),
+  providerCollectionController.editProviderCollection,
+);
+
 // DELETE /api/v1/provider-collection/:collectionId — Admin only
 router.delete(
   "/:collectionId",
