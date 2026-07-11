@@ -335,6 +335,18 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
     .populate("createdBy", "userName email");
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
+  if (
+    data.expectedVersion !== undefined &&
+    booking.__v !== data.expectedVersion
+  ) {
+    return next(
+      new Error(
+        "This booking was modified by another user since you loaded it. Refresh and try again.",
+        { cause: 409 },
+      ),
+    );
+  }
+
   if (data.services && Array.isArray(data.services)) {
     const subProviderError = await validateSubProviders(data.services);
     if (subProviderError) return next(subProviderError);
@@ -348,22 +360,41 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
   const oldStatus = booking.status;
 
   Object.keys(data).forEach((key) => {
-    if (PROTECTED_BOOKING_FIELDS.includes(key)) return;
+    if (PROTECTED_BOOKING_FIELDS.includes(key) || key === "expectedVersion")
+      return;
 
     if (key === "services" && Array.isArray(data.services)) {
-      // Merge by index — preserve serviceNumber on existing items
-      booking.services = data.services.map((newItem, index) => {
-        const oldItem = booking.services[index];
-        if (oldItem) {
-          return {
-            ...oldItem.toObject(),
+      const existingById = new Map(
+        booking.services.map((s) => [s._id.toString(), s]),
+      );
+
+      const mergedIds = new Set();
+      const merged = [];
+
+      for (const newItem of data.services) {
+        const existing =
+          newItem._id && existingById.get(newItem._id.toString());
+        if (existing) {
+          merged.push({
+            ...existing.toObject(),
             ...newItem,
-            _id: oldItem._id,
-            serviceNumber: newItem.serviceNumber ?? oldItem.serviceNumber,
-          };
+            _id: existing._id,
+            serviceNumber: newItem.serviceNumber ?? existing.serviceNumber,
+          });
+          mergedIds.add(existing._id.toString());
+        } else {
+          merged.push(newItem);
         }
-        return newItem;
-      });
+      }
+
+      for (const existing of booking.services) {
+        if (!mergedIds.has(existing._id.toString())) {
+          merged.push(existing.toObject());
+        }
+      }
+
+      booking.services = merged;
+      booking.markModified("services");
     } else if (key === "totalPax") {
       booking.totalPax = { ...booking.totalPax?.toObject(), ...data[key] };
     } else {
@@ -377,7 +408,19 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
       (Number(booking.totalPax.kids) || 0);
   }
 
-  await booking.save();
+  try {
+    await booking.save();
+  } catch (err) {
+    if (err.name === "VersionError") {
+      return next(
+        new Error(
+          "This booking was modified by another user since you loaded it. Refresh and try again.",
+          { cause: 409 },
+        ),
+      );
+    }
+    throw err;
+  }
 
   const newStatus = booking.status;
   if (data.status && data.status !== oldStatus) {
@@ -390,7 +433,7 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
     details: {
       bookingID: booking.bookingID,
       updatedFields: Object.keys(data).filter(
-        (k) => !PROTECTED_BOOKING_FIELDS.includes(k),
+        (k) => !PROTECTED_BOOKING_FIELDS.includes(k) && k !== "expectedVersion",
       ),
       statusChange: data.status
         ? { from: oldStatus, to: newStatus }
@@ -401,6 +444,93 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
   return res.status(200).json({
     success: true,
     message: "Booking updated successfully",
+    data: { booking },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edit a single existing service on a booking (Admin/booking_manage)
+// PATCH /api/v1/booking/:id/services/:serviceId
+//
+// Targeted alternative to sending a full/partial `services` array through
+// updateBooking. Only buy, sell, details, and notes are editable here.
+// serviceType, provider, and serviceNumber are immutable via this endpoint:
+//   - serviceNumber drives assignBookingSequences' "already assigned" guard
+//     (`if (service.serviceNumber != null) continue`) — mutating it outside
+//     that flow would desync the provider's currentSequence high-water mark.
+//   - serviceType/provider changes have sequence-numbering and provider
+//     summary implications (a service moving providers must reverse the old
+//     provider's delta and apply a new one) that are out of scope for a
+//     field-level edit; that belongs in remove+re-add.
+// ─────────────────────────────────────────────────────────────────────────────
+export const editService = asyncHandler(async (req, res, next) => {
+  const { id, serviceId } = req.params;
+  const { buy, sell, details, notes, expectedVersion } = req.body;
+
+  const booking = await bookingModel.findById(id);
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  if (expectedVersion !== undefined && booking.__v !== expectedVersion) {
+    return next(
+      new Error(
+        "This booking was modified by another user since you loaded it. Refresh and try again.",
+        { cause: 409 },
+      ),
+    );
+  }
+
+  const service = booking.services.id(serviceId);
+  if (!service) return next(new Error("Service not found", { cause: 404 }));
+
+  const mergedDetails =
+    details !== undefined
+      ? { ...service.details, ...details }
+      : service.details;
+
+  const detailError = validateServiceDetails({
+    serviceType: service.serviceType,
+    details: mergedDetails,
+  });
+  if (detailError) return next(detailError);
+
+  if (buy !== undefined) service.buy = buy;
+  if (sell !== undefined) service.sell = sell;
+  if (details !== undefined) service.details = mergedDetails;
+  if (notes !== undefined) service.notes = notes;
+
+  booking.markModified("services");
+
+  try {
+    await booking.save();
+  } catch (err) {
+    if (err.name === "VersionError") {
+      return next(
+        new Error(
+          "This booking was modified by another user since you loaded it. Refresh and try again.",
+          { cause: 409 },
+        ),
+      );
+    }
+    throw err;
+  }
+
+  await logModel.create({
+    user: req.user._id,
+    action: "EDIT_SERVICE",
+    details: {
+      bookingID: booking.bookingID,
+      serviceId,
+      serviceType: service.serviceType,
+      updatedFields: Object.keys(req.body).filter(
+        (k) => k !== "expectedVersion",
+      ),
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Service updated successfully",
     data: { booking },
     errors: null,
   });

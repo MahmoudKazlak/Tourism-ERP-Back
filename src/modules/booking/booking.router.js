@@ -54,6 +54,13 @@ router.patch(
 );
 
 router.patch(
+  "/:id/services/:serviceId",
+  auth(endpoint.booking_manage),
+  validation(validators.editService),
+  bookingController.editService,
+);
+
+router.patch(
   "/:id/remove",
   auth(endpoint.booking_manage),
   validation(validators.removeService),

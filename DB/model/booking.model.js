@@ -13,28 +13,28 @@ const bookingSchema = new mongoose.Schema(
   {
     bookingID: Number,
     provider: {
-      type:     mongoose.Schema.Types.ObjectId,
-      ref:      "Provider",
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Provider",
       required: true,
     },
     createdBy: {
-      type:     mongoose.Schema.Types.ObjectId,
-      ref:      "User",
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
       required: true,
     },
     status: {
-      type:    String,
-      enum:    ["pending", "confirmed", "cancelled", "completed"],
+      type: String,
+      enum: ["pending", "confirmed", "cancelled", "completed"],
       default: "pending",
     },
-    totalToPay:       { type: Number, default: 0 },
-    totalToBuy:       { type: Number, default: 0 },
-    totalProfit:      { type: Number, default: 0 },
-    totalPaid:        { type: Number, default: 0 },
+    totalToPay: { type: Number, default: 0 },
+    totalToBuy: { type: Number, default: 0 },
+    totalProfit: { type: Number, default: 0 },
+    totalPaid: { type: Number, default: 0 },
     remainingBalance: { type: Number, default: 0 },
     paymentStatus: {
-      type:    String,
-      enum:    ["unpaid", "partial", "paid"],
+      type: String,
+      enum: ["unpaid", "partial", "paid"],
       default: "unpaid",
     },
     customers: [{ name: String, ageType: String }],
@@ -51,7 +51,7 @@ const bookingSchema = new mongoose.Schema(
     services: [
       {
         serviceType: {
-          type:     String,
+          type: String,
           required: true,
           validate: {
             validator(v) {
@@ -62,12 +62,12 @@ const bookingSchema = new mongoose.Schema(
         },
         serviceNumber: Number,
         provider: {
-          type:     mongoose.Schema.Types.ObjectId,
-          ref:      "Provider",
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Provider",
           required: true,
         },
-        buy:    { type: Number, default: 0 },
-        sell:   { type: Number, default: 0 },
+        buy: { type: Number, default: 0 },
+        sell: { type: Number, default: 0 },
         profit: { type: Number, default: 0 },
         // Auto-calculated for service types that define durationFields
         duration: Number,
@@ -81,7 +81,7 @@ const bookingSchema = new mongoose.Schema(
 
     totalPax: { adults: Number, kids: Number, total: Number },
   },
-  { timestamps: true },
+  { timestamps: true, optimisticConcurrency: true },
 );
 
 bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });

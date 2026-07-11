@@ -101,6 +101,12 @@ app.use(`${baseUrl}/service-types`,       generalLimiter, indexRouter.serviceTyp
 // ── Error handlers ────────────────────────────────────────────────────────────
 // Central error handler — asyncHandler forwards all thrown errors here.
 app.use((err, req, res, next) => {
+  // تصفية أخطاء التداخل من Mongoose وتحويلها لـ 409 تلقائياً
+  if (err.name === "VersionError") {
+    err.cause = 409;
+    err.message = "This document was modified by another user. Please refresh and try again.";
+  }
+
   const status = err.cause || 500;
   return res.status(status).json({
     success: false,
@@ -114,7 +120,6 @@ app.use((err, req, res, next) => {
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
-
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
 });

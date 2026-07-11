@@ -107,18 +107,26 @@ export const createBooking = {
 export const updateBooking = {
   body: Joi.object({
     status: Joi.string().valid(
-      "pending", "confirmed", "cancelled", "completed",
+      "pending",
+      "confirmed",
+      "cancelled",
+      "completed",
     ),
+    provider: objectId.messages({
+      "string.hex": "Invalid provider ID",
+      "string.length": "Invalid provider ID",
+    }),
     customers: Joi.array().items(customerSchema).min(1),
-    services:  Joi.array().items(serviceSchema),
-    totalPax:  totalPaxSchema,
+    services: Joi.array().items(serviceSchema),
+    totalPax: totalPaxSchema,
+    expectedVersion: Joi.number().integer().min(0),
   })
     .min(1)
     .messages({ "object.min": "At least one field is required to update" }),
   params: Joi.object({
     id: objectId.required().messages({
-      "string.hex":   "Invalid booking ID",
-      "string.length":"Invalid booking ID",
+      "string.hex": "Invalid booking ID",
+      "string.length": "Invalid booking ID",
     }),
   }),
 };
@@ -168,5 +176,26 @@ export const getAllBookingsQuery = {
     sortOrder:  Joi.string().valid("asc", "desc"),
     page:       Joi.number().integer().min(1).default(1),
     size:       Joi.number().integer().min(1).max(100).default(10),
+  }),
+};
+export const editService = {
+  body: Joi.object({
+    buy: Joi.number().min(0),
+    sell: Joi.number().min(0),
+    details: Joi.object().unknown(true),
+    notes: Joi.string().trim().max(1000).allow(""),
+    expectedVersion: Joi.number().integer().min(0),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    id: objectId.required().messages({
+      "string.hex": "Invalid booking ID",
+      "string.length": "Invalid booking ID",
+    }),
+    serviceId: objectId.required().messages({
+      "string.hex": "Invalid service ID",
+      "string.length": "Invalid service ID",
+    }),
   }),
 };
