@@ -508,3 +508,26 @@ export const editPayment = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get a single payment by ID
+// GET /api/v1/booking/payments/:paymentId
+// ─────────────────────────────────────────────────────────────────────────────
+export const getPaymentById = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+
+  const payment = await paymentModel
+    .findById(paymentId)
+    .populate("booking", "bookingID customers")
+    .populate("recordedBy", "userName")
+    .populate("providerRecipient", "name type");
+
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: { payment },
+    errors: null,
+  });
+});

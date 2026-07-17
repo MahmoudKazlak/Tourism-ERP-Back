@@ -15,6 +15,13 @@ router.get(
   paymentController.getAllPayments,
 );
 
+// NEW: single payment lookup by ID — powers PaymentDetailPage.jsx
+router.get(
+  "/payments/:paymentId",
+  auth(endpoint.booking_view),
+  paymentController.getPaymentById,
+);
+
 // Admin can edit any payment field (amount, date, method, notes, providerRecipient)
 router.patch(
   "/payments/:paymentId",

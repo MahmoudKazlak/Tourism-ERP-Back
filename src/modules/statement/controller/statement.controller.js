@@ -5,9 +5,7 @@ import paymentModel from "../../../../DB/model/payment.model.js";
 import providerModel from "../../../../DB/model/provider.model.js";
 import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
 import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
-import {
-  describeService,
-} from "../../../config/serviceTypes.js";
+import { describeService } from "../../../config/serviceTypes.js";
 import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
 import { pagination } from "../../../services/pagination.js";
 
@@ -207,8 +205,8 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
     to.setHours(23, 59, 59, 999);
     dateFilter.$lte = to;
   }
-
   const hasDateFilter = Object.keys(dateFilter).length > 0;
+
   const { ledger, _rawTotals } = await buildLedger(providerId, dateFilter);
 
   let summary;
@@ -263,14 +261,13 @@ export const getProviderStatement = asyncHandler(async (req, res, next) => {
   });
 });
 
-// getCustomerStatement is unchanged — copy from original as-is
 export const getCustomerStatement = asyncHandler(async (req, res, next) => {
   const { customerName } = req.params;
   const { fromDate, toDate, page, size } = req.query;
 
-  if (!customerName || customerName.trim().length < 2) {
+  if (!customerName || customerName.trim().length < 1) {
     return next(
-      new Error("Customer name must be at least 2 characters", { cause: 400 }),
+      new Error("Customer name must be at least 1 character", { cause: 400 }),
     );
   }
 
@@ -349,6 +346,7 @@ export const getCustomerStatement = asyncHandler(async (req, res, next) => {
     const matchedCustomer = b.customers?.find((c) =>
       c.name?.toLowerCase().includes(customerName.toLowerCase()),
     );
+
     return {
       bookingID: b.bookingID,
       mongoId: b._id,

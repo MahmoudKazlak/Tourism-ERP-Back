@@ -48,4 +48,10 @@ router.get(
   providerPaymentController.getProviderPayments,
 );
 
+// NEW: GET /api/v1/provider-payment/payment/:paymentId — single payment lookup
+router.get(
+  "/payment/:paymentId",
+  auth(endpoint.accounting_only),
+  providerPaymentController.getProviderPaymentById,
+);
 export default router;

@@ -361,3 +361,26 @@ export const deleteProviderCollection = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get a single provider collection by ID
+// GET /api/v1/provider-collection/collection/:collectionId
+// ─────────────────────────────────────────────────────────────────────────────
+export const getProviderCollectionById = asyncHandler(async (req, res, next) => {
+  const { collectionId } = req.params;
+
+  const collection = await providerCollectionModel
+    .findById(collectionId)
+    .populate("provider", "name type phone")
+    .populate("booking", "bookingID customers")
+    .populate("recordedBy", "userName");
+
+  if (!collection) return next(new Error("Collection not found", { cause: 404 }));
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: { collection },
+    errors: null,
+  });
+});

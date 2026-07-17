@@ -258,3 +258,25 @@ export const getAllProviderPayments = asyncHandler(async (req, res) => {
     errors: null,
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get a single provider payment by ID
+// GET /api/v1/provider-payment/payment/:paymentId
+// ─────────────────────────────────────────────────────────────────────────────
+export const getProviderPaymentById = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+
+  const payment = await providerPaymentModel
+    .findById(paymentId)
+    .populate("provider", "name type phone")
+    .populate("recordedBy", "userName");
+
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: { payment },
+    errors: null,
+  });
+});

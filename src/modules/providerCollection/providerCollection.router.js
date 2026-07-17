@@ -16,6 +16,13 @@ router.get(
   providerCollectionController.getAllProviderCollections,
 );
 
+// NEW: GET /api/v1/provider-collection/collection/:collectionId — single lookup
+router.get(
+  "/collection/:collectionId",
+  auth(endpoint.accounting_only),
+  providerCollectionController.getProviderCollectionById,
+);
+
 // PATCH /api/v1/provider-collection/:collectionId — Admin only
 router.patch(
   "/:collectionId",
