@@ -6,18 +6,10 @@ import logModel from "../../../../DB/model/log.model.js";
 import { notifyBookingStatusChanged } from "../../../services/notification.js";
 import { pagination } from "../../../services/pagination.js";
 import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
+import { applyProviderSummaryDelta } from "../../../services/providerSummaryService.js";
 import mongoose from "mongoose";
 
 // ── Security helper ───────────────────────────────────────────────────────────
-/**
- * Escapes regex metacharacters so user-supplied strings cannot be used as
- * injection vectors inside MongoDB $regex queries.
- *
- * Without this: ?customerName=.* → full collection scan
- *               ?customerName=(?i)secret → data enumeration
- *
- * Phase 1 security fix — the ONLY change to this file vs. the original.
- */
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ── Protected fields ──────────────────────────────────────────────────────────
@@ -32,12 +24,7 @@ const PROTECTED_BOOKING_FIELDS = [
 ];
 
 // ── Local validation helpers ──────────────────────────────────────────────────
-// These are private to this controller — NOT exported, NOT imported from bookingService.
 
-/**
- * Validates type-specific required fields inside service.details.
- * Returns an Error (to pass to next()) or null when valid.
- */
 const validateServiceDetails = (service) => {
   const { serviceType, details = {} } = service;
   const typeDef = getMergedServiceTypes()[serviceType];
@@ -81,10 +68,6 @@ const validateServiceDetails = (service) => {
   return null;
 };
 
-/**
- * Confirms every service provider ID exists in the DB.
- * Returns an Error or null when all are valid.
- */
 const validateSubProviders = async (services = []) => {
   if (services.length === 0) return null;
 
@@ -107,33 +90,6 @@ const validateSubProviders = async (services = []) => {
 };
 
 // ── Sequence resync helper ────────────────────────────────────────────────────
-/**
- * Resyncs `currentSequence` for each provider in `providerIds` to the
- * actual maximum `serviceNumber` still assigned across all remaining bookings.
- *
- * Why not just `$inc: -1`?
- *   A naive decrement causes E11000 duplicate-key errors when the next
- *   booking is created — two services end up with the same number.
- *
- * Why this approach is safe:
- *   We always set `currentSequence` to `MAX(serviceNumber)` of live data.
- *   The next service created for this provider gets `currentSequence + 1`,
- *   which is guaranteed unique because it is strictly greater than any
- *   serviceNumber currently in the database.
- *
- * Example:
- *   Provider has services 1, 2, 3, 4, 5.
- *   Booking with services 4 and 5 is deleted.
- *   MAX of remaining = 3 → currentSequence = 3.
- *   Next service gets 4 → no gap visible to users, no duplicate.
- *
- * Performance note:
- *   Runs one lightweight $group aggregation per unique provider.
- *   Deletions are infrequent; the extra aggregation cost is acceptable
- *   and far cheaper than a full resync of all financial summaries.
- *
- * @param {string[]} providerIds - Array of provider ObjectId strings.
- */
 const resyncProviderSequences = async (providerIds) => {
   if (!providerIds.length) return;
 
@@ -141,8 +97,6 @@ const resyncProviderSequences = async (providerIds) => {
     providerIds.map(async (providerId) => {
       const providerObjId = new mongoose.Types.ObjectId(providerId);
 
-      // Find the highest serviceNumber still in use for this provider
-      // across all bookings that still exist in the database.
       const [result] = await bookingModel.aggregate([
         { $match: { "services.provider": providerObjId } },
         { $unwind: "$services" },
@@ -150,8 +104,6 @@ const resyncProviderSequences = async (providerIds) => {
         { $group: { _id: null, maxSeq: { $max: "$services.serviceNumber" } } },
       ]);
 
-      // If no services remain at all for this provider, reset to 0 so the
-      // next service gets number 1 (clean slate).
       const newSequence = result?.maxSeq ?? 0;
 
       await providerModel.findByIdAndUpdate(providerId, {
@@ -210,7 +162,6 @@ export const createBooking = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Get all bookings
-// Phase 1 change: customerName is now escaped before use in $regex.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getAllBookings = asyncHandler(async (req, res) => {
   const {
@@ -238,7 +189,6 @@ export const getAllBookings = asyncHandler(async (req, res) => {
   if (status) query.status = status;
   if (paymentStatus) query.paymentStatus = paymentStatus;
 
-  // Phase 1 security fix: escape user input before using as regex pattern
   if (customerName)
     query["customers.name"] = {
       $regex: escapeRegex(customerName.trim()),
@@ -450,19 +400,12 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Edit a single existing service on a booking (Admin/booking_manage)
-// PATCH /api/v1/booking/:id/services/:serviceId
+// Edit a single existing service on a booking
 //
-// Targeted alternative to sending a full/partial `services` array through
-// updateBooking. Only buy, sell, details, and notes are editable here.
-// serviceType, provider, and serviceNumber are immutable via this endpoint:
-//   - serviceNumber drives assignBookingSequences' "already assigned" guard
-//     (`if (service.serviceNumber != null) continue`) — mutating it outside
-//     that flow would desync the provider's currentSequence high-water mark.
-//   - serviceType/provider changes have sequence-numbering and provider
-//     summary implications (a service moving providers must reverse the old
-//     provider's delta and apply a new one) that are out of scope for a
-//     field-level edit; that belongs in remove+re-add.
+// CASE 7 (final rule): ANY financial/detail edit to a service is blocked
+// once the booking's paymentStatus is "paid". A fully paid invoice is
+// considered final — buy/sell/details/notes are all locked, matching the
+// same rule now applied to service removal and whole-booking deletion.
 // ─────────────────────────────────────────────────────────────────────────────
 export const editService = asyncHandler(async (req, res, next) => {
   const { id, serviceId } = req.params;
@@ -470,6 +413,16 @@ export const editService = asyncHandler(async (req, res, next) => {
 
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  if (booking.paymentStatus === "paid") {
+    return next(
+      new Error(
+        "Cannot edit a service on a booking that is already fully paid. " +
+          "The invoice is considered final once fully paid.",
+        { cause: 400 },
+      ),
+    );
+  }
 
   if (expectedVersion !== undefined && booking.__v !== expectedVersion) {
     return next(
@@ -590,6 +543,11 @@ export const addServiceToBooking = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Remove service from existing booking
+//
+// CASE 7 (final rule): removal blocked once paymentStatus is "paid" —
+// same rationale as editService above. A partially paid booking may still
+// have services removed/edited (the customer hasn't settled the full
+// amount yet, so the invoice isn't final).
 // ─────────────────────────────────────────────────────────────────────────────
 export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
@@ -598,13 +556,21 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
+  if (booking.paymentStatus === "paid") {
+    return next(
+      new Error(
+        "Cannot remove a service from a booking that is already fully paid. " +
+          "The invoice is considered final once fully paid.",
+        { cause: 400 },
+      ),
+    );
+  }
+
   const serviceItem = booking.services.find(
     (item) => item._id.toString() === serviceId,
   );
   if (!serviceItem) return next(new Error("Service not found", { cause: 404 }));
 
-  // Capture the provider ID before removing the service so we can
-  // resync currentSequence after the save.
   const removedProviderId = serviceItem.provider?.toString();
 
   await logModel.create({
@@ -623,10 +589,6 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   );
   await booking.save();
 
-  // Resync the affected provider's currentSequence to the actual maximum
-  // serviceNumber still in use. This allows the sequence to decrease when
-  // services are removed, so the next service gets a sensibly low number
-  // instead of continuing from the old high-water mark.
   if (removedProviderId) {
     await resyncProviderSequences([removedProviderId]);
   }
@@ -641,14 +603,33 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Delete booking
+//
+// CASE 7 (final rule, Q1.1 superseded): deletion is now blocked whenever
+// the booking has received ANY payment — i.e. paymentStatus is "partial"
+// OR "paid" — regardless of the booking's `status` field (pending,
+// confirmed, cancelled, completed all treated the same way). Only bookings
+// with paymentStatus "unpaid" may be deleted. This replaces the earlier,
+// narrower "block only if status === completed" rule.
+//
+// The direct-to-provider payment reversal fix from the previous iteration
+// is retained below for defense-in-depth, though in practice an "unpaid"
+// booking should have zero Payment records to reverse.
 // ─────────────────────────────────────────────────────────────────────────────
 export const deleteBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  // Collect unique provider IDs from this booking's services BEFORE deletion
-  // so we know which providers need their sequence resynced afterwards.
+  if (booking.paymentStatus !== "unpaid") {
+    return next(
+      new Error(
+        "Cannot delete a booking that has received payments. " +
+          "Bookings with partial or full payment cannot be deleted, regardless of their status.",
+        { cause: 400 },
+      ),
+    );
+  }
+
   const affectedProviderIds = [
     ...new Set(
       (booking.services || [])
@@ -661,6 +642,31 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
     $inc: { totalBookings: -1 },
   });
 
+  // Defense-in-depth: reverse any direct-to-provider payment deltas before
+  // the Payment documents are deleted. An "unpaid" booking should have no
+  // such records, but this guards against any inconsistent intermediate
+  // state rather than assuming the invariant always holds.
+  const directPayments = await paymentModel
+    .find({ booking: id, providerRecipient: { $ne: null } })
+    .select("providerRecipient amount");
+
+  const directTotalsByProvider = new Map();
+  for (const p of directPayments) {
+    const key = p.providerRecipient.toString();
+    directTotalsByProvider.set(
+      key,
+      (directTotalsByProvider.get(key) || 0) + p.amount,
+    );
+  }
+
+  for (const [providerId, total] of directTotalsByProvider) {
+    await applyProviderSummaryDelta(
+      providerId,
+      { totalCustomersPaidDirect: -total },
+      "booking_delete_direct_payment_reversal",
+    );
+  }
+
   await paymentModel.deleteMany({ booking: id });
 
   await logModel.create({
@@ -669,17 +675,12 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
     details: {
       bookingID: booking.bookingID,
       customer: booking.customers[0]?.name,
+      reversedDirectPayments: Object.fromEntries(directTotalsByProvider),
     },
   });
 
-  // Delete the booking document first so the subsequent aggregation
-  // reflects its services as gone and computes the correct new max.
   await booking.deleteOne();
 
-  // Resync currentSequence for every provider whose services appeared in
-  // this booking. Each provider's sequence is set to MAX(serviceNumber)
-  // of its remaining services across all other bookings. If a provider
-  // has no remaining services, its sequence resets to 0 (next gets 1).
   await resyncProviderSequences(affectedProviderIds);
 
   return res.status(200).json({
