@@ -40,115 +40,154 @@ The content is organized as follows:
 </file_summary>
 
 <directory_structure>
+assets/
+  kazlak-mark.svg
+DB/
+  model/
+    booking.model.js
+    counter.model.js
+    expense.model.js
+    log.model.js
+    officeServiceType.model.js
+    officeSettings.model.js
+    payment.model.js
+    provider.model.js
+    providerCollection.model.js
+    providerPayment.model.js
+    refreshToken.model.js
+    syncFailure.model.js
+    user.model.js
+  adminSeed.js
+  connection.js
+scripts/
+  migrateServices.js
+src/
+  config/
+    roles.js
+    serviceTypes.js
+  middleware/
+    asyncHandler.js
+    auth.js
+    upload.js
+    validation.js
+  modules/
+    auth/
+      controller/
+        auth.controller.js
+      auth.router.js
+      auth.validation.js
+    booking/
+      controller/
+        booking.controller.js
+        services.controller.js
+      booking.router.js
+      booking.validation.js
+    expense/
+      controller/
+        expense.controller.js
+      expense.router.js
+      expense.validation.js
+    export/
+      repositories/
+        booking.repository.js
+        expense.repository.js
+        payment.repository.js
+        provider.repository.js
+        user.repository.js
+      utils/
+        cell.formatters.js
+        excel.builder.js
+      export.controller.js
+      export.router.js
+      export.service.js
+    log/
+      controller/
+        log.controller.js
+      log.router.js
+    officeSettings/
+      controller/
+        officeSettings.controller.js
+      officeSettings.router.js
+    payment/
+      controller/
+        payment.controller.js
+      payment.router.js
+      payment.validation.js
+    provider/
+      controller/
+        provider.controller.js
+      provider.router.js
+      provider.validation.js
+    providerCollection/
+      controller/
+        providerCollection.controller.js
+      providerCollection.router.js
+      providerCollection.validation.js
+    providerPayment/
+      controller/
+        providerPayment.controller.js
+      providerPayment.router.js
+      providerPayment.validation.js
+    report/
+      controller/
+        report.controller.js
+      report.router.js
+    serviceType/
+      controller/
+        serviceType.controller.js
+      serviceType.router.js
+      serviceType.validation.js
+    statement/
+      controller/
+        statement.controller.js
+      statement.router.js
+    viewBoard/
+      controller/
+        viewBoard.controller.js
+      viewBoard.router.js
+    voucher/
+      controller/
+        voucher.controller.js
+      voucher.router.js
+    indexEndpoint.js
+    indexRouter.js
+  services/
+    bookingService.js
+    cloudinary.js
+    email.js
+    invoicePdfService.js
+    invoiceService.js
+    notification.js
+    pagination.js
+    providerSummaryService.js
+    serviceTypeRegistry.js
+    transaction.js
+tests/
+  integration/
+    auth.test.js
+    booking.test.js
+    expense.test.js
+    payment.test.js
+    provider.test.js
+    voucher.test.js
+  setup/
+    db.js
+    env.js
+    factories.js
+    globalSetup.js
+    globalTeardown.js
+    testApp.js
+  unit/
+    bookingService.test.js
+    invoicePdfService.test.js
 .gitignore
 app.js
-assets/kazlak-mark.svg
-DB/adminSeed.js
-DB/connection.js
-DB/model/booking.model.js
-DB/model/counter.model.js
-DB/model/expense.model.js
-DB/model/log.model.js
-DB/model/officeServiceType.model.js
-DB/model/officeSettings.model.js
-DB/model/payment.model.js
-DB/model/provider.model.js
-DB/model/providerCollection.model.js
-DB/model/providerPayment.model.js
-DB/model/refreshToken.model.js
-DB/model/syncFailure.model.js
-DB/model/user.model.js
 jest.config.js
 package.json
-scripts/migrateServices.js
-src/config/roles.js
-src/config/serviceTypes.js
-src/middleware/asyncHandler.js
-src/middleware/auth.js
-src/middleware/upload.js
-src/middleware/validation.js
-src/modules/auth/auth.router.js
-src/modules/auth/auth.validation.js
-src/modules/auth/controller/auth.controller.js
-src/modules/booking/booking.router.js
-src/modules/booking/booking.validation.js
-src/modules/booking/controller/booking.controller.js
-src/modules/booking/controller/services.controller.js
-src/modules/expense/controller/expense.controller.js
-src/modules/expense/expense.router.js
-src/modules/expense/expense.validation.js
-src/modules/export/export.controller.js
-src/modules/export/export.router.js
-src/modules/export/export.service.js
-src/modules/export/repositories/booking.repository.js
-src/modules/export/repositories/expense.repository.js
-src/modules/export/repositories/payment.repository.js
-src/modules/export/repositories/provider.repository.js
-src/modules/export/repositories/user.repository.js
-src/modules/export/utils/cell.formatters.js
-src/modules/export/utils/excel.builder.js
-src/modules/indexEndpoint.js
-src/modules/indexRouter.js
-src/modules/log/controller/log.controller.js
-src/modules/log/log.router.js
-src/modules/officeSettings/controller/officeSettings.controller.js
-src/modules/officeSettings/officeSettings.router.js
-src/modules/payment/controller/payment.controller.js
-src/modules/payment/payment.router.js
-src/modules/payment/payment.validation.js
-src/modules/provider/controller/provider.controller.js
-src/modules/provider/provider.router.js
-src/modules/provider/provider.validation.js
-src/modules/providerCollection/controller/providerCollection.controller.js
-src/modules/providerCollection/providerCollection.router.js
-src/modules/providerCollection/providerCollection.validation.js
-src/modules/providerPayment/controller/providerPayment.controller.js
-src/modules/providerPayment/providerPayment.router.js
-src/modules/providerPayment/providerPayment.validation.js
-src/modules/report/controller/report.controller.js
-src/modules/report/report.router.js
-src/modules/serviceType/controller/serviceType.controller.js
-src/modules/serviceType/serviceType.router.js
-src/modules/serviceType/serviceType.validation.js
-src/modules/statement/controller/statement.controller.js
-src/modules/statement/statement.router.js
-src/modules/viewBoard/controller/viewBoard.controller.js
-src/modules/viewBoard/viewBoard.router.js
-src/modules/voucher/controller/voucher.controller.js
-src/modules/voucher/voucher.router.js
-src/services/bookingService.js
-src/services/cloudinary.js
-src/services/email.js
-src/services/invoicePdfService.js
-src/services/invoiceService.js
-src/services/notification.js
-src/services/pagination.js
-src/services/providerSummaryService.js
-src/services/serviceTypeRegistry.js
-src/services/transaction.js
-tests/integration/auth.test.js
-tests/integration/booking.test.js
-tests/integration/expense.test.js
-tests/integration/payment.test.js
-tests/integration/provider.test.js
-tests/integration/voucher.test.js
-tests/setup/db.js
-tests/setup/env.js
-tests/setup/factories.js
-tests/setup/globalSetup.js
-tests/setup/globalTeardown.js
-tests/setup/testApp.js
-tests/unit/bookingService.test.js
-tests/unit/invoicePdfService.test.js
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
-
-<file path=".gitignore">
-node_modules/
-.env
-</file>
 
 <file path="DB/model/counter.model.js">
 import mongoose from "mongoose";
@@ -432,31 +471,6 @@ syncFailureSchema.index(
 );
 
 export default mongoose.model("SyncFailure", syncFailureSchema);
-</file>
-
-<file path="jest.config.js">
-export default {
-  testEnvironment: "node",
-  transform: {},
-  injectGlobals: false, // ← add this line
-  setupFiles: ["./tests/setup/env.js"],
-  globalSetup: "./tests/setup/globalSetup.js",
-  globalTeardown: "./tests/setup/globalTeardown.js",
-  testMatch: [
-    "**/tests/unit/**/*.test.js",
-    "**/tests/integration/**/*.test.js",
-  ],
-  verbose: true,
-  testTimeout: 30000,
-  collectCoverageFrom: [
-    "src/services/bookingService.js",
-    "src/modules/booking/controller/booking.controller.js",
-    "src/modules/payment/controller/payment.controller.js",
-    "DB/model/booking.model.js",
-  ],
-  coverageDirectory: "coverage",
-  coverageReporters: ["text", "lcov"],
-};
 </file>
 
 <file path="src/config/roles.js">
@@ -779,6 +793,305 @@ router.delete(
 );
 
 export default router;
+</file>
+
+<file path="src/modules/export/repositories/booking.repository.js">
+import bookingModel from "../../../../DB/model/booking.model.js";
+
+const BATCH = 500;
+
+export const streamBookings = () =>
+  bookingModel
+    .find({})
+    .sort({ bookingID: 1 })
+    .populate("provider",  "name type")
+    .populate("createdBy", "userName")
+    .select("-__v -updatedAt")
+    .lean()
+    .cursor({ batchSize: BATCH });
+
+/** MongoDB handles the array-flattening server-side via $unwind —
+ *  Node never holds a full booking with all its services in memory. */
+export const streamServices = () =>
+  bookingModel.aggregate([
+    { $unwind: "$services" },
+    { $lookup: { from: "providers", localField: "services.provider", foreignField: "_id", as: "svcProvider" } },
+    { $project: {
+        bookingID:     1,
+        bookingDate:   "$createdAt",
+        bookingStatus: "$status",
+        customer:      { $arrayElemAt: ["$customers.name", 0] },
+        serviceType:   "$services.serviceType",
+        serviceNumber: "$services.serviceNumber",
+        providerName:  { $arrayElemAt: ["$svcProvider.name", 0] },
+        buy:           "$services.buy",
+        sell:          "$services.sell",
+        profit:        "$services.profit",
+        duration:      "$services.duration",
+        details:       "$services.details",
+    }},
+    { $sort: { bookingID: 1, serviceNumber: 1 } },
+  ])
+  .allowDiskUse(true)
+  .cursor({ batchSize: BATCH });
+
+export const getBookingSummary = () =>
+  bookingModel.aggregate([{ $group: {
+    _id: null,
+    totalBookings:    { $sum: 1 },
+    totalRevenue:     { $sum: "$totalToPay"       },
+    totalCost:        { $sum: "$totalToBuy"       },
+    totalProfit:      { $sum: "$totalProfit"      },
+    totalPaid:        { $sum: "$totalPaid"        },
+    totalOutstanding: { $sum: "$remainingBalance" },
+  }}]);
+</file>
+
+<file path="src/modules/export/repositories/expense.repository.js">
+import expenseModel from "../../../../DB/model/expense.model.js";
+
+const BATCH = 500;
+
+export const streamExpenses = () =>
+  expenseModel.find({}).sort({ date: 1 })
+    .populate("recordedBy", "userName")
+    .select("-__v").lean().cursor({ batchSize: BATCH });
+
+export const getExpenseSummary = () =>
+  expenseModel.aggregate([{ $group: {
+    _id:   null,
+    total: { $sum: "$amount" },
+    count: { $sum: 1 },
+  }}]);
+</file>
+
+<file path="src/modules/export/repositories/payment.repository.js">
+import paymentModel            from "../../../../DB/model/payment.model.js";
+import providerPaymentModel    from "../../../../DB/model/providerPayment.model.js";
+import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
+
+const BATCH = 500;
+
+export const streamPayments = () =>
+  paymentModel.find({}).sort({ date: 1 })
+    .populate("booking",           "bookingID customers")
+    .populate("recordedBy",        "userName")
+    .populate("providerRecipient", "name")
+    .select("-__v").lean().cursor({ batchSize: BATCH });
+
+export const getPaymentSummary = () =>
+  paymentModel.aggregate([{ $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } }]);
+
+export const streamProviderPayments = () =>
+  providerPaymentModel.find({}).sort({ date: 1 })
+    .populate("provider",   "name type")
+    .populate("recordedBy", "userName")
+    .select("-__v").lean().cursor({ batchSize: BATCH });
+
+export const getProviderPaymentSummary = () =>
+  providerPaymentModel.aggregate([{ $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } }]);
+
+export const streamProviderCollections = () =>
+  providerCollectionModel.find({}).sort({ date: 1 })
+    .populate("provider",   "name type")
+    .populate("booking",    "bookingID")
+    .populate("recordedBy", "userName")
+    .select("-__v").lean().cursor({ batchSize: BATCH });
+</file>
+
+<file path="src/modules/export/repositories/provider.repository.js">
+import providerModel from "../../../../DB/model/provider.model.js";
+
+const BATCH = 500;
+
+export const streamProviders = () =>
+  providerModel.find({}).sort({ name: 1 })
+    .select("-__v -updatedAt").lean().cursor({ batchSize: BATCH });
+
+export const getProviderSummary = () =>
+  providerModel.aggregate([{ $group: {
+    _id:            null,
+    totalProviders: { $sum: 1 },
+    totalBuy:       { $sum: "$summary.totalBuy"       },
+    totalSell:      { $sum: "$summary.totalSell"      },
+    totalWeOwed:    { $sum: "$summary.currentBalance" },
+  }}]);
+</file>
+
+<file path="src/modules/export/repositories/user.repository.js">
+import userModel from "../../../../DB/model/user.model.js";
+
+const BATCH = 200;
+
+/** Passwords excluded at the query layer — not just in the serialiser. */
+export const streamUsers = () =>
+  userModel.find({}).sort({ createdAt: 1 })
+    .select("-password -passwordResetToken -passwordResetExpiry -__v")
+    .lean().cursor({ batchSize: BATCH });
+
+export const getUserSummary = () =>
+  userModel.aggregate([{ $group: {
+    _id:     "$role",
+    count:   { $sum: 1 },
+    blocked: { $sum: { $cond: ["$blocked", 1, 0] } },
+  }}]);
+</file>
+
+<file path="src/modules/export/utils/cell.formatters.js">
+export const fmtDate = (val) => {
+  if (!val) return "";
+  const d = new Date(val);
+  if (isNaN(d)) return String(val);
+  return d.toLocaleDateString("en-GB", { day:"2-digit", month:"2-digit", year:"numeric" });
+};
+export const fmtDateTime = (val) => {
+  if (!val) return "";
+  const d = new Date(val);
+  if (isNaN(d)) return String(val);
+  return d.toLocaleDateString("en-GB",{ day:"2-digit",month:"2-digit",year:"numeric" }) +
+    " " + d.toLocaleTimeString("en-GB",{ hour:"2-digit",minute:"2-digit" });
+};
+export const fmtCurrency = (val) => val == null ? "" : `$${Number(val).toFixed(2)}`;
+export const fmtBool     = (val) => val ? "Yes" : "No";
+export const fmtList     = (arr, key = null) => {
+  if (!Array.isArray(arr) || !arr.length) return "";
+  return arr.map((i) => key ? i?.[key] : i).filter(Boolean).join(", ");
+};
+export const fmtTruncate = (val, max = 100) => {
+  if (val == null) return "";
+  const s = String(val);
+  return s.length > max ? s.slice(0, max) + "…" : s;
+};
+</file>
+
+<file path="src/modules/export/utils/excel.builder.js">
+/**
+ * excel.builder.js
+ * ExcelJS streaming workbook factory and sheet helpers.
+ *
+ * Memory strategy: WorkbookWriter streams each committed row directly to the
+ * HTTP response and releases its memory immediately. The server heap stays
+ * roughly constant regardless of how many rows are written.
+ *
+ * Column widths are set at sheet-creation time because the streaming writer
+ * cannot rewind to resize columns after data has been flushed.
+ */
+import ExcelJS from "exceljs";
+
+const HEADER_BG    = "FF0D3D35"; // deep teal — Kazlak brand
+const HEADER_FG    = "FFFFFFFF";
+const SECTION_BG   = "FF1A5C52"; // slightly lighter teal for summary sections
+const ALT_ROW_BG   = "FFF0F7F6"; // faint mint for alternating rows
+
+export const createStreamingWorkbook = (res, filename) => {
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering
+  return new ExcelJS.stream.xlsx.WorkbookWriter({
+    stream: res,
+    useStyles: true,
+    useSharedStrings: true,
+  });
+};
+
+export const addStyledSheet = (workbook, sheetName, columns) => {
+  const sheet = workbook.addWorksheet(sheetName, {
+    views: [{ state: "frozen", ySplit: 1 }],
+    pageSetup: { paperSize: 9, orientation: "landscape", fitToPage: true },
+  });
+
+  sheet.columns = columns.map((col) => ({
+    header: col.header,
+    key:    col.key,
+    width:  col.width ?? 18,
+    numFmt: col.numFmt ?? resolveNumFmt(col.type),
+    style: {
+      alignment: {
+        vertical:   "middle",
+        horizontal: ["currency","number","percent"].includes(col.type) ? "right" : "left",
+        wrapText:   false,
+      },
+    },
+  }));
+
+  // Style the header row that ExcelJS already wrote via sheet.columns
+  const headerRow = sheet.getRow(1);
+  headerRow.height = 22;
+  headerRow.eachCell((cell) => {
+    cell.font      = { bold: true, color: { argb: HEADER_FG }, size: 10, name: "Calibri" };
+    cell.fill      = { type: "pattern", pattern: "solid", fgColor: { argb: HEADER_BG } };
+    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: false };
+    cell.border    = { bottom: { style: "thin", color: { argb: "FF34B09A" } } };
+  });
+  // CRITICAL: commit the header before adding data rows
+  headerRow.commit();
+  return sheet;
+};
+
+/**
+ * Adds one data row and commits it immediately.
+ * `row.commit()` flushes to the network buffer and frees memory.
+ * Omitting this causes all rows to accumulate in RAM.
+ */
+export const addDataRow = (sheet, data, rowIndex) => {
+  const row  = sheet.addRow(data);
+  row.height = 18;
+  if (rowIndex % 2 === 0) {
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ALT_ROW_BG } };
+    });
+  }
+  row.commit();
+};
+
+export const addSummarySheet = (workbook, rows) => {
+  const sheet = workbook.addWorksheet("📊 Summary", { views: [{ state: "frozen", ySplit: 2 }] });
+  sheet.columns = [{ key: "label", width: 40 }, { key: "value", width: 22 }];
+
+  // Title
+  const title = sheet.addRow(["HayfaTur — Full Data Export"]);
+  title.height = 28;
+  const tc = title.getCell(1);
+  tc.font  = { bold: true, size: 14, color: { argb: HEADER_FG }, name: "Calibri" };
+  tc.fill  = { type: "pattern", pattern: "solid", fgColor: { argb: HEADER_BG } };
+  tc.alignment = { vertical: "middle" };
+  sheet.mergeCells("A1:B1");
+  title.commit();
+
+  // Generated timestamp
+  const meta = sheet.addRow(["Generated", new Date().toLocaleString("en-GB")]);
+  ["A2","B2"].forEach((r) => { const c = sheet.getCell(r); c.font = { italic: true, color: { argb: "FF666666" } }; });
+  meta.commit();
+  sheet.addRow([]).commit(); // spacer
+
+  let i = 0;
+  for (const [label, value, isSection] of rows) {
+    const row = sheet.addRow([label, value]);
+    row.height = 20;
+    if (isSection) {
+      row.getCell(1).font  = { bold: true, color: { argb: HEADER_FG }, size: 10 };
+      row.getCell(1).fill  = { type: "pattern", pattern: "solid", fgColor: { argb: SECTION_BG } };
+      row.getCell(2).fill  = { type: "pattern", pattern: "solid", fgColor: { argb: SECTION_BG } };
+      sheet.mergeCells(`A${row.number}:B${row.number}`);
+    } else {
+      if (i % 2 === 0) row.eachCell({ includeEmpty: true }, (cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ALT_ROW_BG } }; });
+      row.getCell(2).alignment = { horizontal: "right" };
+    }
+    row.commit();
+    i++;
+  }
+  sheet.commit();
+};
+
+const resolveNumFmt = (type) => {
+  switch (type) {
+    case "currency": return '"$"#,##0.00';
+    case "date":     return "dd/mm/yyyy";
+    case "percent":  return "0.0%";
+    case "number":   return "#,##0";
+    default:         return undefined;
+  }
+};
 </file>
 
 <file path="src/modules/export/export.router.js">
@@ -1128,305 +1441,6 @@ export const generateFullExport = async (writableStream, filename) => {
 };
 </file>
 
-<file path="src/modules/export/repositories/booking.repository.js">
-import bookingModel from "../../../../DB/model/booking.model.js";
-
-const BATCH = 500;
-
-export const streamBookings = () =>
-  bookingModel
-    .find({})
-    .sort({ bookingID: 1 })
-    .populate("provider",  "name type")
-    .populate("createdBy", "userName")
-    .select("-__v -updatedAt")
-    .lean()
-    .cursor({ batchSize: BATCH });
-
-/** MongoDB handles the array-flattening server-side via $unwind —
- *  Node never holds a full booking with all its services in memory. */
-export const streamServices = () =>
-  bookingModel.aggregate([
-    { $unwind: "$services" },
-    { $lookup: { from: "providers", localField: "services.provider", foreignField: "_id", as: "svcProvider" } },
-    { $project: {
-        bookingID:     1,
-        bookingDate:   "$createdAt",
-        bookingStatus: "$status",
-        customer:      { $arrayElemAt: ["$customers.name", 0] },
-        serviceType:   "$services.serviceType",
-        serviceNumber: "$services.serviceNumber",
-        providerName:  { $arrayElemAt: ["$svcProvider.name", 0] },
-        buy:           "$services.buy",
-        sell:          "$services.sell",
-        profit:        "$services.profit",
-        duration:      "$services.duration",
-        details:       "$services.details",
-    }},
-    { $sort: { bookingID: 1, serviceNumber: 1 } },
-  ])
-  .allowDiskUse(true)
-  .cursor({ batchSize: BATCH });
-
-export const getBookingSummary = () =>
-  bookingModel.aggregate([{ $group: {
-    _id: null,
-    totalBookings:    { $sum: 1 },
-    totalRevenue:     { $sum: "$totalToPay"       },
-    totalCost:        { $sum: "$totalToBuy"       },
-    totalProfit:      { $sum: "$totalProfit"      },
-    totalPaid:        { $sum: "$totalPaid"        },
-    totalOutstanding: { $sum: "$remainingBalance" },
-  }}]);
-</file>
-
-<file path="src/modules/export/repositories/expense.repository.js">
-import expenseModel from "../../../../DB/model/expense.model.js";
-
-const BATCH = 500;
-
-export const streamExpenses = () =>
-  expenseModel.find({}).sort({ date: 1 })
-    .populate("recordedBy", "userName")
-    .select("-__v").lean().cursor({ batchSize: BATCH });
-
-export const getExpenseSummary = () =>
-  expenseModel.aggregate([{ $group: {
-    _id:   null,
-    total: { $sum: "$amount" },
-    count: { $sum: 1 },
-  }}]);
-</file>
-
-<file path="src/modules/export/repositories/payment.repository.js">
-import paymentModel            from "../../../../DB/model/payment.model.js";
-import providerPaymentModel    from "../../../../DB/model/providerPayment.model.js";
-import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
-
-const BATCH = 500;
-
-export const streamPayments = () =>
-  paymentModel.find({}).sort({ date: 1 })
-    .populate("booking",           "bookingID customers")
-    .populate("recordedBy",        "userName")
-    .populate("providerRecipient", "name")
-    .select("-__v").lean().cursor({ batchSize: BATCH });
-
-export const getPaymentSummary = () =>
-  paymentModel.aggregate([{ $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } }]);
-
-export const streamProviderPayments = () =>
-  providerPaymentModel.find({}).sort({ date: 1 })
-    .populate("provider",   "name type")
-    .populate("recordedBy", "userName")
-    .select("-__v").lean().cursor({ batchSize: BATCH });
-
-export const getProviderPaymentSummary = () =>
-  providerPaymentModel.aggregate([{ $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } }]);
-
-export const streamProviderCollections = () =>
-  providerCollectionModel.find({}).sort({ date: 1 })
-    .populate("provider",   "name type")
-    .populate("booking",    "bookingID")
-    .populate("recordedBy", "userName")
-    .select("-__v").lean().cursor({ batchSize: BATCH });
-</file>
-
-<file path="src/modules/export/repositories/provider.repository.js">
-import providerModel from "../../../../DB/model/provider.model.js";
-
-const BATCH = 500;
-
-export const streamProviders = () =>
-  providerModel.find({}).sort({ name: 1 })
-    .select("-__v -updatedAt").lean().cursor({ batchSize: BATCH });
-
-export const getProviderSummary = () =>
-  providerModel.aggregate([{ $group: {
-    _id:            null,
-    totalProviders: { $sum: 1 },
-    totalBuy:       { $sum: "$summary.totalBuy"       },
-    totalSell:      { $sum: "$summary.totalSell"      },
-    totalWeOwed:    { $sum: "$summary.currentBalance" },
-  }}]);
-</file>
-
-<file path="src/modules/export/repositories/user.repository.js">
-import userModel from "../../../../DB/model/user.model.js";
-
-const BATCH = 200;
-
-/** Passwords excluded at the query layer — not just in the serialiser. */
-export const streamUsers = () =>
-  userModel.find({}).sort({ createdAt: 1 })
-    .select("-password -passwordResetToken -passwordResetExpiry -__v")
-    .lean().cursor({ batchSize: BATCH });
-
-export const getUserSummary = () =>
-  userModel.aggregate([{ $group: {
-    _id:     "$role",
-    count:   { $sum: 1 },
-    blocked: { $sum: { $cond: ["$blocked", 1, 0] } },
-  }}]);
-</file>
-
-<file path="src/modules/export/utils/cell.formatters.js">
-export const fmtDate = (val) => {
-  if (!val) return "";
-  const d = new Date(val);
-  if (isNaN(d)) return String(val);
-  return d.toLocaleDateString("en-GB", { day:"2-digit", month:"2-digit", year:"numeric" });
-};
-export const fmtDateTime = (val) => {
-  if (!val) return "";
-  const d = new Date(val);
-  if (isNaN(d)) return String(val);
-  return d.toLocaleDateString("en-GB",{ day:"2-digit",month:"2-digit",year:"numeric" }) +
-    " " + d.toLocaleTimeString("en-GB",{ hour:"2-digit",minute:"2-digit" });
-};
-export const fmtCurrency = (val) => val == null ? "" : `$${Number(val).toFixed(2)}`;
-export const fmtBool     = (val) => val ? "Yes" : "No";
-export const fmtList     = (arr, key = null) => {
-  if (!Array.isArray(arr) || !arr.length) return "";
-  return arr.map((i) => key ? i?.[key] : i).filter(Boolean).join(", ");
-};
-export const fmtTruncate = (val, max = 100) => {
-  if (val == null) return "";
-  const s = String(val);
-  return s.length > max ? s.slice(0, max) + "…" : s;
-};
-</file>
-
-<file path="src/modules/export/utils/excel.builder.js">
-/**
- * excel.builder.js
- * ExcelJS streaming workbook factory and sheet helpers.
- *
- * Memory strategy: WorkbookWriter streams each committed row directly to the
- * HTTP response and releases its memory immediately. The server heap stays
- * roughly constant regardless of how many rows are written.
- *
- * Column widths are set at sheet-creation time because the streaming writer
- * cannot rewind to resize columns after data has been flushed.
- */
-import ExcelJS from "exceljs";
-
-const HEADER_BG    = "FF0D3D35"; // deep teal — Kazlak brand
-const HEADER_FG    = "FFFFFFFF";
-const SECTION_BG   = "FF1A5C52"; // slightly lighter teal for summary sections
-const ALT_ROW_BG   = "FFF0F7F6"; // faint mint for alternating rows
-
-export const createStreamingWorkbook = (res, filename) => {
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-  res.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering
-  return new ExcelJS.stream.xlsx.WorkbookWriter({
-    stream: res,
-    useStyles: true,
-    useSharedStrings: true,
-  });
-};
-
-export const addStyledSheet = (workbook, sheetName, columns) => {
-  const sheet = workbook.addWorksheet(sheetName, {
-    views: [{ state: "frozen", ySplit: 1 }],
-    pageSetup: { paperSize: 9, orientation: "landscape", fitToPage: true },
-  });
-
-  sheet.columns = columns.map((col) => ({
-    header: col.header,
-    key:    col.key,
-    width:  col.width ?? 18,
-    numFmt: col.numFmt ?? resolveNumFmt(col.type),
-    style: {
-      alignment: {
-        vertical:   "middle",
-        horizontal: ["currency","number","percent"].includes(col.type) ? "right" : "left",
-        wrapText:   false,
-      },
-    },
-  }));
-
-  // Style the header row that ExcelJS already wrote via sheet.columns
-  const headerRow = sheet.getRow(1);
-  headerRow.height = 22;
-  headerRow.eachCell((cell) => {
-    cell.font      = { bold: true, color: { argb: HEADER_FG }, size: 10, name: "Calibri" };
-    cell.fill      = { type: "pattern", pattern: "solid", fgColor: { argb: HEADER_BG } };
-    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: false };
-    cell.border    = { bottom: { style: "thin", color: { argb: "FF34B09A" } } };
-  });
-  // CRITICAL: commit the header before adding data rows
-  headerRow.commit();
-  return sheet;
-};
-
-/**
- * Adds one data row and commits it immediately.
- * `row.commit()` flushes to the network buffer and frees memory.
- * Omitting this causes all rows to accumulate in RAM.
- */
-export const addDataRow = (sheet, data, rowIndex) => {
-  const row  = sheet.addRow(data);
-  row.height = 18;
-  if (rowIndex % 2 === 0) {
-    row.eachCell({ includeEmpty: true }, (cell) => {
-      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ALT_ROW_BG } };
-    });
-  }
-  row.commit();
-};
-
-export const addSummarySheet = (workbook, rows) => {
-  const sheet = workbook.addWorksheet("📊 Summary", { views: [{ state: "frozen", ySplit: 2 }] });
-  sheet.columns = [{ key: "label", width: 40 }, { key: "value", width: 22 }];
-
-  // Title
-  const title = sheet.addRow(["HayfaTur — Full Data Export"]);
-  title.height = 28;
-  const tc = title.getCell(1);
-  tc.font  = { bold: true, size: 14, color: { argb: HEADER_FG }, name: "Calibri" };
-  tc.fill  = { type: "pattern", pattern: "solid", fgColor: { argb: HEADER_BG } };
-  tc.alignment = { vertical: "middle" };
-  sheet.mergeCells("A1:B1");
-  title.commit();
-
-  // Generated timestamp
-  const meta = sheet.addRow(["Generated", new Date().toLocaleString("en-GB")]);
-  ["A2","B2"].forEach((r) => { const c = sheet.getCell(r); c.font = { italic: true, color: { argb: "FF666666" } }; });
-  meta.commit();
-  sheet.addRow([]).commit(); // spacer
-
-  let i = 0;
-  for (const [label, value, isSection] of rows) {
-    const row = sheet.addRow([label, value]);
-    row.height = 20;
-    if (isSection) {
-      row.getCell(1).font  = { bold: true, color: { argb: HEADER_FG }, size: 10 };
-      row.getCell(1).fill  = { type: "pattern", pattern: "solid", fgColor: { argb: SECTION_BG } };
-      row.getCell(2).fill  = { type: "pattern", pattern: "solid", fgColor: { argb: SECTION_BG } };
-      sheet.mergeCells(`A${row.number}:B${row.number}`);
-    } else {
-      if (i % 2 === 0) row.eachCell({ includeEmpty: true }, (cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ALT_ROW_BG } }; });
-      row.getCell(2).alignment = { horizontal: "right" };
-    }
-    row.commit();
-    i++;
-  }
-  sheet.commit();
-};
-
-const resolveNumFmt = (type) => {
-  switch (type) {
-    case "currency": return '"$"#,##0.00';
-    case "date":     return "dd/mm/yyyy";
-    case "percent":  return "0.0%";
-    case "number":   return "#,##0";
-    default:         return undefined;
-  }
-};
-</file>
-
 <file path="src/modules/log/controller/log.controller.js">
 import logModel from "../../../../DB/model/log.model.js";
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
@@ -1677,115 +1691,6 @@ export const updateProvider = {
       "string.hex": "Invalid provider ID",
       "string.length": "Invalid provider ID",
     }),
-  }),
-};
-</file>
-
-<file path="src/modules/providerCollection/providerCollection.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import { validation } from "../../middleware/validation.js";
-import * as providerCollectionController from "./controller/providerCollection.controller.js";
-import * as validators from "./providerCollection.validation.js";
-import { endpoint } from "../indexEndpoint.js";
-
-const router = Router();
-
-// Static routes before dynamic ones.
-
-// GET /api/v1/provider-collection/all — overview for accounting
-router.get(
-  "/all",
-  auth(endpoint.accounting_only),
-  providerCollectionController.getAllProviderCollections,
-);
-
-// DELETE /api/v1/provider-collection/:collectionId — Admin only
-router.delete(
-  "/:collectionId",
-  auth(endpoint.AdminOnly), 
-  validation(validators.deleteProviderCollection),
-  providerCollectionController.deleteProviderCollection,
-);
-
-// POST /api/v1/provider-collection/:providerId — record a recovery from a provider
-router.post(
-  "/:providerId",
-  auth(endpoint.accounting_only),
-  validation(validators.createProviderCollection),
-  providerCollectionController.createProviderCollection,
-);
-
-// GET /api/v1/provider-collection/:providerId — list collections for a provider
-router.get(
-  "/:providerId",
-  auth(endpoint.accounting_only),
-  validation(validators.getProviderCollections),
-  providerCollectionController.getProviderCollections,
-);
-
-export default router;
-</file>
-
-<file path="src/modules/providerCollection/providerCollection.validation.js">
-import Joi from "joi";
-
-const objectId = Joi.string().hex().length(24);
-
-export const createProviderCollection = {
-  body: Joi.object({
-    amount: Joi.number().positive().required().messages({
-      "number.positive": "Amount must be greater than 0",
-      "any.required": "Amount is required",
-    }),
-    date: Joi.date()
-      .max("now")
-      .default(() => new Date())
-      .messages({
-        "date.max": "Collection date cannot be in the future",
-      }),
-    method: Joi.string()
-      .valid("cash", "bank_transfer", "check", "other")
-      .default("cash"),
-    notes: Joi.string().trim().max(300).optional().allow(""),
-    reference: Joi.string().trim().max(100).optional().allow(""),
-    booking: objectId.optional().messages({
-      "string.hex": "Invalid booking ID",
-      "string.length": "Invalid booking ID",
-    }),
-  }),
-  params: Joi.object({
-    providerId: objectId.required().messages({
-      "string.hex": "Invalid provider ID",
-      "string.length": "Invalid provider ID",
-    }),
-  }),
-};
-
-export const deleteProviderCollection = {
-  params: Joi.object({
-    collectionId: objectId.required().messages({
-      "string.hex": "Invalid collection ID",
-    }),
-  }),
-};
-
-export const getProviderCollections = {
-  params: Joi.object({
-    providerId: objectId.required().messages({
-      "string.hex": "Invalid provider ID",
-    }),
-  }),
-  query: Joi.object({
-    fromDate: Joi.date(),
-    toDate: Joi.date().when("fromDate", {
-      is: Joi.exist(),
-      then: Joi.date().min(Joi.ref("fromDate")).messages({
-        "date.min": "toDate must be after fromDate",
-      }),
-    }),
-    page: Joi.number().integer().min(1).default(1),
-    size: Joi.number().integer().min(1).max(100).default(10),
   }),
 };
 </file>
@@ -2364,88 +2269,6 @@ export const notifyProviderPaymentRecorded = async (
       "❌ Failed to send provider payment notification:",
       err.message,
     );
-  }
-};
-</file>
-
-<file path="src/services/transaction.js">
-import mongoose from "mongoose";
-
-/**
- * Executes `callback` inside a Mongoose transaction when a replica set is
- * available. Falls back to a plain (non-transactional) execution on
- * standalone MongoDB instances (common in dev/small deployments).
- *
- * The callback receives `session | null`. All Mongoose operations inside the
- * callback should pass the session through — Mongoose silently ignores a
- * null session, so the same callback body works in both modes.
- *
- * Standalone detection covers two distinct error surfaces:
- *
- *   1. "Transaction numbers are only allowed on a replica set member"
- *      Thrown by session.startTransaction() when MongoDB is standalone.
- *
- *   2. "This MongoDB deployment does not support retryable writes"
- *      Thrown by the MongoDB driver before a transaction even starts when
- *      retryable writes are enabled (the default in MongoDB driver 3+) on a
- *      standalone instance. Adding retryWrites=false to the connection string
- *      prevents this error upstream, but the fallback is kept here as a
- *      second line of defence in case the connection option is not set.
- *
- * ⚠️  Without a transaction, the operations inside the callback are NOT atomic.
- *     For production, always run MongoDB as a replica set.
- *
- * @param {(session: import('mongoose').ClientSession | null) => Promise<T>} callback
- * @returns {Promise<T>}
- */
-export const withTransaction = async (callback) => {
-  let session = null;
-
-  try {
-    session = await mongoose.startSession();
-    session.startTransaction();
-
-    const result = await callback(session);
-
-    await session.commitTransaction();
-    return result;
-  } catch (error) {
-    if (session) {
-      try {
-        await session.abortTransaction();
-      } catch (_) {
-        // Swallow abort errors — the original error is what matters.
-      }
-    }
-
-    // Detect any "standalone MongoDB" condition regardless of which layer
-    // surfaces the error first.
-    const isStandaloneError =
-      error?.codeName === "IllegalOperation" ||
-      error?.code === 20 ||
-      error?.message?.includes(
-        "Transaction numbers are only allowed on a replica set",
-      ) ||
-      error?.message?.includes("does not support retryable writes") ||
-      error?.message?.includes("retryWrites");
-
-    if (isStandaloneError) {
-      console.warn(
-        "⚠️  MongoDB transactions are not available on this deployment " +
-          "(standalone instance detected). " +
-          "Falling back to non-transactional execution. " +
-          "Operations are NOT atomic in this mode. " +
-          "Add retryWrites=false to your connection string and run MongoDB " +
-          "as a replica set for full transaction support.",
-      );
-      return callback(null);
-    }
-
-    throw error;
-  } finally {
-    if (session) {
-      session.endSession();
-    }
   }
 };
 </file>
@@ -3707,6 +3530,36 @@ describe("invoicePdfService", () => {
 });
 </file>
 
+<file path=".gitignore">
+node_modules/
+.env
+</file>
+
+<file path="jest.config.js">
+export default {
+  testEnvironment: "node",
+  transform: {},
+  injectGlobals: false, // ← add this line
+  setupFiles: ["./tests/setup/env.js"],
+  globalSetup: "./tests/setup/globalSetup.js",
+  globalTeardown: "./tests/setup/globalTeardown.js",
+  testMatch: [
+    "**/tests/unit/**/*.test.js",
+    "**/tests/integration/**/*.test.js",
+  ],
+  verbose: true,
+  testTimeout: 30000,
+  collectCoverageFrom: [
+    "src/services/bookingService.js",
+    "src/modules/booking/controller/booking.controller.js",
+    "src/modules/payment/controller/payment.controller.js",
+    "DB/model/booking.model.js",
+  ],
+  coverageDirectory: "coverage",
+  coverageReporters: ["text", "lcov"],
+};
+</file>
+
 <file path="assets/kazlak-mark.svg">
 <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
@@ -4525,406 +4378,89 @@ export const downloadFullExport = asyncHandler(async (req, res, next) => {
 });
 </file>
 
-<file path="src/modules/indexEndpoint.js">
-import { ROLES } from "../config/roles.js";
+<file path="src/modules/providerCollection/providerCollection.validation.js">
+import Joi from "joi";
 
-/**
- * Endpoint access-control groups.
- *
- * Each group is an array of role strings passed to auth() middleware.
- * Using named groups (e.g. endpoint.AdminOnly) instead of inline arrays
- * means a permission change requires editing exactly one line here — no
- * need to hunt down every router file.
- *
- * Roles come from src/config/roles.js — the single source of truth.
- * Never inline role strings ("admin", "booking_staff") in router files.
- */
-export const endpoint = {
-  // ── Booking ─────────────────────────────────────────────────────────────────
-  booking_manage: [ROLES.ADMIN, ROLES.BOOKING_STAFF],
-  booking_view:   [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
-  booking_delete: [ROLES.ADMIN],
+const objectId = Joi.string().hex().length(24);
 
-  // ── Provider ─────────────────────────────────────────────────────────────────
-  provider_manage: [ROLES.ADMIN],
-  provider_view:   [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
-
-  // ── Finance ──────────────────────────────────────────────────────────────────
-  accounting_only: [ROLES.ADMIN, ROLES.ACCOUNTING_STAFF],
-
-  // ── Cross-cutting ─────────────────────────────────────────────────────────────
-  AdminOnly: [ROLES.ADMIN],
-  All:       [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
-  view_logs: [ROLES.ADMIN],
+export const createProviderCollection = {
+  body: Joi.object({
+    amount: Joi.number().positive().required().messages({
+      "number.positive": "Amount must be greater than 0",
+      "any.required": "Amount is required",
+    }),
+    date: Joi.date()
+      .max("now")
+      .default(() => new Date())
+      .messages({
+        "date.max": "Collection date cannot be in the future",
+      }),
+    method: Joi.string()
+      .valid("cash", "bank_transfer", "check", "other")
+      .default("cash"),
+    notes: Joi.string().trim().max(300).optional().allow(""),
+    reference: Joi.string().trim().max(100).optional().allow(""),
+    booking: objectId.optional().messages({
+      "string.hex": "Invalid booking ID",
+      "string.length": "Invalid booking ID",
+    }),
+  }),
+  params: Joi.object({
+    providerId: objectId.required().messages({
+      "string.hex": "Invalid provider ID",
+      "string.length": "Invalid provider ID",
+    }),
+  }),
 };
-</file>
 
-<file path="src/modules/payment/payment.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import { validation } from "../../middleware/validation.js";
-import * as paymentController from "./controller/payment.controller.js";
-import * as validators from "./payment.validation.js";
-import { endpoint } from "../indexEndpoint.js";
+export const deleteProviderCollection = {
+  params: Joi.object({
+    collectionId: objectId.required().messages({
+      "string.hex": "Invalid collection ID",
+    }),
+  }),
+};
 
-const router = Router();
+// NEW: edit a provider collection (Admin only) — mirrors editProviderPayment
+export const editProviderCollection = {
+  body: Joi.object({
+    amount: Joi.number().positive().messages({
+      "number.positive": "Amount must be greater than 0",
+    }),
+    date: Joi.date().max("now").messages({
+      "date.max": "Collection date cannot be in the future",
+    }),
+    method: Joi.string().valid("cash", "bank_transfer", "check", "other"),
+    notes: Joi.string().trim().max(300).allow(""),
+    reference: Joi.string().trim().max(100).allow(""),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    collectionId: objectId.required().messages({
+      "string.hex": "Invalid collection ID",
+    }),
+  }),
+};
 
-// ── Static routes first ───────────────────────────────────────────────────────
-
-router.get(
-  "/payments/all",
-  auth(endpoint.accounting_only),
-  paymentController.getAllPayments,
-);
-
-// Admin can edit any payment field (amount, date, method, notes, providerRecipient)
-router.patch(
-  "/payments/:paymentId",
-  auth(endpoint.AdminOnly),
-  validation(validators.editPayment),
-  paymentController.editPayment,
-);
-
-router.delete(
-  "/payments/:paymentId",
-  auth(endpoint.AdminOnly),
-  validation(validators.deletePayment),
-  paymentController.deletePayment,
-);
-
-// ── Dynamic routes after ──────────────────────────────────────────────────────
-
-router.post(
-  "/:id/payments",
-  auth(endpoint.booking_manage),
-  validation(validators.addPayment),
-  paymentController.addPayment,
-);
-
-router.get(
-  "/:id/payments",
-  auth(endpoint.booking_view),
-  paymentController.getPaymentsByBooking,
-);
-
-export default router;
-</file>
-
-<file path="src/modules/providerPayment/controller/providerPayment.controller.js">
-import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
-import providerModel from "../../../../DB/model/provider.model.js";
-import logModel from "../../../../DB/model/log.model.js";
-import { pagination } from "../../../services/pagination.js";
-import { notifyProviderPaymentRecorded } from "../../../services/notification.js";
-import { applyProviderSummaryDelta } from "../../../services/providerSummaryService.js";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Record a payment made TO a provider
-// POST /api/v1/provider-payment/:providerId
-// ─────────────────────────────────────────────────────────────────────────────
-export const createProviderPayment = asyncHandler(async (req, res, next) => {
-  const { providerId } = req.params;
-  const { amount, date, method, notes, reference } = req.body;
-
-  const provider = await providerModel.findById(providerId);
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  const payment = await providerPaymentModel.create({
-    provider: providerId,
-    amount,
-    date: date || new Date(),
-    method: method || "cash",
-    notes,
-    reference,
-    recordedBy: req.user._id,
-  });
-
-  await logModel.create({
-    user: req.user._id,
-    action: "CREATE_PROVIDER_PAYMENT",
-    details: {
-      paymentId: payment._id,
-      providerId,
-      providerName: provider.name,
-      amount,
-      method,
-    },
-  });
-
-  await notifyProviderPaymentRecorded(
-    provider,
-    payment,
-    req.user.email,
-    req.user.userName,
-  );
-
-  return res.status(201).json({
-    success: true,
-    message: "Provider payment recorded successfully",
-    data: { payment },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Get all payments for a provider (paginated)
-// GET /api/v1/provider-payment/:providerId
-// ─────────────────────────────────────────────────────────────────────────────
-export const getProviderPayments = asyncHandler(async (req, res, next) => {
-  const { providerId } = req.params;
-  const { fromDate, toDate, page, size } = req.query;
-
-  const provider = await providerModel.findById(providerId).lean();
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  const query = { provider: providerId };
-  if (fromDate || toDate) {
-    query.date = {};
-    if (fromDate) query.date.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      query.date.$lte = to;
-    }
-  }
-
-  const { limit, skip } = pagination(page, size);
-
-  const [payments, totalCount, filteredTotalResult, allTimeTotalResult] =
-    await Promise.all([
-      providerPaymentModel
-        .find(query)
-        .populate("recordedBy", "userName")
-        .sort({ date: -1 })
-        .limit(limit)
-        .skip(skip),
-      providerPaymentModel.countDocuments(query),
-      providerPaymentModel.aggregate([
-        { $match: query },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]),
-      providerPaymentModel.aggregate([
-        { $match: { provider: provider._id } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]),
-    ]);
-
-  return res.status(200).json({
-    success: true,
-    message: "Data retrieved successfully",
-    data: {
-      provider: { id: provider._id, name: provider.name, type: provider.type },
-      totalCount,
-      totalPages: Math.ceil(totalCount / limit),
-      totalPaidToProvider: filteredTotalResult[0]?.total || 0,
-      allTimeTotalPaidToProvider: allTimeTotalResult[0]?.total || 0,
-      isFiltered: Boolean(fromDate || toDate),
-      payments,
-    },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// NEW: Edit a provider payment (Admin only)
-// PATCH /api/v1/provider-payment/:paymentId
-//
-// Editable fields: amount, date, method, notes, reference.
-// When amount changes the provider summary delta is corrected post-save.
-// ─────────────────────────────────────────────────────────────────────────────
-export const editProviderPayment = asyncHandler(async (req, res, next) => {
-  const { paymentId } = req.params;
-  const { amount, date, method, notes, reference } = req.body;
-
-  const payment = await providerPaymentModel
-    .findById(paymentId)
-    .populate("provider", "name");
-  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
-
-  const oldAmount = payment.amount;
-  const newAmount = amount !== undefined ? Number(amount) : oldAmount;
-  const amountChanged = newAmount !== oldAmount;
-
-  // Apply field updates
-  if (amount !== undefined) payment.amount = newAmount;
-  if (date !== undefined) payment.date = date;
-  if (method !== undefined) payment.method = method;
-  if (notes !== undefined) payment.notes = notes;
-  if (reference !== undefined) payment.reference = reference;
-
-  // Temporarily bypass the post-save hook that would double-apply the delta.
-  // We apply only the DIFF manually after saving.
-  payment._skipSummaryHook = true;
-  await payment.save();
-
-  // Apply the net delta to provider summary (only the change, not the full amount)
-  if (amountChanged) {
-    await applyProviderSummaryDelta(payment.provider._id, {
-      totalWeHavePaid: newAmount - oldAmount,
-    });
-  }
-
-  await logModel.create({
-    user: req.user._id,
-    action: "EDIT_PROVIDER_PAYMENT",
-    details: {
-      paymentId,
-      providerId: payment.provider._id,
-      providerName: payment.provider.name,
-      changes: {
-        ...(amountChanged && { amount: { from: oldAmount, to: newAmount } }),
-        ...(method !== undefined && { method }),
-        ...(date !== undefined && { date }),
-        ...(notes !== undefined && { notes }),
-        ...(reference !== undefined && { reference }),
-      },
-    },
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: "Provider payment updated successfully",
-    data: { payment },
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Delete a provider payment (Admin only)
-// DELETE /api/v1/provider-payment/:paymentId
-// ─────────────────────────────────────────────────────────────────────────────
-export const deleteProviderPayment = asyncHandler(async (req, res, next) => {
-  const { paymentId } = req.params;
-
-  const payment = await providerPaymentModel
-    .findById(paymentId)
-    .populate("provider", "name");
-  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
-
-  await payment.deleteOne();
-
-  await logModel.create({
-    user: req.user._id,
-    action: "DELETE_PROVIDER_PAYMENT",
-    details: {
-      paymentId,
-      providerId: payment.provider._id,
-      providerName: payment.provider?.name,
-      amount: payment.amount,
-    },
-  });
-
-  return res.status(200).json({
-    success: true,
-    message: "Provider payment deleted successfully",
-    data: null,
-    errors: null,
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Get all provider payments — accounting overview
-// GET /api/v1/provider-payment/all
-// ─────────────────────────────────────────────────────────────────────────────
-export const getAllProviderPayments = asyncHandler(async (req, res) => {
-  const { method, fromDate, toDate, page, size } = req.query;
-
-  const query = {};
-  if (method) query.method = method;
-  if (fromDate || toDate) {
-    query.date = {};
-    if (fromDate) query.date.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      query.date.$lte = to;
-    }
-  }
-
-  const { limit, skip } = pagination(page, size);
-
-  const [payments, totalCount, totalAmountResult] = await Promise.all([
-    providerPaymentModel
-      .find(query)
-      .populate("provider", "name type")
-      .populate("recordedBy", "userName")
-      .sort({ date: -1 })
-      .limit(limit)
-      .skip(skip),
-    providerPaymentModel.countDocuments(query),
-    providerPaymentModel.aggregate([
-      { $match: query },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-  ]);
-
-  return res.status(200).json({
-    success: true,
-    message: "Data retrieved successfully",
-    data: {
-      totalCount,
-      totalPages: Math.ceil(totalCount / limit),
-      totalAmount: totalAmountResult[0]?.total || 0,
-      payments,
-    },
-    errors: null,
-  });
-});
-</file>
-
-<file path="src/modules/providerPayment/providerPayment.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import { validation } from "../../middleware/validation.js";
-import * as providerPaymentController from "./controller/providerPayment.controller.js";
-import * as validators from "./providerPayment.validation.js";
-import { endpoint } from "../indexEndpoint.js";
-
-const router = Router();
-
-// Static routes before dynamic ones
-
-// GET /api/v1/provider-payment/all
-router.get(
-  "/all",
-  auth(endpoint.accounting_only),
-  providerPaymentController.getAllProviderPayments,
-);
-
-// NEW: PATCH /api/v1/provider-payment/:paymentId  — edit a provider payment
-router.patch(
-  "/:paymentId",
-  auth(endpoint.AdminOnly),
-  validation(validators.editProviderPayment),
-  providerPaymentController.editProviderPayment,
-);
-
-// DELETE /api/v1/provider-payment/:paymentId
-router.delete(
-  "/:paymentId",
-  auth(endpoint.AdminOnly),
-  validation(validators.deleteProviderPayment),
-  providerPaymentController.deleteProviderPayment,
-);
-
-// POST /api/v1/provider-payment/:providerId
-router.post(
-  "/:providerId",
-  auth(endpoint.accounting_only),
-  validation(validators.createProviderPayment),
-  providerPaymentController.createProviderPayment,
-);
-
-// GET /api/v1/provider-payment/:providerId
-router.get(
-  "/:providerId",
-  auth(endpoint.accounting_only),
-  validation(validators.getProviderPayments),
-  providerPaymentController.getProviderPayments,
-);
-
-export default router;
+export const getProviderCollections = {
+  params: Joi.object({
+    providerId: objectId.required().messages({
+      "string.hex": "Invalid provider ID",
+    }),
+  }),
+  query: Joi.object({
+    fromDate: Joi.date(),
+    toDate: Joi.date().when("fromDate", {
+      is: Joi.exist(),
+      then: Joi.date().min(Joi.ref("fromDate")).messages({
+        "date.min": "toDate must be after fromDate",
+      }),
+    }),
+    page: Joi.number().integer().min(1).default(1),
+    size: Joi.number().integer().min(1).max(100).default(10),
+  }),
+};
 </file>
 
 <file path="src/modules/providerPayment/providerPayment.validation.js">
@@ -5394,6 +4930,40 @@ router.get(
 );
 
 export default router;
+</file>
+
+<file path="src/modules/indexEndpoint.js">
+import { ROLES } from "../config/roles.js";
+
+/**
+ * Endpoint access-control groups.
+ *
+ * Each group is an array of role strings passed to auth() middleware.
+ * Using named groups (e.g. endpoint.AdminOnly) instead of inline arrays
+ * means a permission change requires editing exactly one line here — no
+ * need to hunt down every router file.
+ *
+ * Roles come from src/config/roles.js — the single source of truth.
+ * Never inline role strings ("admin", "booking_staff") in router files.
+ */
+export const endpoint = {
+  // ── Booking ─────────────────────────────────────────────────────────────────
+  booking_manage: [ROLES.ADMIN, ROLES.BOOKING_STAFF],
+  booking_view:   [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
+  booking_delete: [ROLES.ADMIN],
+
+  // ── Provider ─────────────────────────────────────────────────────────────────
+  provider_manage: [ROLES.ADMIN],
+  provider_view:   [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
+
+  // ── Finance ──────────────────────────────────────────────────────────────────
+  accounting_only: [ROLES.ADMIN, ROLES.ACCOUNTING_STAFF],
+
+  // ── Cross-cutting ─────────────────────────────────────────────────────────────
+  AdminOnly: [ROLES.ADMIN],
+  All:       [ROLES.ADMIN, ROLES.BOOKING_STAFF, ROLES.ACCOUNTING_STAFF],
+  view_logs: [ROLES.ADMIN],
+};
 </file>
 
 <file path="src/services/cloudinary.js">
@@ -6261,6 +5831,88 @@ export const listServiceTypesForApi = () => {
 };
 </file>
 
+<file path="src/services/transaction.js">
+import mongoose from "mongoose";
+
+/**
+ * Executes `callback` inside a Mongoose transaction when a replica set is
+ * available. Falls back to a plain (non-transactional) execution on
+ * standalone MongoDB instances (common in dev/small deployments).
+ *
+ * The callback receives `session | null`. All Mongoose operations inside the
+ * callback should pass the session through — Mongoose silently ignores a
+ * null session, so the same callback body works in both modes.
+ *
+ * Standalone detection covers two distinct error surfaces:
+ *
+ *   1. "Transaction numbers are only allowed on a replica set member"
+ *      Thrown by session.startTransaction() when MongoDB is standalone.
+ *
+ *   2. "This MongoDB deployment does not support retryable writes"
+ *      Thrown by the MongoDB driver before a transaction even starts when
+ *      retryable writes are enabled (the default in MongoDB driver 3+) on a
+ *      standalone instance. Adding retryWrites=false to the connection string
+ *      prevents this error upstream, but the fallback is kept here as a
+ *      second line of defence in case the connection option is not set.
+ *
+ * ⚠️  Without a transaction, the operations inside the callback are NOT atomic.
+ *     For production, always run MongoDB as a replica set.
+ *
+ * @param {(session: import('mongoose').ClientSession | null) => Promise<T>} callback
+ * @returns {Promise<T>}
+ */
+export const withTransaction = async (callback) => {
+  let session = null;
+
+  try {
+    session = await mongoose.startSession();
+    session.startTransaction();
+
+    const result = await callback(session);
+
+    await session.commitTransaction();
+    return result;
+  } catch (error) {
+    if (session) {
+      try {
+        await session.abortTransaction();
+      } catch (_) {
+        // Swallow abort errors — the original error is what matters.
+      }
+    }
+
+    // Detect any "standalone MongoDB" condition regardless of which layer
+    // surfaces the error first.
+    const isStandaloneError =
+      error?.codeName === "IllegalOperation" ||
+      error?.code === 20 ||
+      error?.message?.includes(
+        "Transaction numbers are only allowed on a replica set",
+      ) ||
+      error?.message?.includes("does not support retryable writes") ||
+      error?.message?.includes("retryWrites");
+
+    if (isStandaloneError) {
+      console.warn(
+        "⚠️  MongoDB transactions are not available on this deployment " +
+          "(standalone instance detected). " +
+          "Falling back to non-transactional execution. " +
+          "Operations are NOT atomic in this mode. " +
+          "Add retryWrites=false to your connection string and run MongoDB " +
+          "as a replica set for full transaction support.",
+      );
+      return callback(null);
+    }
+
+    throw error;
+  } finally {
+    if (session) {
+      session.endSession();
+    }
+  }
+};
+</file>
+
 <file path="tests/integration/payment.test.js">
 /**
  * Integration tests — Payment module
@@ -6733,52 +6385,6 @@ export default async function globalSetup() {
 }
 </file>
 
-<file path="DB/connection.js">
-import mongoose from "mongoose";
-import { seedAdmin } from "./adminSeed.js";
-import { refreshServiceTypeRegistry } from "../src/services/serviceTypeRegistry.js";
-
-/**
- * Establishes the MongoDB connection then runs startup tasks sequentially.
- *
- * Connection options:
- *   retryWrites: false — Required for standalone (non-replica-set) MongoDB
- *     deployments. MongoDB 4+ drivers enable retryable writes by default, but
- *     retryable writes require a replica set to be active. On a standalone
- *     instance the driver throws "does not support retryable writes" on the
- *     very first write operation. Setting this to false disables the feature
- *     for this connection without affecting any other behaviour.
- *     When you later deploy MongoDB as a replica set (recommended for
- *     production), you can remove this option or set it back to true.
- */
-const connectDB = async () => {
-  try {
-    await mongoose.connect(process.env.DBURI, {
-      retryWrites: false,
-    });
-    console.log("✅ MongoDB connected");
-  } catch (err) {
-    console.error("❌ MongoDB connection failed:", err.message);
-    process.exit(1);
-  }
-
-  try {
-    await seedAdmin();
-  } catch (err) {
-    console.error("❌ Admin seed failed:", err.message);
-    process.exit(1);
-  }
-
-  try {
-    await refreshServiceTypeRegistry();
-  } catch (err) {
-    console.error("⚠️  Service type registry refresh failed:", err.message);
-  }
-};
-
-export default connectDB;
-</file>
-
 <file path="DB/model/providerCollection.model.js">
 import mongoose from "mongoose";
 import { applyProviderSummaryDelta } from "../../src/services/providerSummaryService.js";
@@ -7216,165 +6822,132 @@ router.post(
 export default router;
 </file>
 
-<file path="src/modules/providerCollection/controller/providerCollection.controller.js">
+<file path="src/modules/payment/payment.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as paymentController from "./controller/payment.controller.js";
+import * as validators from "./payment.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// ── Static routes first ───────────────────────────────────────────────────────
+
+router.get(
+  "/payments/all",
+  auth(endpoint.accounting_only),
+  paymentController.getAllPayments,
+);
+
+// NEW: single payment lookup by ID — powers PaymentDetailPage.jsx
+router.get(
+  "/payments/:paymentId",
+  auth(endpoint.booking_view),
+  paymentController.getPaymentById,
+);
+
+// Admin can edit any payment field (amount, date, method, notes, providerRecipient)
+router.patch(
+  "/payments/:paymentId",
+  auth(endpoint.AdminOnly),
+  validation(validators.editPayment),
+  paymentController.editPayment,
+);
+
+router.delete(
+  "/payments/:paymentId",
+  auth(endpoint.AdminOnly),
+  validation(validators.deletePayment),
+  paymentController.deletePayment,
+);
+
+// ── Dynamic routes after ──────────────────────────────────────────────────────
+
+router.post(
+  "/:id/payments",
+  auth(endpoint.booking_manage),
+  validation(validators.addPayment),
+  paymentController.addPayment,
+);
+
+router.get(
+  "/:id/payments",
+  auth(endpoint.booking_view),
+  paymentController.getPaymentsByBooking,
+);
+
+export default router;
+</file>
+
+<file path="src/modules/providerPayment/controller/providerPayment.controller.js">
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
+import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
 import providerModel from "../../../../DB/model/provider.model.js";
-import paymentModel from "../../../../DB/model/payment.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
-import mongoose from "mongoose";
+import { notifyProviderPaymentRecorded } from "../../../services/notification.js";
+import { applyProviderSummaryDelta } from "../../../services/providerSummaryService.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: compute how much a provider currently owes our agency
+// Record a payment made TO a provider
+// POST /api/v1/provider-payment/:providerId
 // ─────────────────────────────────────────────────────────────────────────────
-const computeProviderOwesUs = async (providerId) => {
-  const providerObjId = new mongoose.Types.ObjectId(providerId);
-
-  const bookings = await mongoose
-    .model("Booking")
-    .find({
-      $or: [
-        { provider: providerObjId },
-        { "services.provider": providerObjId },
-      ],
-    })
-    .lean();
-
-  let totalServiceCost = 0;
-  for (const booking of bookings) {
-    for (const service of booking.services || []) {
-      if (service.provider?.toString() === providerId) {
-        totalServiceCost += Number(service.buy) || 0;
-      }
-    }
-  }
-
-  const [provPayAgg, directPayAgg, collectionAgg] = await Promise.all([
-    mongoose
-      .model("ProviderPayment")
-      .aggregate([
-        { $match: { provider: providerObjId } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]),
-    paymentModel.aggregate([
-      { $match: { providerRecipient: providerObjId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-    providerCollectionModel.aggregate([
-      { $match: { provider: providerObjId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-  ]);
-
-  const agencyPaymentsToProvider = provPayAgg[0]?.total || 0;
-  const customerDirectPayments = directPayAgg[0]?.total || 0;
-  const alreadyCollected = collectionAgg[0]?.total || 0;
-
-  const balance =
-    totalServiceCost -
-    agencyPaymentsToProvider -
-    customerDirectPayments +
-    alreadyCollected;
-
-  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
-  return { balance, providerOwesUs, alreadyCollected };
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Record a collection received FROM a provider
-// POST /api/v1/provider-collection/:providerId
-// ─────────────────────────────────────────────────────────────────────────────
-export const createProviderCollection = asyncHandler(async (req, res, next) => {
+export const createProviderPayment = asyncHandler(async (req, res, next) => {
   const { providerId } = req.params;
-  const { amount, date, method, notes, reference, booking } = req.body;
+  const { amount, date, method, notes, reference } = req.body;
 
   const provider = await providerModel.findById(providerId);
   if (!provider) return next(new Error("Provider not found", { cause: 404 }));
 
-  const { balance } = await computeProviderOwesUs(providerId);
-  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
-
-  if (providerOwesUs === 0 && balance >= 0) {
-    return next(
-      new Error(
-        `Provider "${provider.name}" does not currently hold a receivable balance. ` +
-          "Collections can only be recorded when the provider owes the agency money " +
-          "(i.e., they collected from a customer on the agency's behalf).",
-        { cause: 400 },
-      ),
-    );
-  }
-
-  const numAmount = Number(amount);
-
-  if (numAmount > providerOwesUs) {
-    return next(
-      new Error(
-        `Collection amount ($${numAmount}) exceeds the outstanding balance ` +
-          `($${providerOwesUs.toFixed(2)}) that ${provider.name} owes the agency. ` +
-          "Record a collection no greater than the outstanding balance.",
-        { cause: 400 },
-      ),
-    );
-  }
-
-  const collection = await providerCollectionModel.create({
+  const payment = await providerPaymentModel.create({
     provider: providerId,
-    amount: numAmount,
+    amount,
     date: date || new Date(),
     method: method || "cash",
     notes,
     reference,
-    booking: booking || null,
     recordedBy: req.user._id,
   });
 
   await logModel.create({
     user: req.user._id,
-    action: "CREATE_PROVIDER_COLLECTION",
+    action: "CREATE_PROVIDER_PAYMENT",
     details: {
-      collectionId: collection._id,
+      paymentId: payment._id,
       providerId,
       providerName: provider.name,
-      amount: numAmount,
+      amount,
       method,
-      previousOwed: providerOwesUs,
-      remainingOwed: providerOwesUs - numAmount,
     },
   });
 
+  await notifyProviderPaymentRecorded(
+    provider,
+    payment,
+    req.user.email,
+    req.user.userName,
+  );
+
   return res.status(201).json({
     success: true,
-    message: `Collection of $${numAmount} from ${provider.name} recorded successfully`,
-    data: {
-      collection,
-      balanceSummary: {
-        previouslyOwed: providerOwesUs,
-        collected: numAmount,
-        remainingOwed: +(providerOwesUs - numAmount).toFixed(2),
-      },
-    },
+    message: "Provider payment recorded successfully",
+    data: { payment },
     errors: null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Get all collections from a specific provider (paginated)
-// GET /api/v1/provider-collection/:providerId
-//
-// FIX Bug 4: the "total" aggregate now uses the same date-filtered query as
-// the paginated list, so the two figures are always consistent.
-// An allTimeTotalCollected field is included for reference.
+// Get all payments for a provider (paginated)
+// GET /api/v1/provider-payment/:providerId
 // ─────────────────────────────────────────────────────────────────────────────
-export const getProviderCollections = asyncHandler(async (req, res, next) => {
+export const getProviderPayments = asyncHandler(async (req, res, next) => {
   const { providerId } = req.params;
   const { fromDate, toDate, page, size } = req.query;
 
   const provider = await providerModel.findById(providerId).lean();
   if (!provider) return next(new Error("Provider not found", { cause: 404 }));
 
-  // Build query — shared by list, count, and filtered total
   const query = { provider: providerId };
   if (fromDate || toDate) {
     query.date = {};
@@ -7388,33 +6961,24 @@ export const getProviderCollections = asyncHandler(async (req, res, next) => {
 
   const { limit, skip } = pagination(page, size);
 
-  const [collections, totalCount, filteredTotalResult, allTimeTotalResult] =
+  const [payments, totalCount, filteredTotalResult, allTimeTotalResult] =
     await Promise.all([
-      providerCollectionModel
+      providerPaymentModel
         .find(query)
         .populate("recordedBy", "userName")
-        .populate("booking", "bookingID customers")
         .sort({ date: -1 })
         .limit(limit)
         .skip(skip),
-      providerCollectionModel.countDocuments(query),
-
-      // Filtered total — consistent with the paginated list
-      providerCollectionModel.aggregate([
+      providerPaymentModel.countDocuments(query),
+      providerPaymentModel.aggregate([
         { $match: query },
         { $group: { _id: null, total: { $sum: "$amount" } } },
       ]),
-
-      // All-time total — always the full lifetime sum for this provider
-      providerCollectionModel.aggregate([
-        { $match: { provider: new mongoose.Types.ObjectId(providerId) } },
+      providerPaymentModel.aggregate([
+        { $match: { provider: provider._id } },
         { $group: { _id: null, total: { $sum: "$amount" } } },
       ]),
     ]);
-
-  const { balance } = await computeProviderOwesUs(providerId);
-  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
-  const isFiltered = Boolean(fromDate || toDate);
 
   return res.status(200).json({
     success: true,
@@ -7423,21 +6987,117 @@ export const getProviderCollections = asyncHandler(async (req, res, next) => {
       provider: { id: provider._id, name: provider.name, type: provider.type },
       totalCount,
       totalPages: Math.ceil(totalCount / limit),
-      totalCollected: filteredTotalResult[0]?.total || 0,
-      allTimeTotalCollected: allTimeTotalResult[0]?.total || 0,
-      isFiltered,
-      currentOutstandingBalance: providerOwesUs,
-      collections,
+      totalPaidToProvider: filteredTotalResult[0]?.total || 0,
+      allTimeTotalPaidToProvider: allTimeTotalResult[0]?.total || 0,
+      isFiltered: Boolean(fromDate || toDate),
+      payments,
     },
     errors: null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Get all collections — accounting overview
-// GET /api/v1/provider-collection/all
+// NEW: Edit a provider payment (Admin only)
+// PATCH /api/v1/provider-payment/:paymentId
+//
+// Editable fields: amount, date, method, notes, reference.
+// When amount changes the provider summary delta is corrected post-save.
 // ─────────────────────────────────────────────────────────────────────────────
-export const getAllProviderCollections = asyncHandler(async (req, res) => {
+export const editProviderPayment = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+  const { amount, date, method, notes, reference } = req.body;
+
+  const payment = await providerPaymentModel
+    .findById(paymentId)
+    .populate("provider", "name");
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  const oldAmount = payment.amount;
+  const newAmount = amount !== undefined ? Number(amount) : oldAmount;
+  const amountChanged = newAmount !== oldAmount;
+
+  // Apply field updates
+  if (amount !== undefined) payment.amount = newAmount;
+  if (date !== undefined) payment.date = date;
+  if (method !== undefined) payment.method = method;
+  if (notes !== undefined) payment.notes = notes;
+  if (reference !== undefined) payment.reference = reference;
+
+  // Temporarily bypass the post-save hook that would double-apply the delta.
+  // We apply only the DIFF manually after saving.
+  payment._skipSummaryHook = true;
+  await payment.save();
+
+  // Apply the net delta to provider summary (only the change, not the full amount)
+  if (amountChanged) {
+    await applyProviderSummaryDelta(payment.provider._id, {
+      totalWeHavePaid: newAmount - oldAmount,
+    });
+  }
+
+  await logModel.create({
+    user: req.user._id,
+    action: "EDIT_PROVIDER_PAYMENT",
+    details: {
+      paymentId,
+      providerId: payment.provider._id,
+      providerName: payment.provider.name,
+      changes: {
+        ...(amountChanged && { amount: { from: oldAmount, to: newAmount } }),
+        ...(method !== undefined && { method }),
+        ...(date !== undefined && { date }),
+        ...(notes !== undefined && { notes }),
+        ...(reference !== undefined && { reference }),
+      },
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Provider payment updated successfully",
+    data: { payment },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete a provider payment (Admin only)
+// DELETE /api/v1/provider-payment/:paymentId
+// ─────────────────────────────────────────────────────────────────────────────
+export const deleteProviderPayment = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+
+  const payment = await providerPaymentModel
+    .findById(paymentId)
+    .populate("provider", "name");
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  await payment.deleteOne();
+
+  await logModel.create({
+    user: req.user._id,
+    action: "DELETE_PROVIDER_PAYMENT",
+    details: {
+      paymentId,
+      providerId: payment.provider._id,
+      providerName: payment.provider?.name,
+      amount: payment.amount,
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Provider payment deleted successfully",
+    data: null,
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all provider payments — accounting overview
+// GET /api/v1/provider-payment/all
+// ─────────────────────────────────────────────────────────────────────────────
+export const getAllProviderPayments = asyncHandler(async (req, res) => {
   const { method, fromDate, toDate, page, size } = req.query;
 
   const query = {};
@@ -7454,17 +7114,16 @@ export const getAllProviderCollections = asyncHandler(async (req, res) => {
 
   const { limit, skip } = pagination(page, size);
 
-  const [collections, totalCount, totalAmountResult] = await Promise.all([
-    providerCollectionModel
+  const [payments, totalCount, totalAmountResult] = await Promise.all([
+    providerPaymentModel
       .find(query)
       .populate("provider", "name type")
       .populate("recordedBy", "userName")
-      .populate("booking", "bookingID customers")
       .sort({ date: -1 })
       .limit(limit)
       .skip(skip),
-    providerCollectionModel.countDocuments(query),
-    providerCollectionModel.aggregate([
+    providerPaymentModel.countDocuments(query),
+    providerPaymentModel.aggregate([
       { $match: query },
       { $group: { _id: null, total: { $sum: "$amount" } } },
     ]),
@@ -7477,45 +7136,93 @@ export const getAllProviderCollections = asyncHandler(async (req, res) => {
       totalCount,
       totalPages: Math.ceil(totalCount / limit),
       totalAmount: totalAmountResult[0]?.total || 0,
-      collections,
+      payments,
     },
     errors: null,
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Delete a collection (Admin only)
-// DELETE /api/v1/provider-collection/:collectionId
+// Get a single provider payment by ID
+// GET /api/v1/provider-payment/payment/:paymentId
 // ─────────────────────────────────────────────────────────────────────────────
-export const deleteProviderCollection = asyncHandler(async (req, res, next) => {
-  const { collectionId } = req.params;
+export const getProviderPaymentById = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
 
-  const collection = await providerCollectionModel
-    .findById(collectionId)
-    .populate("provider", "name");
-  if (!collection)
-    return next(new Error("Collection not found", { cause: 404 }));
+  const payment = await providerPaymentModel
+    .findById(paymentId)
+    .populate("provider", "name type phone")
+    .populate("recordedBy", "userName");
 
-  await collection.deleteOne();
-
-  await logModel.create({
-    user: req.user._id,
-    action: "DELETE_PROVIDER_COLLECTION",
-    details: {
-      collectionId,
-      providerId: collection.provider._id,
-      providerName: collection.provider?.name,
-      amount: collection.amount,
-    },
-  });
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
 
   return res.status(200).json({
     success: true,
-    message: "Provider collection deleted successfully",
-    data: null,
+    message: "Data retrieved successfully",
+    data: { payment },
     errors: null,
   });
 });
+</file>
+
+<file path="src/modules/providerPayment/providerPayment.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as providerPaymentController from "./controller/providerPayment.controller.js";
+import * as validators from "./providerPayment.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// Static routes before dynamic ones
+
+// GET /api/v1/provider-payment/all
+router.get(
+  "/all",
+  auth(endpoint.accounting_only),
+  providerPaymentController.getAllProviderPayments,
+);
+
+// NEW: PATCH /api/v1/provider-payment/:paymentId  — edit a provider payment
+router.patch(
+  "/:paymentId",
+  auth(endpoint.AdminOnly),
+  validation(validators.editProviderPayment),
+  providerPaymentController.editProviderPayment,
+);
+
+// DELETE /api/v1/provider-payment/:paymentId
+router.delete(
+  "/:paymentId",
+  auth(endpoint.AdminOnly),
+  validation(validators.deleteProviderPayment),
+  providerPaymentController.deleteProviderPayment,
+);
+
+// POST /api/v1/provider-payment/:providerId
+router.post(
+  "/:providerId",
+  auth(endpoint.accounting_only),
+  validation(validators.createProviderPayment),
+  providerPaymentController.createProviderPayment,
+);
+
+// GET /api/v1/provider-payment/:providerId
+router.get(
+  "/:providerId",
+  auth(endpoint.accounting_only),
+  validation(validators.getProviderPayments),
+  providerPaymentController.getProviderPayments,
+);
+
+// NEW: GET /api/v1/provider-payment/payment/:paymentId — single payment lookup
+router.get(
+  "/payment/:paymentId",
+  auth(endpoint.accounting_only),
+  providerPaymentController.getProviderPaymentById,
+);
+export default router;
 </file>
 
 <file path="tests/integration/booking.test.js">
@@ -9925,6 +9632,54 @@ providerPaymentSchema.post(
 export default mongoose.model("ProviderPayment", providerPaymentSchema);
 </file>
 
+<file path="DB/connection.js">
+import mongoose from "mongoose";
+import { seedAdmin } from "./adminSeed.js";
+import { refreshServiceTypeRegistry } from "../src/services/serviceTypeRegistry.js";
+import "./model/syncFailure.model.js"; // ← ADD THIS: registers the SyncFailure schema at startup
+
+
+/**
+ * Establishes the MongoDB connection then runs startup tasks sequentially.
+ *
+ * Connection options:
+ *   retryWrites: false — Required for standalone (non-replica-set) MongoDB
+ *     deployments. MongoDB 4+ drivers enable retryable writes by default, but
+ *     retryable writes require a replica set to be active. On a standalone
+ *     instance the driver throws "does not support retryable writes" on the
+ *     very first write operation. Setting this to false disables the feature
+ *     for this connection without affecting any other behaviour.
+ *     When you later deploy MongoDB as a replica set (recommended for
+ *     production), you can remove this option or set it back to true.
+ */
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.DBURI, {
+      retryWrites: false,
+    });
+    console.log("✅ MongoDB connected");
+  } catch (err) {
+    console.error("❌ MongoDB connection failed:", err.message);
+    process.exit(1);
+  }
+
+  try {
+    await seedAdmin();
+  } catch (err) {
+    console.error("❌ Admin seed failed:", err.message);
+    process.exit(1);
+  }
+
+  try {
+    await refreshServiceTypeRegistry();
+  } catch (err) {
+    console.error("⚠️  Service type registry refresh failed:", err.message);
+  }
+};
+
+export default connectDB;
+</file>
+
 <file path="src/modules/auth/auth.validation.js">
 import Joi from "joi";
 import { ROLES, ALL_ROLES } from "../../config/roles.js";
@@ -10201,6 +9956,67 @@ router.post(
   "/:id/resync",
   auth(endpoint.AdminOnly),
   providerController.resyncProvider,
+);
+
+export default router;
+</file>
+
+<file path="src/modules/providerCollection/providerCollection.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as providerCollectionController from "./controller/providerCollection.controller.js";
+import * as validators from "./providerCollection.validation.js";
+import { endpoint } from "../indexEndpoint.js";
+
+const router = Router();
+
+// Static routes before dynamic ones.
+
+// GET /api/v1/provider-collection/all — overview for accounting
+router.get(
+  "/all",
+  auth(endpoint.accounting_only),
+  providerCollectionController.getAllProviderCollections,
+);
+
+// NEW: GET /api/v1/provider-collection/collection/:collectionId — single lookup
+router.get(
+  "/collection/:collectionId",
+  auth(endpoint.accounting_only),
+  providerCollectionController.getProviderCollectionById,
+);
+
+// PATCH /api/v1/provider-collection/:collectionId — Admin only
+router.patch(
+  "/:collectionId",
+  auth(endpoint.AdminOnly),
+  validation(validators.editProviderCollection),
+  providerCollectionController.editProviderCollection,
+);
+
+// DELETE /api/v1/provider-collection/:collectionId — Admin only
+router.delete(
+  "/:collectionId",
+  auth(endpoint.AdminOnly), 
+  validation(validators.deleteProviderCollection),
+  providerCollectionController.deleteProviderCollection,
+);
+
+// POST /api/v1/provider-collection/:providerId — record a recovery from a provider
+router.post(
+  "/:providerId",
+  auth(endpoint.accounting_only),
+  validation(validators.createProviderCollection),
+  providerCollectionController.createProviderCollection,
+);
+
+// GET /api/v1/provider-collection/:providerId — list collections for a provider
+router.get(
+  "/:providerId",
+  auth(endpoint.accounting_only),
+  validation(validators.getProviderCollections),
+  providerCollectionController.getProviderCollections,
 );
 
 export default router;
@@ -10650,83 +10466,393 @@ export const seedAdmin = async () => {
 };
 </file>
 
-<file path="src/modules/booking/booking.router.js">
-import { Router } from "express";
-import { auth } from "../../middleware/auth.js";
-import { validation } from "../../middleware/validation.js";
-import * as bookingController from "./controller/booking.controller.js";
-import { getAllServices }       from "./controller/services.controller.js";
-import * as validators from "./booking.validation.js";
-import { endpoint } from "../indexEndpoint.js";
+<file path="src/modules/providerCollection/controller/providerCollection.controller.js">
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+import logModel from "../../../../DB/model/log.model.js";
+import { pagination } from "../../../services/pagination.js";
+import { applyProviderSummaryDelta } from "../../../services/providerSummaryService.js";
+import mongoose from "mongoose";
 
-const router = Router();
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: compute how much a provider currently owes our agency
+// ─────────────────────────────────────────────────────────────────────────────
+const computeProviderOwesUs = async (providerId) => {
+  const providerObjId = new mongoose.Types.ObjectId(providerId);
 
-// ── Static routes first (before any /:id) ────────────────────────────────────
+  const bookings = await mongoose
+    .model("Booking")
+    .find({
+      $or: [
+        { provider: providerObjId },
+        { "services.provider": providerObjId },
+      ],
+    })
+    .lean();
 
-router.post(
-  "/create",
-  auth(endpoint.booking_manage),
-  validation(validators.createBooking),
-  bookingController.createBooking,
-);
+  let totalServiceCost = 0;
+  for (const booking of bookings) {
+    for (const service of booking.services || []) {
+      if (service.provider?.toString() === providerId) {
+        totalServiceCost += Number(service.buy) || 0;
+      }
+    }
+  }
 
-router.get(
-  "/getAll",
-  auth(endpoint.booking_view),
-  validation(validators.getAllBookingsQuery),
-  bookingController.getAllBookings,
-);
+  const [provPayAgg, directPayAgg, collectionAgg] = await Promise.all([
+    mongoose
+      .model("ProviderPayment")
+      .aggregate([
+        { $match: { provider: providerObjId } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+    paymentModel.aggregate([
+      { $match: { providerRecipient: providerObjId } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+    providerCollectionModel.aggregate([
+      { $match: { provider: providerObjId } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+  ]);
 
-// NEW: flattened service line-items across all bookings
-// Must be before /:id so Express doesn't treat "all-services" as an id param.
-router.get(
-  "/all-services",
-  auth(endpoint.booking_view),
-  getAllServices,
-);
+  const agencyPaymentsToProvider = provPayAgg[0]?.total || 0;
+  const customerDirectPayments = directPayAgg[0]?.total || 0;
+  const alreadyCollected = collectionAgg[0]?.total || 0;
 
-router.get(
-  "/get/:id",
-  auth(endpoint.booking_view),
-  validation(validators.bookingIdParam),
-  bookingController.getBookingById,
-);
+  const balance =
+    totalServiceCost -
+    agencyPaymentsToProvider -
+    customerDirectPayments +
+    alreadyCollected;
 
-router.patch(
-  "/edit/:id",
-  auth(endpoint.booking_manage),
-  validation(validators.updateBooking),
-  bookingController.updateBooking,
-);
+  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
+  return { balance, providerOwesUs, alreadyCollected };
+};
 
-router.patch(
-  "/:id/addService",
-  auth(endpoint.booking_manage),
-  validation(validators.addService),
-  bookingController.addServiceToBooking,
-);
+// ─────────────────────────────────────────────────────────────────────────────
+// Record a collection received FROM a provider
+// POST /api/v1/provider-collection/:providerId
+// ─────────────────────────────────────────────────────────────────────────────
+export const createProviderCollection = asyncHandler(async (req, res, next) => {
+  const { providerId } = req.params;
+  const { amount, date, method, notes, reference, booking } = req.body;
 
-router.patch(
-  "/:id/remove",
-  auth(endpoint.booking_manage),
-  validation(validators.removeService),
-  bookingController.removeServiceFromBooking,
-);
+  const provider = await providerModel.findById(providerId);
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
 
-router.delete(
-  "/delete/:id",
-  auth(endpoint.booking_delete),
-  validation(validators.bookingIdParam),
-  bookingController.deleteBooking,
-);
+  const { balance } = await computeProviderOwesUs(providerId);
+  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
 
-router.patch(
-  "/:id/status",
-  auth(endpoint.booking_manage),
-  bookingController.editStatus,
-);
+  if (providerOwesUs === 0 && balance >= 0) {
+    return next(
+      new Error(
+        `Provider "${provider.name}" does not currently hold a receivable balance. ` +
+          "Collections can only be recorded when the provider owes the agency money " +
+          "(i.e., they collected from a customer on the agency's behalf).",
+        { cause: 400 },
+      ),
+    );
+  }
 
-export default router;
+  const numAmount = Number(amount);
+
+  if (numAmount > providerOwesUs) {
+    return next(
+      new Error(
+        `Collection amount ($${numAmount}) exceeds the outstanding balance ` +
+          `($${providerOwesUs.toFixed(2)}) that ${provider.name} owes the agency. ` +
+          "Record a collection no greater than the outstanding balance.",
+        { cause: 400 },
+      ),
+    );
+  }
+
+  const collection = await providerCollectionModel.create({
+    provider: providerId,
+    amount: numAmount,
+    date: date || new Date(),
+    method: method || "cash",
+    notes,
+    reference,
+    booking: booking || null,
+    recordedBy: req.user._id,
+  });
+
+  await logModel.create({
+    user: req.user._id,
+    action: "CREATE_PROVIDER_COLLECTION",
+    details: {
+      collectionId: collection._id,
+      providerId,
+      providerName: provider.name,
+      amount: numAmount,
+      method,
+      previousOwed: providerOwesUs,
+      remainingOwed: providerOwesUs - numAmount,
+    },
+  });
+
+  return res.status(201).json({
+    success: true,
+    message: `Collection of $${numAmount} from ${provider.name} recorded successfully`,
+    data: {
+      collection,
+      balanceSummary: {
+        previouslyOwed: providerOwesUs,
+        collected: numAmount,
+        remainingOwed: +(providerOwesUs - numAmount).toFixed(2),
+      },
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: Edit a provider collection (Admin only)
+// PATCH /api/v1/provider-collection/:collectionId
+//
+// Mirrors editProviderPayment: the model's post-save hook only increments the
+// summary on document CREATION (isNew), so saving an existing document here
+// is a no-op for that hook — the amount delta must be pushed manually via
+// applyProviderSummaryDelta.
+// ─────────────────────────────────────────────────────────────────────────────
+export const editProviderCollection = asyncHandler(async (req, res, next) => {
+  const { collectionId } = req.params;
+  const { amount, date, method, notes, reference } = req.body;
+
+  const collection = await providerCollectionModel
+    .findById(collectionId)
+    .populate("provider", "name");
+  if (!collection) return next(new Error("Collection not found", { cause: 404 }));
+
+  const oldAmount = collection.amount;
+  const newAmount = amount !== undefined ? Number(amount) : oldAmount;
+  const amountChanged = newAmount !== oldAmount;
+
+  if (amount !== undefined) collection.amount = newAmount;
+  if (date !== undefined) collection.date = date;
+  if (method !== undefined) collection.method = method;
+  if (notes !== undefined) collection.notes = notes;
+  if (reference !== undefined) collection.reference = reference;
+
+  await collection.save();
+
+  if (amountChanged) {
+    await applyProviderSummaryDelta(
+      collection.provider._id,
+      { totalCollectedFromProvider: newAmount - oldAmount },
+      "providerCollection_edit",
+    );
+  }
+
+  await logModel.create({
+    user: req.user._id,
+    action: "EDIT_PROVIDER_COLLECTION",
+    details: {
+      collectionId,
+      providerId: collection.provider._id,
+      providerName: collection.provider?.name,
+      changes: {
+        ...(amountChanged && { amount: { from: oldAmount, to: newAmount } }),
+        ...(method !== undefined && { method }),
+        ...(date !== undefined && { date }),
+        ...(notes !== undefined && { notes }),
+        ...(reference !== undefined && { reference }),
+      },
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Provider collection updated successfully",
+    data: { collection },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all collections from a specific provider (paginated)
+// GET /api/v1/provider-collection/:providerId
+//
+// FIX Bug 4: the "total" aggregate now uses the same date-filtered query as
+// the paginated list, so the two figures are always consistent.
+// An allTimeTotalCollected field is included for reference.
+// ─────────────────────────────────────────────────────────────────────────────
+export const getProviderCollections = asyncHandler(async (req, res, next) => {
+  const { providerId } = req.params;
+  const { fromDate, toDate, page, size } = req.query;
+
+  const provider = await providerModel.findById(providerId).lean();
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  // Build query — shared by list, count, and filtered total
+  const query = { provider: providerId };
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const { limit, skip } = pagination(page, size);
+
+  const [collections, totalCount, filteredTotalResult, allTimeTotalResult] =
+    await Promise.all([
+      providerCollectionModel
+        .find(query)
+        .populate("recordedBy", "userName")
+        .populate("booking", "bookingID customers")
+        .sort({ date: -1 })
+        .limit(limit)
+        .skip(skip),
+      providerCollectionModel.countDocuments(query),
+
+      // Filtered total — consistent with the paginated list
+      providerCollectionModel.aggregate([
+        { $match: query },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+
+      // All-time total — always the full lifetime sum for this provider
+      providerCollectionModel.aggregate([
+        { $match: { provider: new mongoose.Types.ObjectId(providerId) } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+    ]);
+
+  const { balance } = await computeProviderOwesUs(providerId);
+  const providerOwesUs = balance < 0 ? Math.abs(balance) : 0;
+  const isFiltered = Boolean(fromDate || toDate);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      provider: { id: provider._id, name: provider.name, type: provider.type },
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      totalCollected: filteredTotalResult[0]?.total || 0,
+      allTimeTotalCollected: allTimeTotalResult[0]?.total || 0,
+      isFiltered,
+      currentOutstandingBalance: providerOwesUs,
+      collections,
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all collections — accounting overview
+// GET /api/v1/provider-collection/all
+// ─────────────────────────────────────────────────────────────────────────────
+export const getAllProviderCollections = asyncHandler(async (req, res) => {
+  const { method, fromDate, toDate, page, size } = req.query;
+
+  const query = {};
+  if (method) query.method = method;
+  if (fromDate || toDate) {
+    query.date = {};
+    if (fromDate) query.date.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      query.date.$lte = to;
+    }
+  }
+
+  const { limit, skip } = pagination(page, size);
+
+  const [collections, totalCount, totalAmountResult] = await Promise.all([
+    providerCollectionModel
+      .find(query)
+      .populate("provider", "name type")
+      .populate("recordedBy", "userName")
+      .populate("booking", "bookingID customers")
+      .sort({ date: -1 })
+      .limit(limit)
+      .skip(skip),
+    providerCollectionModel.countDocuments(query),
+    providerCollectionModel.aggregate([
+      { $match: query },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: {
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      totalAmount: totalAmountResult[0]?.total || 0,
+      collections,
+    },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete a collection (Admin only)
+// DELETE /api/v1/provider-collection/:collectionId
+// ─────────────────────────────────────────────────────────────────────────────
+export const deleteProviderCollection = asyncHandler(async (req, res, next) => {
+  const { collectionId } = req.params;
+
+  const collection = await providerCollectionModel
+    .findById(collectionId)
+    .populate("provider", "name");
+  if (!collection)
+    return next(new Error("Collection not found", { cause: 404 }));
+
+  await collection.deleteOne();
+
+  await logModel.create({
+    user: req.user._id,
+    action: "DELETE_PROVIDER_COLLECTION",
+    details: {
+      collectionId,
+      providerId: collection.provider._id,
+      providerName: collection.provider?.name,
+      amount: collection.amount,
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Provider collection deleted successfully",
+    data: null,
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get a single provider collection by ID
+// GET /api/v1/provider-collection/collection/:collectionId
+// ─────────────────────────────────────────────────────────────────────────────
+export const getProviderCollectionById = asyncHandler(async (req, res, next) => {
+  const { collectionId } = req.params;
+
+  const collection = await providerCollectionModel
+    .findById(collectionId)
+    .populate("provider", "name type phone")
+    .populate("booking", "bookingID customers")
+    .populate("recordedBy", "userName");
+
+  if (!collection) return next(new Error("Collection not found", { cause: 404 }));
+
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: { collection },
+    errors: null,
+  });
+});
 </file>
 
 <file path="src/modules/viewBoard/controller/viewBoard.controller.js">
@@ -11323,632 +11449,90 @@ export const getActiveServices = asyncHandler(async (req, res) => {
 });
 </file>
 
-<file path="src/modules/booking/booking.validation.js">
-import Joi from "joi";
-import { getMergedServiceTypeKeys } from "../../services/serviceTypeRegistry.js";
+<file path="src/modules/booking/booking.router.js">
+import { Router } from "express";
+import { auth } from "../../middleware/auth.js";
+import { validation } from "../../middleware/validation.js";
+import * as bookingController from "./controller/booking.controller.js";
+import { getAllServices }       from "./controller/services.controller.js";
+import * as validators from "./booking.validation.js";
+import { endpoint } from "../indexEndpoint.js";
 
-const objectId = Joi.string().hex().length(24);
+const router = Router();
 
-const customerSchema = Joi.object({
-  name: Joi.string().trim().min(2).max(100).required().messages({
-    "any.required": "Customer name is required",
-    "string.min": "Customer name must be at least 2 characters",
-  }),
-  ageType: Joi.string().valid("adult", "child", "infant").default("adult"),
-});
+// ── Static routes first (before any /:id) ────────────────────────────────────
 
-/**
- * Custom Joi validator for serviceType.
- *
- * Why .custom() instead of .valid(...keys):
- *   .valid(...keys) is evaluated ONCE at module load — it freezes the list of
- *   known types at startup. Any custom type added at runtime updates the
- *   in-memory registry but the frozen Joi schema still rejects it.
- *
- *   .custom() runs the check on every request, reading the current merged
- *   registry each time, so newly added office service types are accepted
- *   immediately without a server restart.
- */
-const serviceTypeValidator = Joi.string()
-  .trim()
-  .min(1)
-  .custom((value, helpers) => {
-    if (!getMergedServiceTypeKeys().includes(value)) {
-      const validKeys = getMergedServiceTypeKeys().join(", ");
-      return helpers.error("serviceType.invalid", { validKeys });
-    }
-    return value;
-  })
-  .required()
-  .messages({
-    "serviceType.invalid":
-      "Invalid serviceType '{{#value}}'. Must be one of: {{#validKeys}}",
-    "any.required": "serviceType is required",
-    "string.empty": "serviceType is required",
-  });
+router.post(
+  "/create",
+  auth(endpoint.booking_manage),
+  validation(validators.createBooking),
+  bookingController.createBooking,
+);
 
-/**
- * Same dynamic check for the ?serviceType query filter.
- * Optional — accepts undefined (no filter).
- */
-const serviceTypeQueryValidator = Joi.string()
-  .trim()
-  .min(1)
-  .custom((value, helpers) => {
-    if (!getMergedServiceTypeKeys().includes(value)) {
-      return helpers.error("serviceType.invalid", {
-        validKeys: getMergedServiceTypeKeys().join(", "),
-      });
-    }
-    return value;
-  })
-  .optional()
-  .messages({
-    "serviceType.invalid":
-      "Invalid serviceType filter '{{#value}}'. Must be one of: {{#validKeys}}",
-  });
+router.get(
+  "/getAll",
+  auth(endpoint.booking_view),
+  validation(validators.getAllBookingsQuery),
+  bookingController.getAllBookings,
+);
 
-const serviceSchema = Joi.object({
-  serviceType: serviceTypeValidator,
-  provider: objectId.required().messages({
-    "any.required": "Provider ID is required for each service",
-    "string.hex": "Invalid provider ID format",
-    "string.length": "Invalid provider ID length",
-  }),
-  buy:  Joi.number().min(0).default(0),
-  sell: Joi.number().min(0).default(0),
-  // details holds all type-specific fields (checkIn, checkOut, brand, etc.)
-  details: Joi.object().unknown(true).default({}),
-  // notes: free-text field available on every service, never required.
-  // Allows staff to record context, special requests, or internal remarks.
-  notes: Joi.string().trim().max(1000).allow("").optional().default(""),
-});
+// NEW: flattened service line-items across all bookings
+// Must be before /:id so Express doesn't treat "all-services" as an id param.
+router.get(
+  "/all-services",
+  auth(endpoint.booking_view),
+  getAllServices,
+);
 
-const totalPaxSchema = Joi.object({
-  adults: Joi.number().integer().min(0).default(0),
-  kids:   Joi.number().integer().min(0).default(0),
-});
+router.get(
+  "/get/:id",
+  auth(endpoint.booking_view),
+  validation(validators.bookingIdParam),
+  bookingController.getBookingById,
+);
 
-// ── Route schemas ─────────────────────────────────────────────────────────────
+router.patch(
+  "/edit/:id",
+  auth(endpoint.booking_manage),
+  validation(validators.updateBooking),
+  bookingController.updateBooking,
+);
 
-export const createBooking = {
-  body: Joi.object({
-    provider: objectId.required().messages({
-      "any.required": "Main provider is required",
-      "string.hex":   "Invalid provider ID format",
-      "string.length":"Invalid provider ID length",
-    }),
-    status: Joi.string()
-      .valid("pending", "confirmed", "cancelled", "completed")
-      .default("pending"),
-    customers: Joi.array().items(customerSchema).min(1).required().messages({
-      "any.required": "At least one customer is required",
-      "array.min":    "At least one customer is required",
-    }),
-    services: Joi.array().items(serviceSchema).default([]),
-    totalPax: totalPaxSchema.optional(),
-  }),
-};
+router.patch(
+  "/:id/addService",
+  auth(endpoint.booking_manage),
+  validation(validators.addService),
+  bookingController.addServiceToBooking,
+);
 
-export const updateBooking = {
-  body: Joi.object({
-    status: Joi.string().valid(
-      "pending", "confirmed", "cancelled", "completed",
-    ),
-    customers: Joi.array().items(customerSchema).min(1),
-    services:  Joi.array().items(serviceSchema),
-    totalPax:  totalPaxSchema,
-  })
-    .min(1)
-    .messages({ "object.min": "At least one field is required to update" }),
-  params: Joi.object({
-    id: objectId.required().messages({
-      "string.hex":   "Invalid booking ID",
-      "string.length":"Invalid booking ID",
-    }),
-  }),
-};
+router.patch(
+  "/:id/services/:serviceId",
+  auth(endpoint.booking_manage),
+  validation(validators.editService),
+  bookingController.editService,
+);
 
-export const addService = {
-  body: serviceSchema,
-  params: Joi.object({
-    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
-  }),
-};
+router.patch(
+  "/:id/remove",
+  auth(endpoint.booking_manage),
+  validation(validators.removeService),
+  bookingController.removeServiceFromBooking,
+);
 
-export const removeService = {
-  body: Joi.object({
-    serviceId: objectId.required().messages({
-      "string.hex": "Invalid service ID",
-    }),
-  }),
-  params: Joi.object({
-    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
-  }),
-};
+router.delete(
+  "/delete/:id",
+  auth(endpoint.booking_delete),
+  validation(validators.bookingIdParam),
+  bookingController.deleteBooking,
+);
 
-export const bookingIdParam = {
-  params: Joi.object({
-    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
-  }),
-};
+router.patch(
+  "/:id/status",
+  auth(endpoint.booking_manage),
+  bookingController.editStatus,
+);
 
-export const getAllBookingsQuery = {
-  query: Joi.object({
-    bookingID:     Joi.number().integer().min(1),
-    provider:      objectId,
-    serviceType:   serviceTypeQueryValidator,
-    status:        Joi.string().valid("pending", "confirmed", "cancelled", "completed"),
-    paymentStatus: Joi.string().valid("unpaid", "partial", "paid"),
-    customerName:  Joi.string().trim().min(1).max(100),
-    fromDate:      Joi.date(),
-    toDate:        Joi.date().when("fromDate", {
-      is:   Joi.exist(),
-      then: Joi.date().min(Joi.ref("fromDate")).messages({
-        "date.min": "toDate must be after fromDate",
-      }),
-    }),
-    minAmount:  Joi.number().min(0),
-    maxAmount:  Joi.number().min(0),
-    sortBy:     Joi.string().valid("createdAt", "bookingID", "totalToPay", "totalProfit"),
-    sortOrder:  Joi.string().valid("asc", "desc"),
-    page:       Joi.number().integer().min(1).default(1),
-    size:       Joi.number().integer().min(1).max(100).default(10),
-  }),
-};
-</file>
-
-<file path="package.json">
-{
-  "name": "booking",
-  "version": "2.0.0",
-  "description": "Tourism booking management system",
-  "main": "app.js",
-  "scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
-    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/unit",
-    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/integration",
-    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --watch",
-    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage"
-  },
-  "type": "module",
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "bcrypt": "^6.0.0",
-    "cloudinary": "^2.8.0",
-    "cookie-parser": "^1.4.7",
-    "cors": "^2.8.6",
-    "dotenv": "^17.2.3",
-    "exceljs": "^4.4.0",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.3.2",
-    "helmet": "^8.1.0",
-    "joi": "^18.0.2",
-    "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.1.2",
-    "multer": "^2.0.2",
-    "nanoid": "^5.1.6",
-    "nodemailer": "^7.0.12",
-    "pdfkit": "^0.18.0",
-    "svg-to-pdfkit": "^0.1.8"
-  },
-  "devDependencies": {
-    "jest": "^29.7.0",
-    "mongodb-memory-server": "^10.0.0",
-    "supertest": "^7.0.0"
-  }
-}
-</file>
-
-<file path="src/modules/statement/controller/statement.controller.js">
-import mongoose from "mongoose";
-import { asyncHandler } from "../../../middleware/asyncHandler.js";
-import bookingModel from "../../../../DB/model/booking.model.js";
-import paymentModel from "../../../../DB/model/payment.model.js";
-import providerModel from "../../../../DB/model/provider.model.js";
-import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
-import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
-import {
-  describeService,
-} from "../../../config/serviceTypes.js";
-import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
-import { pagination } from "../../../services/pagination.js";
-
-const buildLedger = async (providerId, dateFilter) => {
-  const hasDateFilter = Object.keys(dateFilter).length > 0;
-  const providerObjId = new mongoose.Types.ObjectId(providerId);
-
-  const bookingQuery = {
-    $or: [{ provider: providerId }, { "services.provider": providerId }],
-  };
-  if (hasDateFilter) bookingQuery.createdAt = dateFilter;
-
-  const providerPaymentQuery = { provider: providerId };
-  if (hasDateFilter) providerPaymentQuery.date = dateFilter;
-
-  const directPaymentQuery = { providerRecipient: providerObjId };
-  if (hasDateFilter) directPaymentQuery.date = dateFilter;
-
-  const collectionQuery = { provider: providerId };
-  if (hasDateFilter) collectionQuery.date = dateFilter;
-
-  const [bookings, providerPaymentsList, directPaymentsList, collectionsList] =
-    await Promise.all([
-      bookingModel.find(bookingQuery).lean(),
-      providerPaymentModel
-        .find(providerPaymentQuery)
-        .populate("recordedBy", "userName")
-        .sort({ date: 1 })
-        .lean(),
-      paymentModel
-        .find(directPaymentQuery)
-        .populate("booking", "bookingID customers")
-        .populate("recordedBy", "userName")
-        .sort({ date: 1 })
-        .lean(),
-      providerCollectionModel
-        .find(collectionQuery)
-        .populate("recordedBy", "userName")
-        .populate("booking", "bookingID customers")
-        .sort({ date: 1 })
-        .lean(),
-    ]);
-
-  // ── Service debit lines ───────────────────────────────────────────────────
-  const serviceLines = [];
-  for (const booking of bookings) {
-    const meta = {
-      bookingID: booking.bookingID,
-      bookingMongoId: booking._id,
-      customer: booking.customers?.[0]?.name || "Unknown",
-      date: booking.createdAt,
-    };
-
-    for (const service of booking.services || []) {
-      const pid =
-        service.provider?._id?.toString() || service.provider?.toString();
-      if (pid !== providerId) continue;
-
-      const typeDef = getMergedServiceTypes()[service.serviceType];
-      serviceLines.push({
-        ...meta,
-        type: "SERVICE_DEBIT",
-        serviceType: service.serviceType,
-        serviceLabel: typeDef?.label || service.serviceType,
-        description: describeService(service),
-        debit: Number(service.buy) || 0,
-        credit: 0,
-      });
-    }
-  }
-
-  // ── Agency payment credit lines ───────────────────────────────────────────
-  const agencyPaymentLines = providerPaymentsList.map((p) => ({
-    date: p.date,
-    type: "AGENCY_PAYMENT",
-    description:
-      `Payment by ${p.recordedBy?.userName || "office"}` +
-      (p.reference ? ` — Ref: ${p.reference}` : ""),
-    debit: 0,
-    credit: Number(p.amount),
-    method: p.method,
-    reference: p.reference || null,
-  }));
-
-  // ── Customer direct payment credit lines ──────────────────────────────────
-  const directPaymentLines = directPaymentsList.map((p) => {
-    const bookingID = p.booking?.bookingID;
-    const customer = p.booking?.customers?.[0]?.name || "Unknown";
-    return {
-      date: p.date,
-      type: "CUSTOMER_DIRECT_PAYMENT",
-      description: `Customer "${customer}" paid provider directly (Booking #${bookingID})`,
-      debit: 0,
-      credit: Number(p.amount),
-      method: p.method,
-      bookingID,
-    };
-  });
-
-  // ── Provider collection debit lines ──────────────────────────────────────
-  const collectionLines = collectionsList.map((c) => ({
-    date: c.date,
-    type: "AGENCY_COLLECTION",
-    description:
-      `Agency collected from provider` +
-      (c.booking?.bookingID ? ` (Booking #${c.booking.bookingID})` : "") +
-      (c.reference ? ` — Ref: ${c.reference}` : ""),
-    debit: Number(c.amount),
-    credit: 0,
-    method: c.method,
-    reference: c.reference || null,
-  }));
-
-  const ledger = [
-    ...serviceLines,
-    ...agencyPaymentLines,
-    ...directPaymentLines,
-    ...collectionLines,
-  ].sort((a, b) => new Date(a.date) - new Date(b.date));
-
-  return {
-    ledger,
-    _rawTotals: {
-      totalServiceCost: serviceLines.reduce((s, l) => s + l.debit, 0),
-      totalWeHavePaid: agencyPaymentLines.reduce((s, l) => s + l.credit, 0),
-      totalCustomersPaidDirect: directPaymentLines.reduce(
-        (s, l) => s + l.credit,
-        0,
-      ),
-      totalCollectedFromProvider: collectionLines.reduce(
-        (s, l) => s + l.debit,
-        0,
-      ),
-    },
-  };
-};
-
-const buildSummaryFromRaw = ({
-  totalServiceCost,
-  totalWeHavePaid,
-  totalCustomersPaidDirect,
-  totalCollectedFromProvider,
-}) => {
-  const totalCredits = totalWeHavePaid + totalCustomersPaidDirect;
-  const outstandingBalance =
-    totalServiceCost - totalCredits + totalCollectedFromProvider;
-
-  let balanceType, balanceLabel;
-  if (Math.abs(outstandingBalance) < 0.01) {
-    balanceLabel = "Account settled — no outstanding balance";
-    balanceType = "settled";
-  } else if (outstandingBalance > 0) {
-    balanceLabel = `Agency owes provider: $${outstandingBalance.toFixed(2)}`;
-    balanceType = "we_owe_provider";
-  } else {
-    balanceLabel = `Provider owes agency: $${Math.abs(outstandingBalance).toFixed(2)}`;
-    balanceType = "provider_owes_us";
-  }
-
-  return {
-    totalServiceCost,
-    totalWeHavePaid,
-    totalCustomersPaidDirect,
-    totalCredits,
-    totalCollectedFromProvider,
-    outstandingBalance,
-    balanceType,
-    balanceLabel,
-    breakdown:
-      outstandingBalance < -0.01
-        ? {
-            amountProviderOwesUs: Math.abs(totalServiceCost - totalCredits),
-            alreadyRecovered: totalCollectedFromProvider,
-            stillToCollect: Math.abs(outstandingBalance),
-          }
-        : outstandingBalance > 0.01
-          ? {
-              totalServiceCost,
-              alreadyPaid: totalCredits,
-              stillToPay: outstandingBalance,
-            }
-          : { note: "Account is fully settled" },
-  };
-};
-
-export const getProviderStatement = asyncHandler(async (req, res, next) => {
-  const { providerId } = req.params;
-  const { fromDate, toDate } = req.query;
-
-  const provider = await providerModel.findById(providerId);
-  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
-
-  const dateFilter = {};
-  if (fromDate) dateFilter.$gte = new Date(fromDate);
-  if (toDate) {
-    const to = new Date(toDate);
-    to.setHours(23, 59, 59, 999);
-    dateFilter.$lte = to;
-  }
-
-  const hasDateFilter = Object.keys(dateFilter).length > 0;
-  const { ledger, _rawTotals } = await buildLedger(providerId, dateFilter);
-
-  let summary;
-  if (!hasDateFilter) {
-    const s = provider.summary;
-    const outstandingBalance = s.currentBalance;
-    summary = {
-      totalServiceCost: s.totalBuy,
-      totalWeHavePaid: s.totalWeHavePaid,
-      totalCustomersPaidDirect: s.totalCustomersPaidDirect,
-      totalCredits: s.totalCredits,
-      totalCollectedFromProvider: s.totalCollectedFromProvider,
-      outstandingBalance,
-      balanceType: s.balanceType,
-      balanceLabel: s.balanceLabel,
-      _cachedSummary: true,
-      lastSynced: s.lastSynced,
-      breakdown:
-        outstandingBalance < -0.01
-          ? {
-              amountProviderOwesUs: Math.abs(s.totalBuy - s.totalCredits),
-              alreadyRecovered: s.totalCollectedFromProvider,
-              stillToCollect: Math.abs(outstandingBalance),
-            }
-          : outstandingBalance > 0.01
-            ? {
-                totalServiceCost: s.totalBuy,
-                alreadyPaid: s.totalCredits,
-                stillToPay: outstandingBalance,
-              }
-            : { note: "Account is fully settled" },
-    };
-  } else {
-    summary = { ...buildSummaryFromRaw(_rawTotals), _cachedSummary: false };
-  }
-
-  return res.status(200).json({
-    success: true,
-    message: "Provider statement generated successfully",
-    data: {
-      provider: {
-        id: provider._id,
-        name: provider.name,
-        type: provider.type,
-        phone: provider.phone,
-      },
-      period: { from: fromDate || "All time", to: toDate || "All time" },
-      summary,
-      ledger,
-    },
-    errors: null,
-  });
-});
-
-// getCustomerStatement is unchanged — copy from original as-is
-export const getCustomerStatement = asyncHandler(async (req, res, next) => {
-  const { customerName } = req.params;
-  const { fromDate, toDate, page, size } = req.query;
-
-  if (!customerName || customerName.trim().length < 2) {
-    return next(
-      new Error("Customer name must be at least 2 characters", { cause: 400 }),
-    );
-  }
-
-  const bookingQuery = {
-    "customers.name": { $regex: customerName.trim(), $options: "i" },
-  };
-
-  if (fromDate || toDate) {
-    bookingQuery.createdAt = {};
-    if (fromDate) bookingQuery.createdAt.$gte = new Date(fromDate);
-    if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      bookingQuery.createdAt.$lte = to;
-    }
-  }
-
-  const { limit, skip } = pagination(page, size);
-
-  const [bookings, totalCount, aggregateTotals] = await Promise.all([
-    bookingModel
-      .find(bookingQuery)
-      .populate("provider", "name type")
-      .sort({ createdAt: 1 })
-      .limit(limit)
-      .skip(skip)
-      .lean(),
-    bookingModel.countDocuments(bookingQuery),
-    bookingModel.aggregate([
-      { $match: bookingQuery },
-      {
-        $group: {
-          _id: null,
-          totalToPay: { $sum: "$totalToPay" },
-          totalPaid: { $sum: "$totalPaid" },
-          remainingBalance: { $sum: "$remainingBalance" },
-        },
-      },
-    ]),
-  ]);
-
-  if (totalCount === 0) {
-    return res.status(200).json({
-      success: true,
-      message: "No bookings found for this customer",
-      data: {
-        customerName,
-        summary: {
-          totalBookings: 0,
-          totalToPay: 0,
-          totalPaid: 0,
-          remainingBalance: 0,
-        },
-        bookings: [],
-      },
-      errors: null,
-    });
-  }
-
-  const bookingIds = bookings.map((b) => b._id);
-  const payments = await paymentModel
-    .find({ booking: { $in: bookingIds } })
-    .populate("providerRecipient", "name")
-    .lean();
-
-  const paymentsByBooking = {};
-  payments.forEach((p) => {
-    const key = p.booking.toString();
-    if (!paymentsByBooking[key]) paymentsByBooking[key] = [];
-    paymentsByBooking[key].push(p);
-  });
-
-  const bookingLines = bookings.map((b) => {
-    const bPayments = paymentsByBooking[b._id.toString()] || [];
-    const paidForThis = bPayments.reduce((s, p) => s + p.amount, 0);
-    const matchedCustomer = b.customers?.find((c) =>
-      c.name?.toLowerCase().includes(customerName.toLowerCase()),
-    );
-    return {
-      bookingID: b.bookingID,
-      mongoId: b._id,
-      date: b.createdAt,
-      status: b.status,
-      paymentStatus: b.paymentStatus,
-      provider: b.provider?.name || "N/A",
-      customer: matchedCustomer?.name || b.customers?.[0]?.name,
-      allCustomers: b.customers,
-      totalToPay: b.totalToPay,
-      totalPaid: paidForThis,
-      remainingBalance: (b.totalToPay || 0) - paidForThis,
-      payments: bPayments.map((p) => ({
-        amount: p.amount,
-        method: p.method,
-        date: p.date,
-        paidTo: p.providerRecipient?.name || "Office",
-      })),
-    };
-  });
-
-  const grand = aggregateTotals[0] || {
-    totalToPay: 0,
-    totalPaid: 0,
-    remainingBalance: 0,
-  };
-
-  return res.status(200).json({
-    success: true,
-    message: "Customer statement generated successfully",
-    data: {
-      customerName,
-      period: { from: fromDate || "All time", to: toDate || "All time" },
-      summary: {
-        totalBookings: totalCount,
-        totalToPay: grand.totalToPay,
-        totalPaid: grand.totalPaid,
-        remainingBalance: grand.remainingBalance,
-        balanceLabel:
-          grand.remainingBalance > 0
-            ? `Customer owes: ${grand.remainingBalance}`
-            : "Account settled",
-      },
-      pagination: {
-        page: parseInt(page) || 1,
-        totalPages: Math.ceil(totalCount / limit),
-        totalCount,
-      },
-      bookings: bookingLines,
-    },
-    errors: null,
-  });
-});
+export default router;
 </file>
 
 <file path="src/modules/voucher/controller/voucher.controller.js">
@@ -12149,6 +11733,52 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
+</file>
+
+<file path="package.json">
+{
+  "name": "booking",
+  "version": "2.0.0",
+  "description": "Tourism booking management system",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
+    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/unit",
+    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand tests/integration",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --coverage"
+  },
+  "type": "module",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cloudinary": "^2.8.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.3.2",
+    "helmet": "^8.1.0",
+    "joi": "^18.0.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.1.2",
+    "multer": "^2.0.2",
+    "nanoid": "^5.1.6",
+    "nodemailer": "^7.0.12",
+    "pdfkit": "^0.18.0",
+    "svg-to-pdfkit": "^0.1.8"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^10.0.0",
+    "supertest": "^7.0.0"
+  }
+}
 </file>
 
 <file path="src/modules/auth/controller/auth.controller.js">
@@ -12541,6 +12171,615 @@ export const logoutAll = asyncHandler(async (req, res) => {
     message: `Logged out from all devices. ${deleted.deletedCount} session(s) revoked.`,
     data:    { sessionsRevoked: deleted.deletedCount },
     errors:  null,
+  });
+});
+</file>
+
+<file path="src/modules/booking/booking.validation.js">
+import Joi from "joi";
+import { getMergedServiceTypeKeys } from "../../services/serviceTypeRegistry.js";
+
+const objectId = Joi.string().hex().length(24);
+
+const customerSchema = Joi.object({
+  name: Joi.string().trim().min(2).max(100).required().messages({
+    "any.required": "Customer name is required",
+    "string.min": "Customer name must be at least 2 characters",
+  }),
+  ageType: Joi.string().valid("adult", "child", "infant").default("adult"),
+});
+
+/**
+ * Custom Joi validator for serviceType.
+ *
+ * Why .custom() instead of .valid(...keys):
+ *   .valid(...keys) is evaluated ONCE at module load — it freezes the list of
+ *   known types at startup. Any custom type added at runtime updates the
+ *   in-memory registry but the frozen Joi schema still rejects it.
+ *
+ *   .custom() runs the check on every request, reading the current merged
+ *   registry each time, so newly added office service types are accepted
+ *   immediately without a server restart.
+ */
+const serviceTypeValidator = Joi.string()
+  .trim()
+  .min(1)
+  .custom((value, helpers) => {
+    if (!getMergedServiceTypeKeys().includes(value)) {
+      const validKeys = getMergedServiceTypeKeys().join(", ");
+      return helpers.error("serviceType.invalid", { validKeys });
+    }
+    return value;
+  })
+  .required()
+  .messages({
+    "serviceType.invalid":
+      "Invalid serviceType '{{#value}}'. Must be one of: {{#validKeys}}",
+    "any.required": "serviceType is required",
+    "string.empty": "serviceType is required",
+  });
+
+/**
+ * Same dynamic check for the ?serviceType query filter.
+ * Optional — accepts undefined (no filter).
+ */
+const serviceTypeQueryValidator = Joi.string()
+  .trim()
+  .min(1)
+  .custom((value, helpers) => {
+    if (!getMergedServiceTypeKeys().includes(value)) {
+      return helpers.error("serviceType.invalid", {
+        validKeys: getMergedServiceTypeKeys().join(", "),
+      });
+    }
+    return value;
+  })
+  .optional()
+  .messages({
+    "serviceType.invalid":
+      "Invalid serviceType filter '{{#value}}'. Must be one of: {{#validKeys}}",
+  });
+
+const serviceSchema = Joi.object({
+  serviceType: serviceTypeValidator,
+  provider: objectId.required().messages({
+    "any.required": "Provider ID is required for each service",
+    "string.hex": "Invalid provider ID format",
+    "string.length": "Invalid provider ID length",
+  }),
+  buy:  Joi.number().min(0).default(0),
+  sell: Joi.number().min(0).default(0),
+  // details holds all type-specific fields (checkIn, checkOut, brand, etc.)
+  details: Joi.object().unknown(true).default({}),
+  // notes: free-text field available on every service, never required.
+  // Allows staff to record context, special requests, or internal remarks.
+  notes: Joi.string().trim().max(1000).allow("").optional().default(""),
+});
+
+const totalPaxSchema = Joi.object({
+  adults: Joi.number().integer().min(0).default(0),
+  kids:   Joi.number().integer().min(0).default(0),
+});
+
+// ── Route schemas ─────────────────────────────────────────────────────────────
+
+export const createBooking = {
+  body: Joi.object({
+    provider: objectId.required().messages({
+      "any.required": "Main provider is required",
+      "string.hex":   "Invalid provider ID format",
+      "string.length":"Invalid provider ID length",
+    }),
+    status: Joi.string()
+      .valid("pending", "confirmed", "cancelled", "completed")
+      .default("pending"),
+    customers: Joi.array().items(customerSchema).min(1).required().messages({
+      "any.required": "At least one customer is required",
+      "array.min":    "At least one customer is required",
+    }),
+    services: Joi.array().items(serviceSchema).default([]),
+    totalPax: totalPaxSchema.optional(),
+  }),
+};
+
+export const updateBooking = {
+  body: Joi.object({
+    status: Joi.string().valid(
+      "pending",
+      "confirmed",
+      "cancelled",
+      "completed",
+    ),
+    provider: objectId.messages({
+      "string.hex": "Invalid provider ID",
+      "string.length": "Invalid provider ID",
+    }),
+    customers: Joi.array().items(customerSchema).min(1),
+    services: Joi.array().items(serviceSchema),
+    totalPax: totalPaxSchema,
+    expectedVersion: Joi.number().integer().min(0),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    id: objectId.required().messages({
+      "string.hex": "Invalid booking ID",
+      "string.length": "Invalid booking ID",
+    }),
+  }),
+};
+
+export const addService = {
+  body: serviceSchema,
+  params: Joi.object({
+    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
+  }),
+};
+
+export const removeService = {
+  body: Joi.object({
+    serviceId: objectId.required().messages({
+      "string.hex": "Invalid service ID",
+    }),
+  }),
+  params: Joi.object({
+    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
+  }),
+};
+
+export const bookingIdParam = {
+  params: Joi.object({
+    id: objectId.required().messages({ "string.hex": "Invalid booking ID" }),
+  }),
+};
+
+export const getAllBookingsQuery = {
+  query: Joi.object({
+    bookingID:     Joi.number().integer().min(1),
+    provider:      objectId,
+    serviceType:   serviceTypeQueryValidator,
+    status:        Joi.string().valid("pending", "confirmed", "cancelled", "completed"),
+    paymentStatus: Joi.string().valid("unpaid", "partial", "paid"),
+    customerName:  Joi.string().trim().min(1).max(100),
+    fromDate:      Joi.date(),
+    toDate:        Joi.date().when("fromDate", {
+      is:   Joi.exist(),
+      then: Joi.date().min(Joi.ref("fromDate")).messages({
+        "date.min": "toDate must be after fromDate",
+      }),
+    }),
+    minAmount:  Joi.number().min(0),
+    maxAmount:  Joi.number().min(0),
+    sortBy:     Joi.string().valid("createdAt", "bookingID", "totalToPay", "totalProfit"),
+    sortOrder:  Joi.string().valid("asc", "desc"),
+    page:       Joi.number().integer().min(1).default(1),
+    size:       Joi.number().integer().min(1).max(100).default(10),
+  }),
+};
+export const editService = {
+  body: Joi.object({
+    buy: Joi.number().min(0),
+    sell: Joi.number().min(0),
+    details: Joi.object().unknown(true),
+    notes: Joi.string().trim().max(1000).allow(""),
+    expectedVersion: Joi.number().integer().min(0),
+  })
+    .min(1)
+    .messages({ "object.min": "At least one field is required to update" }),
+  params: Joi.object({
+    id: objectId.required().messages({
+      "string.hex": "Invalid booking ID",
+      "string.length": "Invalid booking ID",
+    }),
+    serviceId: objectId.required().messages({
+      "string.hex": "Invalid service ID",
+      "string.length": "Invalid service ID",
+    }),
+  }),
+};
+</file>
+
+<file path="src/modules/statement/controller/statement.controller.js">
+import mongoose from "mongoose";
+import { asyncHandler } from "../../../middleware/asyncHandler.js";
+import bookingModel from "../../../../DB/model/booking.model.js";
+import paymentModel from "../../../../DB/model/payment.model.js";
+import providerModel from "../../../../DB/model/provider.model.js";
+import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
+import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
+import { describeService } from "../../../config/serviceTypes.js";
+import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
+import { pagination } from "../../../services/pagination.js";
+
+const buildLedger = async (providerId, dateFilter) => {
+  const hasDateFilter = Object.keys(dateFilter).length > 0;
+  const providerObjId = new mongoose.Types.ObjectId(providerId);
+
+  const bookingQuery = {
+    $or: [{ provider: providerId }, { "services.provider": providerId }],
+  };
+  if (hasDateFilter) bookingQuery.createdAt = dateFilter;
+
+  const providerPaymentQuery = { provider: providerId };
+  if (hasDateFilter) providerPaymentQuery.date = dateFilter;
+
+  const directPaymentQuery = { providerRecipient: providerObjId };
+  if (hasDateFilter) directPaymentQuery.date = dateFilter;
+
+  const collectionQuery = { provider: providerId };
+  if (hasDateFilter) collectionQuery.date = dateFilter;
+
+  const [bookings, providerPaymentsList, directPaymentsList, collectionsList] =
+    await Promise.all([
+      bookingModel.find(bookingQuery).lean(),
+      providerPaymentModel
+        .find(providerPaymentQuery)
+        .populate("recordedBy", "userName")
+        .sort({ date: 1 })
+        .lean(),
+      paymentModel
+        .find(directPaymentQuery)
+        .populate("booking", "bookingID customers")
+        .populate("recordedBy", "userName")
+        .sort({ date: 1 })
+        .lean(),
+      providerCollectionModel
+        .find(collectionQuery)
+        .populate("recordedBy", "userName")
+        .populate("booking", "bookingID customers")
+        .sort({ date: 1 })
+        .lean(),
+    ]);
+
+  // ── Service debit lines ───────────────────────────────────────────────────
+  const serviceLines = [];
+  for (const booking of bookings) {
+    const meta = {
+      bookingID: booking.bookingID,
+      bookingMongoId: booking._id,
+      customer: booking.customers?.[0]?.name || "Unknown",
+      date: booking.createdAt,
+    };
+
+    for (const service of booking.services || []) {
+      const pid =
+        service.provider?._id?.toString() || service.provider?.toString();
+      if (pid !== providerId) continue;
+
+      const typeDef = getMergedServiceTypes()[service.serviceType];
+      serviceLines.push({
+        ...meta,
+        type: "SERVICE_DEBIT",
+        serviceType: service.serviceType,
+        serviceLabel: typeDef?.label || service.serviceType,
+        description: describeService(service),
+        debit: Number(service.buy) || 0,
+        credit: 0,
+      });
+    }
+  }
+
+  // ── Agency payment credit lines ───────────────────────────────────────────
+  const agencyPaymentLines = providerPaymentsList.map((p) => ({
+    date: p.date,
+    type: "AGENCY_PAYMENT",
+    description:
+      `Payment by ${p.recordedBy?.userName || "office"}` +
+      (p.reference ? ` — Ref: ${p.reference}` : ""),
+    debit: 0,
+    credit: Number(p.amount),
+    method: p.method,
+    reference: p.reference || null,
+  }));
+
+  // ── Customer direct payment credit lines ──────────────────────────────────
+  const directPaymentLines = directPaymentsList.map((p) => {
+    const bookingID = p.booking?.bookingID;
+    const customer = p.booking?.customers?.[0]?.name || "Unknown";
+    return {
+      date: p.date,
+      type: "CUSTOMER_DIRECT_PAYMENT",
+      description: `Customer "${customer}" paid provider directly (Booking #${bookingID})`,
+      debit: 0,
+      credit: Number(p.amount),
+      method: p.method,
+      bookingID,
+    };
+  });
+
+  // ── Provider collection debit lines ──────────────────────────────────────
+  const collectionLines = collectionsList.map((c) => ({
+    date: c.date,
+    type: "AGENCY_COLLECTION",
+    description:
+      `Agency collected from provider` +
+      (c.booking?.bookingID ? ` (Booking #${c.booking.bookingID})` : "") +
+      (c.reference ? ` — Ref: ${c.reference}` : ""),
+    debit: Number(c.amount),
+    credit: 0,
+    method: c.method,
+    reference: c.reference || null,
+  }));
+
+  const ledger = [
+    ...serviceLines,
+    ...agencyPaymentLines,
+    ...directPaymentLines,
+    ...collectionLines,
+  ].sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  return {
+    ledger,
+    _rawTotals: {
+      totalServiceCost: serviceLines.reduce((s, l) => s + l.debit, 0),
+      totalWeHavePaid: agencyPaymentLines.reduce((s, l) => s + l.credit, 0),
+      totalCustomersPaidDirect: directPaymentLines.reduce(
+        (s, l) => s + l.credit,
+        0,
+      ),
+      totalCollectedFromProvider: collectionLines.reduce(
+        (s, l) => s + l.debit,
+        0,
+      ),
+    },
+  };
+};
+
+const buildSummaryFromRaw = ({
+  totalServiceCost,
+  totalWeHavePaid,
+  totalCustomersPaidDirect,
+  totalCollectedFromProvider,
+}) => {
+  const totalCredits = totalWeHavePaid + totalCustomersPaidDirect;
+  const outstandingBalance =
+    totalServiceCost - totalCredits + totalCollectedFromProvider;
+
+  let balanceType, balanceLabel;
+  if (Math.abs(outstandingBalance) < 0.01) {
+    balanceLabel = "Account settled — no outstanding balance";
+    balanceType = "settled";
+  } else if (outstandingBalance > 0) {
+    balanceLabel = `Agency owes provider: $${outstandingBalance.toFixed(2)}`;
+    balanceType = "we_owe_provider";
+  } else {
+    balanceLabel = `Provider owes agency: $${Math.abs(outstandingBalance).toFixed(2)}`;
+    balanceType = "provider_owes_us";
+  }
+
+  return {
+    totalServiceCost,
+    totalWeHavePaid,
+    totalCustomersPaidDirect,
+    totalCredits,
+    totalCollectedFromProvider,
+    outstandingBalance,
+    balanceType,
+    balanceLabel,
+    breakdown:
+      outstandingBalance < -0.01
+        ? {
+            amountProviderOwesUs: Math.abs(totalServiceCost - totalCredits),
+            alreadyRecovered: totalCollectedFromProvider,
+            stillToCollect: Math.abs(outstandingBalance),
+          }
+        : outstandingBalance > 0.01
+          ? {
+              totalServiceCost,
+              alreadyPaid: totalCredits,
+              stillToPay: outstandingBalance,
+            }
+          : { note: "Account is fully settled" },
+  };
+};
+
+export const getProviderStatement = asyncHandler(async (req, res, next) => {
+  const { providerId } = req.params;
+  const { fromDate, toDate } = req.query;
+
+  const provider = await providerModel.findById(providerId);
+  if (!provider) return next(new Error("Provider not found", { cause: 404 }));
+
+  const dateFilter = {};
+  if (fromDate) dateFilter.$gte = new Date(fromDate);
+  if (toDate) {
+    const to = new Date(toDate);
+    to.setHours(23, 59, 59, 999);
+    dateFilter.$lte = to;
+  }
+  const hasDateFilter = Object.keys(dateFilter).length > 0;
+
+  const { ledger, _rawTotals } = await buildLedger(providerId, dateFilter);
+
+  let summary;
+  if (!hasDateFilter) {
+    const s = provider.summary;
+    const outstandingBalance = s.currentBalance;
+    summary = {
+      totalServiceCost: s.totalBuy,
+      totalWeHavePaid: s.totalWeHavePaid,
+      totalCustomersPaidDirect: s.totalCustomersPaidDirect,
+      totalCredits: s.totalCredits,
+      totalCollectedFromProvider: s.totalCollectedFromProvider,
+      outstandingBalance,
+      balanceType: s.balanceType,
+      balanceLabel: s.balanceLabel,
+      _cachedSummary: true,
+      lastSynced: s.lastSynced,
+      breakdown:
+        outstandingBalance < -0.01
+          ? {
+              amountProviderOwesUs: Math.abs(s.totalBuy - s.totalCredits),
+              alreadyRecovered: s.totalCollectedFromProvider,
+              stillToCollect: Math.abs(outstandingBalance),
+            }
+          : outstandingBalance > 0.01
+            ? {
+                totalServiceCost: s.totalBuy,
+                alreadyPaid: s.totalCredits,
+                stillToPay: outstandingBalance,
+              }
+            : { note: "Account is fully settled" },
+    };
+  } else {
+    summary = { ...buildSummaryFromRaw(_rawTotals), _cachedSummary: false };
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: "Provider statement generated successfully",
+    data: {
+      provider: {
+        id: provider._id,
+        name: provider.name,
+        type: provider.type,
+        phone: provider.phone,
+      },
+      period: { from: fromDate || "All time", to: toDate || "All time" },
+      summary,
+      ledger,
+    },
+    errors: null,
+  });
+});
+
+export const getCustomerStatement = asyncHandler(async (req, res, next) => {
+  const { customerName } = req.params;
+  const { fromDate, toDate, page, size } = req.query;
+
+  if (!customerName || customerName.trim().length < 1) {
+    return next(
+      new Error("Customer name must be at least 1 character", { cause: 400 }),
+    );
+  }
+
+  const bookingQuery = {
+    "customers.name": { $regex: customerName.trim(), $options: "i" },
+  };
+
+  if (fromDate || toDate) {
+    bookingQuery.createdAt = {};
+    if (fromDate) bookingQuery.createdAt.$gte = new Date(fromDate);
+    if (toDate) {
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999);
+      bookingQuery.createdAt.$lte = to;
+    }
+  }
+
+  const { limit, skip } = pagination(page, size);
+
+  const [bookings, totalCount, aggregateTotals] = await Promise.all([
+    bookingModel
+      .find(bookingQuery)
+      .populate("provider", "name type")
+      .sort({ createdAt: 1 })
+      .limit(limit)
+      .skip(skip)
+      .lean(),
+    bookingModel.countDocuments(bookingQuery),
+    bookingModel.aggregate([
+      { $match: bookingQuery },
+      {
+        $group: {
+          _id: null,
+          totalToPay: { $sum: "$totalToPay" },
+          totalPaid: { $sum: "$totalPaid" },
+          remainingBalance: { $sum: "$remainingBalance" },
+        },
+      },
+    ]),
+  ]);
+
+  if (totalCount === 0) {
+    return res.status(200).json({
+      success: true,
+      message: "No bookings found for this customer",
+      data: {
+        customerName,
+        summary: {
+          totalBookings: 0,
+          totalToPay: 0,
+          totalPaid: 0,
+          remainingBalance: 0,
+        },
+        bookings: [],
+      },
+      errors: null,
+    });
+  }
+
+  const bookingIds = bookings.map((b) => b._id);
+  const payments = await paymentModel
+    .find({ booking: { $in: bookingIds } })
+    .populate("providerRecipient", "name")
+    .lean();
+
+  const paymentsByBooking = {};
+  payments.forEach((p) => {
+    const key = p.booking.toString();
+    if (!paymentsByBooking[key]) paymentsByBooking[key] = [];
+    paymentsByBooking[key].push(p);
+  });
+
+  const bookingLines = bookings.map((b) => {
+    const bPayments = paymentsByBooking[b._id.toString()] || [];
+    const paidForThis = bPayments.reduce((s, p) => s + p.amount, 0);
+    const matchedCustomer = b.customers?.find((c) =>
+      c.name?.toLowerCase().includes(customerName.toLowerCase()),
+    );
+
+    return {
+      bookingID: b.bookingID,
+      mongoId: b._id,
+      date: b.createdAt,
+      status: b.status,
+      paymentStatus: b.paymentStatus,
+      provider: b.provider?.name || "N/A",
+      customer: matchedCustomer?.name || b.customers?.[0]?.name,
+      allCustomers: b.customers,
+      totalToPay: b.totalToPay,
+      totalPaid: paidForThis,
+      remainingBalance: (b.totalToPay || 0) - paidForThis,
+      payments: bPayments.map((p) => ({
+        amount: p.amount,
+        method: p.method,
+        date: p.date,
+        paidTo: p.providerRecipient?.name || "Office",
+      })),
+    };
+  });
+
+  const grand = aggregateTotals[0] || {
+    totalToPay: 0,
+    totalPaid: 0,
+    remainingBalance: 0,
+  };
+
+  return res.status(200).json({
+    success: true,
+    message: "Customer statement generated successfully",
+    data: {
+      customerName,
+      period: { from: fromDate || "All time", to: toDate || "All time" },
+      summary: {
+        totalBookings: totalCount,
+        totalToPay: grand.totalToPay,
+        totalPaid: grand.totalPaid,
+        remainingBalance: grand.remainingBalance,
+        balanceLabel:
+          grand.remainingBalance > 0
+            ? `Customer owes: ${grand.remainingBalance}`
+            : "Account settled",
+      },
+      pagination: {
+        page: parseInt(page) || 1,
+        totalPages: Math.ceil(totalCount / limit),
+        totalCount,
+      },
+      bookings: bookingLines,
+    },
+    errors: null,
   });
 });
 </file>
@@ -13092,310 +13331,29 @@ export const editPayment = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
-</file>
 
-<file path="src/services/bookingService.js">
-import mongoose from "mongoose";
-import { getMergedServiceTypes } from "./serviceTypeRegistry.js";
-import {
-  applyProviderSummaryDelta,
-  computeServiceDeltas,
-} from "./providerSummaryService.js";
+// ─────────────────────────────────────────────────────────────────────────────
+// Get a single payment by ID
+// GET /api/v1/booking/payments/:paymentId
+// ─────────────────────────────────────────────────────────────────────────────
+export const getPaymentById = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
 
-const getProvider = () => mongoose.model("Provider");
-const getBooking = () => mongoose.model("Booking");
-const getCounter = () => mongoose.model("Counter");
+  const payment = await paymentModel
+    .findById(paymentId)
+    .populate("booking", "bookingID customers")
+    .populate("recordedBy", "userName")
+    .populate("providerRecipient", "name type");
 
-/**
- * Assigns bookingID and serviceNumbers.
- *
- * bookingID  → global auto-increment counter (unique across ALL bookings,
- *              regardless of provider). Sequence: 1, 2, 3, 4, …
- *
- * serviceNumber → per service-provider sequence.
- *   Each provider keeps their own currentSequence so a hotel's vouchers
- *   are numbered 1, 2, 3, … independently of the booking ID.
- *
- * provider.totalBookings   → stat counter (decremented on deletion).
- * provider.currentSequence → service-numbering HIGH-WATER MARK.
- *
- * ⚠️  currentSequence is intentionally NEVER decremented, even when a booking
- *     is deleted. Decrementing it would cause the next created service for
- *     that provider to receive a number already issued to a previous (now
- *     deleted) service — a duplicate service-number collision.
- *     Only totalBookings (a display stat) is decremented on delete.
- *
- * Case 4 fix: replaced all `{ new: true }` options with
- * `{ returnDocument: 'after' }`. `new: true` is deprecated in Mongoose 9
- * and triggers a console warning on every call. Both options are equivalent
- * — they both return the document AFTER the update is applied.
- */
-export const assignBookingSequences = async (doc) => {
-  const Provider = getProvider();
-  const Booking = getBooking();
-  const Counter = getCounter();
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
 
-  if (doc.isNew) {
-    // ── Global booking ID ────────────────────────────────────────────────────
-    const counter = await Counter.findOneAndUpdate(
-      { _id: "booking" },
-      { $inc: { seq: 1 } },
-      { returnDocument: "after", upsert: true },
-    );
-    doc.bookingID = counter.seq;
-
-    // Update provider stats (totalBookings only — currentSequence is for services)
-    const mainProvider = await Provider.findByIdAndUpdate(
-      doc.provider,
-      { $inc: { totalBookings: 1 } },
-      { returnDocument: "after" },
-    );
-    if (!mainProvider) throw new Error("Main Provider not found");
-  } else if (doc.isModified("provider")) {
-    // Provider changed on an existing booking — adjust totalBookings on both sides
-    const oldDoc = await Booking.findById(doc._id).lean();
-    if (oldDoc && oldDoc.provider.toString() !== doc.provider.toString()) {
-      await Provider.findByIdAndUpdate(oldDoc.provider, {
-        $inc: { totalBookings: -1 },
-      });
-      const newProvider = await Provider.findByIdAndUpdate(
-        doc.provider,
-        { $inc: { totalBookings: 1 } },
-        { returnDocument: "after" },
-      );
-      if (!newProvider) throw new Error("New provider not found");
-      // bookingID stays unchanged when provider is swapped
-    }
-  }
-
-  // ── Service numbers ───────────────────────────────────────────────────────
-  // Every service (including those whose provider is the main booking provider)
-  // gets a number from that service-provider's own sequence.
-  const services = doc.services || [];
-  for (let i = 0; i < services.length; i++) {
-    const service = services[i];
-    if (!service.provider) continue;
-    if (service.serviceNumber != null) continue; // already assigned — preserve
-
-    const svcProvider = await Provider.findByIdAndUpdate(
-      service.provider,
-      { $inc: { currentSequence: 1 } },
-      { returnDocument: "after" },
-    );
-    if (!svcProvider) {
-      throw new Error(
-        `Service provider ${service.provider} not found during sequence assignment`,
-      );
-    }
-    doc.services[i].serviceNumber = svcProvider.currentSequence;
-  }
-
-  doc.markModified("services");
-};
-
-/**
- * Recalculates all financial totals from the services array.
- * Also auto-calculates duration for service types that define durationFields.
- */
-export const calculateBookingTotals = (doc) => {
-  (doc.services || []).forEach((service) => {
-    const typeDef = getMergedServiceTypes()[service.serviceType];
-    if (typeDef?.durationFields && service.details) {
-      const fromVal = service.details[typeDef.durationFields.from];
-      const toVal = service.details[typeDef.durationFields.to];
-      if (fromVal && toVal) {
-        service.duration = Math.ceil(
-          (new Date(toVal) - new Date(fromVal)) / (1000 * 60 * 60 * 24),
-        );
-      }
-    }
+  return res.status(200).json({
+    success: true,
+    message: "Data retrieved successfully",
+    data: { payment },
+    errors: null,
   });
-
-  let totalSell = 0;
-  let totalBuy = 0;
-
-  (doc.services || []).forEach((service) => {
-    service.profit = (Number(service.sell) || 0) - (Number(service.buy) || 0);
-    totalSell += Number(service.sell) || 0;
-    totalBuy += Number(service.buy) || 0;
-  });
-
-  doc.totalToPay = totalSell;
-  doc.totalToBuy = totalBuy;
-  doc.totalProfit = totalSell - totalBuy;
-  doc.remainingBalance = doc.totalToPay - (doc.totalPaid || 0);
-
-  if ((doc.totalPaid || 0) <= 0) doc.paymentStatus = "unpaid";
-  else if (doc.totalPaid >= doc.totalToPay) doc.paymentStatus = "paid";
-  else doc.paymentStatus = "partial";
-};
-</file>
-
-<file path="DB/model/booking.model.js">
-import mongoose from "mongoose";
-import {
-  assignBookingSequences,
-  calculateBookingTotals,
-} from "../../src/services/bookingService.js";
-import {
-  applyProviderSummaryDelta,
-  computeServiceDeltas,
-} from "../../src/services/providerSummaryService.js";
-import { getMergedServiceTypeKeys } from "../../src/services/serviceTypeRegistry.js";
-
-const bookingSchema = new mongoose.Schema(
-  {
-    bookingID: Number,
-    provider: {
-      type:     mongoose.Schema.Types.ObjectId,
-      ref:      "Provider",
-      required: true,
-    },
-    createdBy: {
-      type:     mongoose.Schema.Types.ObjectId,
-      ref:      "User",
-      required: true,
-    },
-    status: {
-      type:    String,
-      enum:    ["pending", "confirmed", "cancelled", "completed"],
-      default: "pending",
-    },
-    totalToPay:       { type: Number, default: 0 },
-    totalToBuy:       { type: Number, default: 0 },
-    totalProfit:      { type: Number, default: 0 },
-    totalPaid:        { type: Number, default: 0 },
-    remainingBalance: { type: Number, default: 0 },
-    paymentStatus: {
-      type:    String,
-      enum:    ["unpaid", "partial", "paid"],
-      default: "unpaid",
-    },
-    customers: [{ name: String, ageType: String }],
-
-    /**
-     * Unified services array — replaces the former named arrays
-     * (accommodations, carRentals, carWithDriver).
-     *
-     * serviceType drives all processing logic via the SERVICE_TYPES registry.
-     * details holds every type-specific field (checkIn/checkOut, brand, etc.).
-     * notes  is a free-text optional field available on every service type,
-     *        regardless of whether it is built-in or office-defined.
-     */
-    services: [
-      {
-        serviceType: {
-          type:     String,
-          required: true,
-          validate: {
-            validator(v) {
-              return getMergedServiceTypeKeys().includes(v);
-            },
-            message: "Invalid service type",
-          },
-        },
-        serviceNumber: Number,
-        provider: {
-          type:     mongoose.Schema.Types.ObjectId,
-          ref:      "Provider",
-          required: true,
-        },
-        buy:    { type: Number, default: 0 },
-        sell:   { type: Number, default: 0 },
-        profit: { type: Number, default: 0 },
-        // Auto-calculated for service types that define durationFields
-        duration: Number,
-        // All type-specific fields (checkIn, checkOut, brand, driverName, etc.)
-        details: { type: mongoose.Schema.Types.Mixed, default: {} },
-        // Free-text note for this specific service — not required, any length
-        // up to 1 000 characters. Available on every service type.
-        notes: { type: String, default: "" },
-      },
-    ],
-
-    totalPax: { adults: Number, kids: Number, total: Number },
-  },
-  { timestamps: true },
-);
-
-bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
-
-// ── pre-save ──────────────────────────────────────────────────────────────────
-bookingSchema.pre("save", async function () {
-  this._wasNew = this.isNew;
-
-  if (!this.isNew) {
-    const oldDoc = await this.constructor.findById(this._id).lean();
-    this._oldServiceDeltas = oldDoc ? computeServiceDeltas(oldDoc) : new Map();
-  }
-
-  await assignBookingSequences(this);
-  calculateBookingTotals(this);
 });
-
-// ── post-save ─────────────────────────────────────────────────────────────────
-bookingSchema.post("save", async function () {
-  try {
-    const newDeltas = computeServiceDeltas(this);
-
-    if (this._wasNew) {
-      for (const [pid, delta] of newDeltas) {
-        await applyProviderSummaryDelta(pid, {
-          totalBuy:  delta.buy,
-          totalSell: delta.sell,
-        });
-      }
-    } else if (this._oldServiceDeltas) {
-      const allProviderIds = new Set([
-        ...newDeltas.keys(),
-        ...this._oldServiceDeltas.keys(),
-      ]);
-
-      for (const pid of allProviderIds) {
-        const oldD    = this._oldServiceDeltas.get(pid) || { buy: 0, sell: 0 };
-        const newD    = newDeltas.get(pid)              || { buy: 0, sell: 0 };
-        const diffBuy  = newD.buy  - oldD.buy;
-        const diffSell = newD.sell - oldD.sell;
-
-        if (diffBuy !== 0 || diffSell !== 0) {
-          await applyProviderSummaryDelta(pid, {
-            totalBuy:  diffBuy,
-            totalSell: diffSell,
-          });
-        }
-      }
-    }
-  } catch (err) {
-    console.error(
-      "❌ Provider summary sync failed after booking save:",
-      err.message,
-    );
-  }
-});
-
-// ── post-deleteOne ────────────────────────────────────────────────────────────
-bookingSchema.post(
-  "deleteOne",
-  { document: true, query: false },
-  async function () {
-    try {
-      const deltas = computeServiceDeltas(this);
-      for (const [pid, delta] of deltas) {
-        await applyProviderSummaryDelta(pid, {
-          totalBuy:  -delta.buy,
-          totalSell: -delta.sell,
-        });
-      }
-    } catch (err) {
-      console.error(
-        "❌ Provider summary sync failed after booking delete:",
-        err.message,
-      );
-    }
-  },
-);
-
-export default mongoose.model("Booking", bookingSchema);
 </file>
 
 <file path="src/modules/provider/controller/provider.controller.js">
@@ -13652,6 +13610,310 @@ export const getSyncFailures = asyncHandler(async (req, res) => {
 });
 </file>
 
+<file path="src/services/bookingService.js">
+import mongoose from "mongoose";
+import { getMergedServiceTypes } from "./serviceTypeRegistry.js";
+import {
+  applyProviderSummaryDelta,
+  computeServiceDeltas,
+} from "./providerSummaryService.js";
+
+const getProvider = () => mongoose.model("Provider");
+const getBooking = () => mongoose.model("Booking");
+const getCounter = () => mongoose.model("Counter");
+
+/**
+ * Assigns bookingID and serviceNumbers.
+ *
+ * bookingID  → global auto-increment counter (unique across ALL bookings,
+ *              regardless of provider). Sequence: 1, 2, 3, 4, …
+ *
+ * serviceNumber → per service-provider sequence.
+ *   Each provider keeps their own currentSequence so a hotel's vouchers
+ *   are numbered 1, 2, 3, … independently of the booking ID.
+ *
+ * provider.totalBookings   → stat counter (decremented on deletion).
+ * provider.currentSequence → service-numbering HIGH-WATER MARK.
+ *
+ * ⚠️  currentSequence is intentionally NEVER decremented, even when a booking
+ *     is deleted. Decrementing it would cause the next created service for
+ *     that provider to receive a number already issued to a previous (now
+ *     deleted) service — a duplicate service-number collision.
+ *     Only totalBookings (a display stat) is decremented on delete.
+ *
+ * Case 4 fix: replaced all `{ new: true }` options with
+ * `{ returnDocument: 'after' }`. `new: true` is deprecated in Mongoose 9
+ * and triggers a console warning on every call. Both options are equivalent
+ * — they both return the document AFTER the update is applied.
+ */
+export const assignBookingSequences = async (doc) => {
+  const Provider = getProvider();
+  const Booking = getBooking();
+  const Counter = getCounter();
+
+  if (doc.isNew) {
+    // ── Global booking ID ────────────────────────────────────────────────────
+    const counter = await Counter.findOneAndUpdate(
+      { _id: "booking" },
+      { $inc: { seq: 1 } },
+      { returnDocument: "after", upsert: true },
+    );
+    doc.bookingID = counter.seq;
+
+    // Update provider stats (totalBookings only — currentSequence is for services)
+    const mainProvider = await Provider.findByIdAndUpdate(
+      doc.provider,
+      { $inc: { totalBookings: 1 } },
+      { returnDocument: "after" },
+    );
+    if (!mainProvider) throw new Error("Main Provider not found");
+  } else if (doc.isModified("provider")) {
+    // Provider changed on an existing booking — adjust totalBookings on both sides
+    const oldDoc = await Booking.findById(doc._id).lean();
+    if (oldDoc && oldDoc.provider.toString() !== doc.provider.toString()) {
+      await Provider.findByIdAndUpdate(oldDoc.provider, {
+        $inc: { totalBookings: -1 },
+      });
+      const newProvider = await Provider.findByIdAndUpdate(
+        doc.provider,
+        { $inc: { totalBookings: 1 } },
+        { returnDocument: "after" },
+      );
+      if (!newProvider) throw new Error("New provider not found");
+      // bookingID stays unchanged when provider is swapped
+    }
+  }
+
+  // ── Service numbers ───────────────────────────────────────────────────────
+  // Every service (including those whose provider is the main booking provider)
+  // gets a number from that service-provider's own sequence.
+  const services = doc.services || [];
+  for (let i = 0; i < services.length; i++) {
+    const service = services[i];
+    if (!service.provider) continue;
+    if (service.serviceNumber != null) continue; // already assigned — preserve
+
+    const svcProvider = await Provider.findByIdAndUpdate(
+      service.provider,
+      { $inc: { currentSequence: 1 } },
+      { returnDocument: "after" },
+    );
+    if (!svcProvider) {
+      throw new Error(
+        `Service provider ${service.provider} not found during sequence assignment`,
+      );
+    }
+    doc.services[i].serviceNumber = svcProvider.currentSequence;
+  }
+
+  doc.markModified("services");
+};
+
+/**
+ * Recalculates all financial totals from the services array.
+ * Also auto-calculates duration for service types that define durationFields.
+ */
+export const calculateBookingTotals = (doc) => {
+  (doc.services || []).forEach((service) => {
+    const typeDef = getMergedServiceTypes()[service.serviceType];
+    if (typeDef?.durationFields && service.details) {
+      const fromVal = service.details[typeDef.durationFields.from];
+      const toVal = service.details[typeDef.durationFields.to];
+      if (fromVal && toVal) {
+        service.duration = Math.ceil(
+          (new Date(toVal) - new Date(fromVal)) / (1000 * 60 * 60 * 24),
+        );
+      }
+    }
+  });
+
+  let totalSell = 0;
+  let totalBuy = 0;
+
+  (doc.services || []).forEach((service) => {
+    service.profit = (Number(service.sell) || 0) - (Number(service.buy) || 0);
+    totalSell += Number(service.sell) || 0;
+    totalBuy += Number(service.buy) || 0;
+  });
+
+  doc.totalToPay = totalSell;
+  doc.totalToBuy = totalBuy;
+  doc.totalProfit = totalSell - totalBuy;
+  doc.remainingBalance = doc.totalToPay - (doc.totalPaid || 0);
+
+  if ((doc.totalPaid || 0) <= 0) doc.paymentStatus = "unpaid";
+  else if (doc.totalPaid >= doc.totalToPay) doc.paymentStatus = "paid";
+  else doc.paymentStatus = "partial";
+};
+</file>
+
+<file path="DB/model/booking.model.js">
+import mongoose from "mongoose";
+import {
+  assignBookingSequences,
+  calculateBookingTotals,
+} from "../../src/services/bookingService.js";
+import {
+  applyProviderSummaryDelta,
+  computeServiceDeltas,
+} from "../../src/services/providerSummaryService.js";
+import { getMergedServiceTypeKeys } from "../../src/services/serviceTypeRegistry.js";
+
+const bookingSchema = new mongoose.Schema(
+  {
+    bookingID: Number,
+    provider: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Provider",
+      required: true,
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    status: {
+      type: String,
+      enum: ["pending", "confirmed", "cancelled", "completed"],
+      default: "pending",
+    },
+    totalToPay: { type: Number, default: 0 },
+    totalToBuy: { type: Number, default: 0 },
+    totalProfit: { type: Number, default: 0 },
+    totalPaid: { type: Number, default: 0 },
+    remainingBalance: { type: Number, default: 0 },
+    paymentStatus: {
+      type: String,
+      enum: ["unpaid", "partial", "paid"],
+      default: "unpaid",
+    },
+    customers: [{ name: String, ageType: String }],
+
+    /**
+     * Unified services array — replaces the former named arrays
+     * (accommodations, carRentals, carWithDriver).
+     *
+     * serviceType drives all processing logic via the SERVICE_TYPES registry.
+     * details holds every type-specific field (checkIn/checkOut, brand, etc.).
+     * notes  is a free-text optional field available on every service type,
+     *        regardless of whether it is built-in or office-defined.
+     */
+    services: [
+      {
+        serviceType: {
+          type: String,
+          required: true,
+          validate: {
+            validator(v) {
+              return getMergedServiceTypeKeys().includes(v);
+            },
+            message: "Invalid service type",
+          },
+        },
+        serviceNumber: Number,
+        provider: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Provider",
+          required: true,
+        },
+        buy: { type: Number, default: 0 },
+        sell: { type: Number, default: 0 },
+        profit: { type: Number, default: 0 },
+        // Auto-calculated for service types that define durationFields
+        duration: Number,
+        // All type-specific fields (checkIn, checkOut, brand, driverName, etc.)
+        details: { type: mongoose.Schema.Types.Mixed, default: {} },
+        // Free-text note for this specific service — not required, any length
+        // up to 1 000 characters. Available on every service type.
+        notes: { type: String, default: "" },
+      },
+    ],
+
+    totalPax: { adults: Number, kids: Number, total: Number },
+  },
+  { timestamps: true, optimisticConcurrency: true },
+);
+
+bookingSchema.index({ provider: 1, bookingID: 1 }, { unique: true });
+
+// ── pre-save ──────────────────────────────────────────────────────────────────
+bookingSchema.pre("save", async function () {
+  this._wasNew = this.isNew;
+
+  if (!this.isNew) {
+    const oldDoc = await this.constructor.findById(this._id).lean();
+    this._oldServiceDeltas = oldDoc ? computeServiceDeltas(oldDoc) : new Map();
+  }
+
+  await assignBookingSequences(this);
+  calculateBookingTotals(this);
+});
+
+// ── post-save ─────────────────────────────────────────────────────────────────
+bookingSchema.post("save", async function () {
+  try {
+    const newDeltas = computeServiceDeltas(this);
+
+    if (this._wasNew) {
+      for (const [pid, delta] of newDeltas) {
+        await applyProviderSummaryDelta(pid, {
+          totalBuy:  delta.buy,
+          totalSell: delta.sell,
+        });
+      }
+    } else if (this._oldServiceDeltas) {
+      const allProviderIds = new Set([
+        ...newDeltas.keys(),
+        ...this._oldServiceDeltas.keys(),
+      ]);
+
+      for (const pid of allProviderIds) {
+        const oldD    = this._oldServiceDeltas.get(pid) || { buy: 0, sell: 0 };
+        const newD    = newDeltas.get(pid)              || { buy: 0, sell: 0 };
+        const diffBuy  = newD.buy  - oldD.buy;
+        const diffSell = newD.sell - oldD.sell;
+
+        if (diffBuy !== 0 || diffSell !== 0) {
+          await applyProviderSummaryDelta(pid, {
+            totalBuy:  diffBuy,
+            totalSell: diffSell,
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.error(
+      "❌ Provider summary sync failed after booking save:",
+      err.message,
+    );
+  }
+});
+
+// ── post-deleteOne ────────────────────────────────────────────────────────────
+bookingSchema.post(
+  "deleteOne",
+  { document: true, query: false },
+  async function () {
+    try {
+      const deltas = computeServiceDeltas(this);
+      for (const [pid, delta] of deltas) {
+        await applyProviderSummaryDelta(pid, {
+          totalBuy:  -delta.buy,
+          totalSell: -delta.sell,
+        });
+      }
+    } catch (err) {
+      console.error(
+        "❌ Provider summary sync failed after booking delete:",
+        err.message,
+      );
+    }
+  },
+);
+
+export default mongoose.model("Booking", bookingSchema);
+</file>
+
 <file path="src/modules/booking/controller/booking.controller.js">
 import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
@@ -13661,18 +13923,10 @@ import logModel from "../../../../DB/model/log.model.js";
 import { notifyBookingStatusChanged } from "../../../services/notification.js";
 import { pagination } from "../../../services/pagination.js";
 import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
+import { applyProviderSummaryDelta } from "../../../services/providerSummaryService.js";
 import mongoose from "mongoose";
 
 // ── Security helper ───────────────────────────────────────────────────────────
-/**
- * Escapes regex metacharacters so user-supplied strings cannot be used as
- * injection vectors inside MongoDB $regex queries.
- *
- * Without this: ?customerName=.* → full collection scan
- *               ?customerName=(?i)secret → data enumeration
- *
- * Phase 1 security fix — the ONLY change to this file vs. the original.
- */
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ── Protected fields ──────────────────────────────────────────────────────────
@@ -13687,12 +13941,7 @@ const PROTECTED_BOOKING_FIELDS = [
 ];
 
 // ── Local validation helpers ──────────────────────────────────────────────────
-// These are private to this controller — NOT exported, NOT imported from bookingService.
 
-/**
- * Validates type-specific required fields inside service.details.
- * Returns an Error (to pass to next()) or null when valid.
- */
 const validateServiceDetails = (service) => {
   const { serviceType, details = {} } = service;
   const typeDef = getMergedServiceTypes()[serviceType];
@@ -13736,10 +13985,6 @@ const validateServiceDetails = (service) => {
   return null;
 };
 
-/**
- * Confirms every service provider ID exists in the DB.
- * Returns an Error or null when all are valid.
- */
 const validateSubProviders = async (services = []) => {
   if (services.length === 0) return null;
 
@@ -13762,33 +14007,6 @@ const validateSubProviders = async (services = []) => {
 };
 
 // ── Sequence resync helper ────────────────────────────────────────────────────
-/**
- * Resyncs `currentSequence` for each provider in `providerIds` to the
- * actual maximum `serviceNumber` still assigned across all remaining bookings.
- *
- * Why not just `$inc: -1`?
- *   A naive decrement causes E11000 duplicate-key errors when the next
- *   booking is created — two services end up with the same number.
- *
- * Why this approach is safe:
- *   We always set `currentSequence` to `MAX(serviceNumber)` of live data.
- *   The next service created for this provider gets `currentSequence + 1`,
- *   which is guaranteed unique because it is strictly greater than any
- *   serviceNumber currently in the database.
- *
- * Example:
- *   Provider has services 1, 2, 3, 4, 5.
- *   Booking with services 4 and 5 is deleted.
- *   MAX of remaining = 3 → currentSequence = 3.
- *   Next service gets 4 → no gap visible to users, no duplicate.
- *
- * Performance note:
- *   Runs one lightweight $group aggregation per unique provider.
- *   Deletions are infrequent; the extra aggregation cost is acceptable
- *   and far cheaper than a full resync of all financial summaries.
- *
- * @param {string[]} providerIds - Array of provider ObjectId strings.
- */
 const resyncProviderSequences = async (providerIds) => {
   if (!providerIds.length) return;
 
@@ -13796,8 +14014,6 @@ const resyncProviderSequences = async (providerIds) => {
     providerIds.map(async (providerId) => {
       const providerObjId = new mongoose.Types.ObjectId(providerId);
 
-      // Find the highest serviceNumber still in use for this provider
-      // across all bookings that still exist in the database.
       const [result] = await bookingModel.aggregate([
         { $match: { "services.provider": providerObjId } },
         { $unwind: "$services" },
@@ -13805,8 +14021,6 @@ const resyncProviderSequences = async (providerIds) => {
         { $group: { _id: null, maxSeq: { $max: "$services.serviceNumber" } } },
       ]);
 
-      // If no services remain at all for this provider, reset to 0 so the
-      // next service gets number 1 (clean slate).
       const newSequence = result?.maxSeq ?? 0;
 
       await providerModel.findByIdAndUpdate(providerId, {
@@ -13865,7 +14079,6 @@ export const createBooking = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Get all bookings
-// Phase 1 change: customerName is now escaped before use in $regex.
 // ─────────────────────────────────────────────────────────────────────────────
 export const getAllBookings = asyncHandler(async (req, res) => {
   const {
@@ -13893,7 +14106,6 @@ export const getAllBookings = asyncHandler(async (req, res) => {
   if (status) query.status = status;
   if (paymentStatus) query.paymentStatus = paymentStatus;
 
-  // Phase 1 security fix: escape user input before using as regex pattern
   if (customerName)
     query["customers.name"] = {
       $regex: escapeRegex(customerName.trim()),
@@ -13990,6 +14202,18 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
     .populate("createdBy", "userName email");
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
+  if (
+    data.expectedVersion !== undefined &&
+    booking.__v !== data.expectedVersion
+  ) {
+    return next(
+      new Error(
+        "This booking was modified by another user since you loaded it. Refresh and try again.",
+        { cause: 409 },
+      ),
+    );
+  }
+
   if (data.services && Array.isArray(data.services)) {
     const subProviderError = await validateSubProviders(data.services);
     if (subProviderError) return next(subProviderError);
@@ -14003,22 +14227,41 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
   const oldStatus = booking.status;
 
   Object.keys(data).forEach((key) => {
-    if (PROTECTED_BOOKING_FIELDS.includes(key)) return;
+    if (PROTECTED_BOOKING_FIELDS.includes(key) || key === "expectedVersion")
+      return;
 
     if (key === "services" && Array.isArray(data.services)) {
-      // Merge by index — preserve serviceNumber on existing items
-      booking.services = data.services.map((newItem, index) => {
-        const oldItem = booking.services[index];
-        if (oldItem) {
-          return {
-            ...oldItem.toObject(),
+      const existingById = new Map(
+        booking.services.map((s) => [s._id.toString(), s]),
+      );
+
+      const mergedIds = new Set();
+      const merged = [];
+
+      for (const newItem of data.services) {
+        const existing =
+          newItem._id && existingById.get(newItem._id.toString());
+        if (existing) {
+          merged.push({
+            ...existing.toObject(),
             ...newItem,
-            _id: oldItem._id,
-            serviceNumber: newItem.serviceNumber ?? oldItem.serviceNumber,
-          };
+            _id: existing._id,
+            serviceNumber: newItem.serviceNumber ?? existing.serviceNumber,
+          });
+          mergedIds.add(existing._id.toString());
+        } else {
+          merged.push(newItem);
         }
-        return newItem;
-      });
+      }
+
+      for (const existing of booking.services) {
+        if (!mergedIds.has(existing._id.toString())) {
+          merged.push(existing.toObject());
+        }
+      }
+
+      booking.services = merged;
+      booking.markModified("services");
     } else if (key === "totalPax") {
       booking.totalPax = { ...booking.totalPax?.toObject(), ...data[key] };
     } else {
@@ -14032,7 +14275,19 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
       (Number(booking.totalPax.kids) || 0);
   }
 
-  await booking.save();
+  try {
+    await booking.save();
+  } catch (err) {
+    if (err.name === "VersionError") {
+      return next(
+        new Error(
+          "This booking was modified by another user since you loaded it. Refresh and try again.",
+          { cause: 409 },
+        ),
+      );
+    }
+    throw err;
+  }
 
   const newStatus = booking.status;
   if (data.status && data.status !== oldStatus) {
@@ -14045,7 +14300,7 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
     details: {
       bookingID: booking.bookingID,
       updatedFields: Object.keys(data).filter(
-        (k) => !PROTECTED_BOOKING_FIELDS.includes(k),
+        (k) => !PROTECTED_BOOKING_FIELDS.includes(k) && k !== "expectedVersion",
       ),
       statusChange: data.status
         ? { from: oldStatus, to: newStatus }
@@ -14056,6 +14311,96 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
   return res.status(200).json({
     success: true,
     message: "Booking updated successfully",
+    data: { booking },
+    errors: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edit a single existing service on a booking
+//
+// CASE 7 (final rule): ANY financial/detail edit to a service is blocked
+// once the booking's paymentStatus is "paid". A fully paid invoice is
+// considered final — buy/sell/details/notes are all locked, matching the
+// same rule now applied to service removal and whole-booking deletion.
+// ─────────────────────────────────────────────────────────────────────────────
+export const editService = asyncHandler(async (req, res, next) => {
+  const { id, serviceId } = req.params;
+  const { buy, sell, details, notes, expectedVersion } = req.body;
+
+  const booking = await bookingModel.findById(id);
+  if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+  if (booking.paymentStatus === "paid") {
+    return next(
+      new Error(
+        "Cannot edit a service on a booking that is already fully paid. " +
+          "The invoice is considered final once fully paid.",
+        { cause: 400 },
+      ),
+    );
+  }
+
+  if (expectedVersion !== undefined && booking.__v !== expectedVersion) {
+    return next(
+      new Error(
+        "This booking was modified by another user since you loaded it. Refresh and try again.",
+        { cause: 409 },
+      ),
+    );
+  }
+
+  const service = booking.services.id(serviceId);
+  if (!service) return next(new Error("Service not found", { cause: 404 }));
+
+  const mergedDetails =
+    details !== undefined
+      ? { ...service.details, ...details }
+      : service.details;
+
+  const detailError = validateServiceDetails({
+    serviceType: service.serviceType,
+    details: mergedDetails,
+  });
+  if (detailError) return next(detailError);
+
+  if (buy !== undefined) service.buy = buy;
+  if (sell !== undefined) service.sell = sell;
+  if (details !== undefined) service.details = mergedDetails;
+  if (notes !== undefined) service.notes = notes;
+
+  booking.markModified("services");
+
+  try {
+    await booking.save();
+  } catch (err) {
+    if (err.name === "VersionError") {
+      return next(
+        new Error(
+          "This booking was modified by another user since you loaded it. Refresh and try again.",
+          { cause: 409 },
+        ),
+      );
+    }
+    throw err;
+  }
+
+  await logModel.create({
+    user: req.user._id,
+    action: "EDIT_SERVICE",
+    details: {
+      bookingID: booking.bookingID,
+      serviceId,
+      serviceType: service.serviceType,
+      updatedFields: Object.keys(req.body).filter(
+        (k) => k !== "expectedVersion",
+      ),
+    },
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Service updated successfully",
     data: { booking },
     errors: null,
   });
@@ -14115,6 +14460,11 @@ export const addServiceToBooking = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Remove service from existing booking
+//
+// CASE 7 (final rule): removal blocked once paymentStatus is "paid" —
+// same rationale as editService above. A partially paid booking may still
+// have services removed/edited (the customer hasn't settled the full
+// amount yet, so the invoice isn't final).
 // ─────────────────────────────────────────────────────────────────────────────
 export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
@@ -14123,13 +14473,21 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
+  if (booking.paymentStatus === "paid") {
+    return next(
+      new Error(
+        "Cannot remove a service from a booking that is already fully paid. " +
+          "The invoice is considered final once fully paid.",
+        { cause: 400 },
+      ),
+    );
+  }
+
   const serviceItem = booking.services.find(
     (item) => item._id.toString() === serviceId,
   );
   if (!serviceItem) return next(new Error("Service not found", { cause: 404 }));
 
-  // Capture the provider ID before removing the service so we can
-  // resync currentSequence after the save.
   const removedProviderId = serviceItem.provider?.toString();
 
   await logModel.create({
@@ -14148,10 +14506,6 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
   );
   await booking.save();
 
-  // Resync the affected provider's currentSequence to the actual maximum
-  // serviceNumber still in use. This allows the sequence to decrease when
-  // services are removed, so the next service gets a sensibly low number
-  // instead of continuing from the old high-water mark.
   if (removedProviderId) {
     await resyncProviderSequences([removedProviderId]);
   }
@@ -14166,14 +14520,33 @@ export const removeServiceFromBooking = asyncHandler(async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Delete booking
+//
+// CASE 7 (final rule, Q1.1 superseded): deletion is now blocked whenever
+// the booking has received ANY payment — i.e. paymentStatus is "partial"
+// OR "paid" — regardless of the booking's `status` field (pending,
+// confirmed, cancelled, completed all treated the same way). Only bookings
+// with paymentStatus "unpaid" may be deleted. This replaces the earlier,
+// narrower "block only if status === completed" rule.
+//
+// The direct-to-provider payment reversal fix from the previous iteration
+// is retained below for defense-in-depth, though in practice an "unpaid"
+// booking should have zero Payment records to reverse.
 // ─────────────────────────────────────────────────────────────────────────────
 export const deleteBooking = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const booking = await bookingModel.findById(id);
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
-  // Collect unique provider IDs from this booking's services BEFORE deletion
-  // so we know which providers need their sequence resynced afterwards.
+  if (booking.paymentStatus !== "unpaid") {
+    return next(
+      new Error(
+        "Cannot delete a booking that has received payments. " +
+          "Bookings with partial or full payment cannot be deleted, regardless of their status.",
+        { cause: 400 },
+      ),
+    );
+  }
+
   const affectedProviderIds = [
     ...new Set(
       (booking.services || [])
@@ -14186,6 +14559,31 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
     $inc: { totalBookings: -1 },
   });
 
+  // Defense-in-depth: reverse any direct-to-provider payment deltas before
+  // the Payment documents are deleted. An "unpaid" booking should have no
+  // such records, but this guards against any inconsistent intermediate
+  // state rather than assuming the invariant always holds.
+  const directPayments = await paymentModel
+    .find({ booking: id, providerRecipient: { $ne: null } })
+    .select("providerRecipient amount");
+
+  const directTotalsByProvider = new Map();
+  for (const p of directPayments) {
+    const key = p.providerRecipient.toString();
+    directTotalsByProvider.set(
+      key,
+      (directTotalsByProvider.get(key) || 0) + p.amount,
+    );
+  }
+
+  for (const [providerId, total] of directTotalsByProvider) {
+    await applyProviderSummaryDelta(
+      providerId,
+      { totalCustomersPaidDirect: -total },
+      "booking_delete_direct_payment_reversal",
+    );
+  }
+
   await paymentModel.deleteMany({ booking: id });
 
   await logModel.create({
@@ -14194,17 +14592,12 @@ export const deleteBooking = asyncHandler(async (req, res, next) => {
     details: {
       bookingID: booking.bookingID,
       customer: booking.customers[0]?.name,
+      reversedDirectPayments: Object.fromEntries(directTotalsByProvider),
     },
   });
 
-  // Delete the booking document first so the subsequent aggregation
-  // reflects its services as gone and computes the correct new max.
   await booking.deleteOne();
 
-  // Resync currentSequence for every provider whose services appeared in
-  // this booking. Each provider's sequence is set to MAX(serviceNumber)
-  // of its remaining services across all other bookings. If a provider
-  // has no remaining services, its sequence resets to 0 (next gets 1).
   await resyncProviderSequences(affectedProviderIds);
 
   return res.status(200).json({
@@ -14351,6 +14744,12 @@ app.use(`${baseUrl}/service-types`,       generalLimiter, indexRouter.serviceTyp
 // ── Error handlers ────────────────────────────────────────────────────────────
 // Central error handler — asyncHandler forwards all thrown errors here.
 app.use((err, req, res, next) => {
+  // تصفية أخطاء التداخل من Mongoose وتحويلها لـ 409 تلقائياً
+  if (err.name === "VersionError") {
+    err.cause = 409;
+    err.message = "This document was modified by another user. Please refresh and try again.";
+  }
+
   const status = err.cause || 500;
   return res.status(status).json({
     success: false,
@@ -14364,7 +14763,6 @@ app.use((err, req, res, next) => {
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
-
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
 });

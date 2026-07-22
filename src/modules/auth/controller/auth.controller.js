@@ -273,6 +273,10 @@ export const createUser = asyncHandler(async (req, res, next) => {
 export const updateUser = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
+  if (req.body.blocked === true && id === req.user._id.toString()) {
+    return next(new Error("You cannot block your own account", { cause: 400 }));
+  }
+
   const user = await userModel.findById(id);
   if (!user) return next(new Error("User not found", { cause: 404 }));
 
@@ -284,11 +288,13 @@ export const updateUser = asyncHandler(async (req, res, next) => {
   await user.save();
 
   await logModel.create({
-    user:    req.user._id,
-    action:  "UPDATE_USER",
+    user: req.user._id,
+    action: "UPDATE_USER",
     details: {
-      userId:        id,
-      updatedFields: ADMIN_UPDATABLE_USER_FIELDS.filter((k) => req.body[k] != null && k !== "password"),
+      userId: id,
+      updatedFields: ADMIN_UPDATABLE_USER_FIELDS.filter(
+        (k) => req.body[k] != null && k !== "password",
+      ),
       passwordChanged,
     },
   });
@@ -298,7 +304,14 @@ export const updateUser = asyncHandler(async (req, res, next) => {
   delete safe.passwordResetToken;
   delete safe.passwordResetExpiry;
 
-  return res.status(200).json({ success: true, message: "User updated successfully", data: { user: safe }, errors: null });
+  return res
+    .status(200)
+    .json({
+      success: true,
+      message: "User updated successfully",
+      data: { user: safe },
+      errors: null,
+    });
 });
 
 export const getAllUsers = asyncHandler(async (req, res) => {
