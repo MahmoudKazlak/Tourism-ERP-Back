@@ -1,21 +1,13 @@
 import mongoose from "mongoose";
-import { seedAdmin } from "./adminSeed.js";
+import { seedAdmin, seedOfficeProvider } from "./adminSeed.js";
 import { refreshServiceTypeRegistry } from "../src/services/serviceTypeRegistry.js";
-import "./model/syncFailure.model.js"; // ← ADD THIS: registers the SyncFailure schema at startup
-
+import "./model/syncFailure.model.js"; // ← registers the SyncFailure schema at startup
 
 /**
  * Establishes the MongoDB connection then runs startup tasks sequentially.
  *
  * Connection options:
- *   retryWrites: false — Required for standalone (non-replica-set) MongoDB
- *     deployments. MongoDB 4+ drivers enable retryable writes by default, but
- *     retryable writes require a replica set to be active. On a standalone
- *     instance the driver throws "does not support retryable writes" on the
- *     very first write operation. Setting this to false disables the feature
- *     for this connection without affecting any other behaviour.
- *     When you later deploy MongoDB as a replica set (recommended for
- *     production), you can remove this option or set it back to true.
+ *   retryWrites: false — required for standalone (non-replica-set) MongoDB.
  */
 const connectDB = async () => {
   try {
@@ -32,6 +24,13 @@ const connectDB = async () => {
     await seedAdmin();
   } catch (err) {
     console.error("❌ Admin seed failed:", err.message);
+    process.exit(1);
+  }
+
+  try {
+    await seedOfficeProvider();
+  } catch (err) {
+    console.error("❌ Office provider seed failed:", err.message);
     process.exit(1);
   }
 

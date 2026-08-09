@@ -21,6 +21,8 @@ const PROTECTED_BOOKING_FIELDS = [
   "paymentStatus",
   "totalToPay",
   "totalProfit",
+  "bookingType",
+  "referenceCode",
 ];
 
 // ── Local validation helpers ──────────────────────────────────────────────────
@@ -163,7 +165,9 @@ export const createBooking = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Get all bookings
 // ─────────────────────────────────────────────────────────────────────────────
+// NEW
 export const getAllBookings = asyncHandler(async (req, res) => {
+  // NEW
   const {
     bookingID,
     provider,
@@ -171,6 +175,8 @@ export const getAllBookings = asyncHandler(async (req, res) => {
     status,
     paymentStatus,
     customerName,
+    q,
+    bookingType,
     fromDate,
     toDate,
     minAmount,
@@ -188,12 +194,29 @@ export const getAllBookings = asyncHandler(async (req, res) => {
   if (serviceType) query["services.serviceType"] = serviceType;
   if (status) query.status = status;
   if (paymentStatus) query.paymentStatus = paymentStatus;
+  if (bookingType) query.bookingType = bookingType;
 
   if (customerName)
     query["customers.name"] = {
       $regex: escapeRegex(customerName.trim()),
       $options: "i",
     };
+
+  // Case 8: general search — powers BookingLinkPicker. Matches bookingID
+  // (exact, when numeric), referenceCode (partial, case-insensitive), or
+  // customer name (partial, case-insensitive). Independent of customerName above.
+  if (q) {
+    const trimmed = q.trim();
+    const orConditions = [
+      { referenceCode: { $regex: escapeRegex(trimmed), $options: "i" } },
+      { "customers.name": { $regex: escapeRegex(trimmed), $options: "i" } },
+    ];
+    const numericQ = Number(trimmed);
+    if (!Number.isNaN(numericQ)) {
+      orConditions.push({ bookingID: numericQ });
+    }
+    query.$or = orConditions;
+  }
 
   if (fromDate || toDate) {
     query.createdAt = {};
@@ -285,6 +308,7 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
     .populate("createdBy", "userName email");
   if (!booking) return next(new Error("Booking not found", { cause: 404 }));
 
+  // NEW
   if (
     data.expectedVersion !== undefined &&
     booking.__v !== data.expectedVersion
@@ -295,6 +319,25 @@ export const updateBooking = asyncHandler(async (req, res, next) => {
         { cause: 409 },
       ),
     );
+  }
+
+  if (data.officeProfit !== undefined || data.providerProfit !== undefined) {
+    if (booking.paymentStatus === "paid") {
+      return next(
+        new Error(
+          "Cannot edit profit fields on a booking that is already fully paid.",
+          { cause: 400 },
+        ),
+      );
+    }
+    if (booking.bookingType !== "agency") {
+      return next(
+        new Error(
+          "providerProfit and officeProfit only apply to agency bookings.",
+          { cause: 400 },
+        ),
+      );
+    }
   }
 
   if (data.services && Array.isArray(data.services)) {

@@ -58,6 +58,7 @@ export { recordSyncFailure };
 
 // ── Incremental delta pipeline (MongoDB aggregation-pipeline expression) ───────
 
+// NEW
 const buildSummaryPipeline = (delta) => {
   const inc = (field, amount) => ({
     $add: [{ $ifNull: [`$summary.${field}`, 0] }, amount],
@@ -71,7 +72,13 @@ const buildSummaryPipeline = (delta) => {
         "summary.totalWeHavePaid":            inc("totalWeHavePaid",            delta.totalWeHavePaid            ?? 0),
         "summary.totalCustomersPaidDirect":   inc("totalCustomersPaidDirect",   delta.totalCustomersPaidDirect   ?? 0),
         "summary.totalCollectedFromProvider": inc("totalCollectedFromProvider",  delta.totalCollectedFromProvider ?? 0),
+        // Case 8: agency receivables bucket — fully independent of the
+        // vendor-balance fields above and of the balanceType/balanceLabel
+        // derivation below, which only reads totalBuy/totalCollectedFromProvider/etc.
+        "summary.agency.totalInvoiced":       inc("agency.totalInvoiced",       delta.agencyTotalInvoiced         ?? 0),
+        "summary.agency.totalReceived":       inc("agency.totalReceived",       delta.agencyTotalReceived         ?? 0),
         "summary.lastSynced":                 new Date(),
+        "summary.agency.lastSynced":          new Date(),
       },
     },
     {

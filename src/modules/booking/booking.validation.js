@@ -85,6 +85,7 @@ const totalPaxSchema = Joi.object({
 
 // ── Route schemas ─────────────────────────────────────────────────────────────
 
+// NEW
 export const createBooking = {
   body: Joi.object({
     provider: objectId.required().messages({
@@ -95,6 +96,26 @@ export const createBooking = {
     status: Joi.string()
       .valid("pending", "confirmed", "cancelled", "completed")
       .default("pending"),
+    bookingType: Joi.string()
+      .valid("agency", "customer")
+      .default("customer")
+      .messages({
+        "any.only": "bookingType must be 'agency' or 'customer'",
+      }),
+    providerProfit: Joi.number().min(0).when("bookingType", {
+      is: "agency",
+      then: Joi.number().min(0).default(0),
+      otherwise: Joi.number().valid(0).default(0).messages({
+        "any.only": "providerProfit is only allowed for agency bookings",
+      }),
+    }),
+    officeProfit: Joi.number().min(0).when("bookingType", {
+      is: "agency",
+      then: Joi.number().min(0).default(0),
+      otherwise: Joi.number().valid(0).default(0).messages({
+        "any.only": "officeProfit is only allowed for agency bookings",
+      }),
+    }),
     customers: Joi.array().items(customerSchema).min(1).required().messages({
       "any.required": "At least one customer is required",
       "array.min":    "At least one customer is required",
@@ -112,10 +133,16 @@ export const updateBooking = {
       "cancelled",
       "completed",
     ),
+    // NEW
     provider: objectId.messages({
       "string.hex": "Invalid provider ID",
       "string.length": "Invalid provider ID",
     }),
+    // bookingType is immutable — intentionally NOT accepted here.
+    // Both are gated at the controller level (locked once paymentStatus === "paid",
+    // and rejected outright for non-agency bookings).
+    providerProfit: Joi.number().min(0),
+    officeProfit: Joi.number().min(0),
     customers: Joi.array().items(customerSchema).min(1),
     services: Joi.array().items(serviceSchema),
     totalPax: totalPaxSchema,
@@ -157,25 +184,40 @@ export const bookingIdParam = {
 
 export const getAllBookingsQuery = {
   query: Joi.object({
-    bookingID:     Joi.number().integer().min(1),
-    provider:      objectId,
-    serviceType:   serviceTypeQueryValidator,
-    status:        Joi.string().valid("pending", "confirmed", "cancelled", "completed"),
+    bookingID: Joi.number().integer().min(1),
+    provider: objectId,
+    serviceType: serviceTypeQueryValidator,
+    status: Joi.string().valid(
+      "pending",
+      "confirmed",
+      "cancelled",
+      "completed",
+    ),
     paymentStatus: Joi.string().valid("unpaid", "partial", "paid"),
-    customerName:  Joi.string().trim().min(1).max(100),
-    fromDate:      Joi.date(),
-    toDate:        Joi.date().when("fromDate", {
-      is:   Joi.exist(),
+    customerName: Joi.string().trim().min(1).max(100),
+    // Case 8: general search across bookingID / referenceCode / customer
+    // name — powers BookingLinkPicker on the ProviderPayment/ProviderCollection
+    // creation forms. Independent of the more specific customerName filter above.
+    q: Joi.string().trim().min(1).max(100),
+    bookingType: Joi.string().valid("agency", "customer"),
+    fromDate: Joi.date(),
+    toDate: Joi.date().when("fromDate", {
+      is: Joi.exist(),
       then: Joi.date().min(Joi.ref("fromDate")).messages({
         "date.min": "toDate must be after fromDate",
       }),
     }),
-    minAmount:  Joi.number().min(0),
-    maxAmount:  Joi.number().min(0),
-    sortBy:     Joi.string().valid("createdAt", "bookingID", "totalToPay", "totalProfit"),
-    sortOrder:  Joi.string().valid("asc", "desc"),
-    page:       Joi.number().integer().min(1).default(1),
-    size:       Joi.number().integer().min(1).max(100).default(10),
+    minAmount: Joi.number().min(0),
+    maxAmount: Joi.number().min(0),
+    sortBy: Joi.string().valid(
+      "createdAt",
+      "bookingID",
+      "totalToPay",
+      "totalProfit",
+    ),
+    sortOrder: Joi.string().valid("asc", "desc"),
+    page: Joi.number().integer().min(1).default(1),
+    size: Joi.number().integer().min(1).max(100).default(10),
   }),
 };
 export const editService = {

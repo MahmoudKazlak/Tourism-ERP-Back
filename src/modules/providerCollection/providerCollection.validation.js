@@ -41,6 +41,7 @@ export const deleteProviderCollection = {
 };
 
 // NEW: edit a provider collection (Admin only) — mirrors editProviderPayment
+// NEW
 export const editProviderCollection = {
   body: Joi.object({
     amount: Joi.number().positive().messages({
@@ -52,6 +53,9 @@ export const editProviderCollection = {
     method: Joi.string().valid("cash", "bank_transfer", "check", "other"),
     notes: Joi.string().trim().max(300).allow(""),
     reference: Joi.string().trim().max(100).allow(""),
+    booking: objectId.allow(null).messages({
+      "string.hex": "Invalid booking ID",
+    }),
   })
     .min(1)
     .messages({ "object.min": "At least one field is required to update" }),

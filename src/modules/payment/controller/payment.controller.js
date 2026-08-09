@@ -162,12 +162,14 @@ export const addPayment = asyncHandler(async (req, res, next) => {
     });
   }
 
-  await notifyPaymentRecorded(
-    booking,
-    result.payment,
-    req.user.userName,
-    result.bookingSummary,
-  );
+  // Case 8: this booking's main provider is an agency that owes us money.
+  if (booking.bookingType === "agency") {
+    await applyProviderSummaryDelta(
+      booking.provider,
+      { agencyTotalReceived: numAmount },
+      "booking_payment_agency_received",
+    );
+  }
 
   return res.status(201).json({
     success: true,
@@ -268,6 +270,7 @@ export const getAllPayments = asyncHandler(async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Delete payment
 // ─────────────────────────────────────────────────────────────────────────────
+// NEW
 export const deletePayment = asyncHandler(async (req, res, next) => {
   const { paymentId } = req.params;
 
@@ -276,6 +279,10 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
 
   const recipientId = payment.providerRecipient;
   const deletedAmount = payment.amount;
+  const parentBooking = await bookingModel
+    .findById(payment.booking)
+    .select("bookingType provider")
+    .lean();
 
   const result = await withTransaction(async (session) => {
     const bookingId = payment.booking;
@@ -307,11 +314,20 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
     return { bookingSummary: updated };
   });
 
+  // NEW
   // Post-commit: reverse the provider summary increment
   if (recipientId) {
     await applyProviderSummaryDelta(recipientId, {
       totalCustomersPaidDirect: -deletedAmount,
     });
+  }
+
+  if (parentBooking?.bookingType === "agency") {
+    await applyProviderSummaryDelta(
+      parentBooking.provider,
+      { agencyTotalReceived: -deletedAmount },
+      "booking_payment_agency_received_reversal",
+    );
   }
 
   return res.status(200).json({
@@ -336,12 +352,15 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
 //   Applied POST-COMMIT outside the transaction so a failed summary update
 //   never rolls back an otherwise valid payment edit.
 // ─────────────────────────────────────────────────────────────────────────────
+// NEW
 export const editPayment = asyncHandler(async (req, res, next) => {
   const { paymentId } = req.params;
   const { amount, date, method, notes, providerRecipient } = req.body;
 
   const payment = await paymentModel.findById(paymentId);
   if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  const parentBooking = await bookingModel.findById(payment.booking).lean();
 
   const oldAmount = payment.amount;
   const oldRecipient = payment.providerRecipient?.toString() ?? null;
@@ -367,9 +386,8 @@ export const editPayment = asyncHandler(async (req, res, next) => {
       return next(new Error("Provider not found", { cause: 404 }));
     }
 
-    const bookingDoc = await bookingModel.findById(payment.booking).lean();
-    if (bookingDoc) {
-      const linkedIds = getLinkedProviderIds(bookingDoc);
+    if (parentBooking) {
+      const linkedIds = getLinkedProviderIds(parentBooking);
       if (!linkedIds.has(providerRecipient.toString())) {
         return next(
           new Error(
@@ -494,11 +512,20 @@ export const editPayment = asyncHandler(async (req, res, next) => {
         totalCustomersPaidDirect: newAmount,
       });
     }
+    // NEW
   } else if (amountChanged && newRecipient) {
     // Same recipient, different amount → push only the diff
     await applyProviderSummaryDelta(newRecipient, {
       totalCustomersPaidDirect: newAmount - oldAmount,
     });
+  }
+
+  if (parentBooking?.bookingType === "agency" && amountChanged) {
+    await applyProviderSummaryDelta(
+      parentBooking.provider,
+      { agencyTotalReceived: newAmount - oldAmount },
+      "booking_payment_agency_received_diff",
+    );
   }
 
   return res.status(200).json({

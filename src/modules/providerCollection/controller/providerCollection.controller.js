@@ -152,12 +152,20 @@ export const createProviderCollection = asyncHandler(async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 export const editProviderCollection = asyncHandler(async (req, res, next) => {
   const { collectionId } = req.params;
-  const { amount, date, method, notes, reference } = req.body;
+  const { amount, date, method, notes, reference, booking } = req.body;
 
   const collection = await providerCollectionModel
     .findById(collectionId)
     .populate("provider", "name");
   if (!collection) return next(new Error("Collection not found", { cause: 404 }));
+
+  if (booking) {
+    // mongoose.model("Booking") — matches the existing pattern already used
+    // in computeProviderOwesUs() in this same file, avoids adding a new import.
+    const bookingExists = await mongoose.model("Booking").exists({ _id: booking });
+    if (!bookingExists)
+      return next(new Error("Booking not found", { cause: 404 }));
+  }
 
   const oldAmount = collection.amount;
   const newAmount = amount !== undefined ? Number(amount) : oldAmount;
@@ -168,6 +176,7 @@ export const editProviderCollection = asyncHandler(async (req, res, next) => {
   if (method !== undefined) collection.method = method;
   if (notes !== undefined) collection.notes = notes;
   if (reference !== undefined) collection.reference = reference;
+  if (booking !== undefined) collection.booking = booking || null;
 
   await collection.save();
 
@@ -186,12 +195,14 @@ export const editProviderCollection = asyncHandler(async (req, res, next) => {
       collectionId,
       providerId: collection.provider._id,
       providerName: collection.provider?.name,
+      // NEW
       changes: {
         ...(amountChanged && { amount: { from: oldAmount, to: newAmount } }),
         ...(method !== undefined && { method }),
         ...(date !== undefined && { date }),
         ...(notes !== undefined && { notes }),
         ...(reference !== undefined && { reference }),
+        ...(booking !== undefined && { booking }),
       },
     },
   });
@@ -238,7 +249,7 @@ export const getProviderCollections = asyncHandler(async (req, res, next) => {
       providerCollectionModel
         .find(query)
         .populate("recordedBy", "userName")
-        .populate("booking", "bookingID customers")
+        .populate("booking", "bookingID customers referenceCode")
         .sort({ date: -1 })
         .limit(limit)
         .skip(skip),
@@ -300,11 +311,12 @@ export const getAllProviderCollections = asyncHandler(async (req, res) => {
   const { limit, skip } = pagination(page, size);
 
   const [collections, totalCount, totalAmountResult] = await Promise.all([
+    // NEW
     providerCollectionModel
       .find(query)
       .populate("provider", "name type")
       .populate("recordedBy", "userName")
-      .populate("booking", "bookingID customers")
+      .populate("booking", "bookingID customers referenceCode")
       .sort({ date: -1 })
       .limit(limit)
       .skip(skip),
@@ -369,13 +381,15 @@ export const deleteProviderCollection = asyncHandler(async (req, res, next) => {
 export const getProviderCollectionById = asyncHandler(async (req, res, next) => {
   const { collectionId } = req.params;
 
+  // NEW
   const collection = await providerCollectionModel
     .findById(collectionId)
     .populate("provider", "name type phone")
-    .populate("booking", "bookingID customers")
+    .populate("booking", "bookingID customers referenceCode")
     .populate("recordedBy", "userName");
 
-  if (!collection) return next(new Error("Collection not found", { cause: 404 }));
+  if (!collection)
+    return next(new Error("Collection not found", { cause: 404 }));
 
   return res.status(200).json({
     success: true,
