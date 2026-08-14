@@ -48,10 +48,18 @@ router.get(
   providerPaymentController.getProviderPayments,
 );
 
+// NEW
 // NEW: GET /api/v1/provider-payment/payment/:paymentId — single payment lookup
 router.get(
   "/payment/:paymentId",
   auth(endpoint.accounting_only),
   providerPaymentController.getProviderPaymentById,
+);
+
+// Case 8 / Gap 2: server-generated PDF receipt
+router.get(
+  "/payment/:paymentId/receipt",
+  auth(endpoint.accounting_only),
+  providerPaymentController.downloadProviderPaymentReceipt,
 );
 export default router;

@@ -2,6 +2,8 @@ import { asyncHandler } from "../../../middleware/asyncHandler.js";
 import bookingModel from "../../../../DB/model/booking.model.js";
 import providerModel from "../../../../DB/model/provider.model.js";
 import paymentModel from "../../../../DB/model/payment.model.js";
+import providerPaymentModel from "../../../../DB/model/providerPayment.model.js";
+import providerCollectionModel from "../../../../DB/model/providerCollection.model.js";
 import logModel from "../../../../DB/model/log.model.js";
 import { notifyBookingStatusChanged } from "../../../services/notification.js";
 import { pagination } from "../../../services/pagination.js";
@@ -761,6 +763,44 @@ export const editStatus = asyncHandler(async (req, res, next) => {
     success: true,
     message: "Booking status changed successfully",
     data: { booking },
+    errors: null,
+  });
+});
+
+// NEW function — add at end of file
+/**
+ * Returns all ProviderPayments and ProviderCollections linked (via the
+ * `booking` ObjectId ref) to the given booking. Powers the reverse-direction
+ * "Linked Transactions" panel on BookingDetailPage, completing the
+ * bi-directional traceability required by Case 8.
+ *
+ * GET /api/v1/booking/:id/linked-transactions
+ */
+export const getLinkedTransactions = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+
+  const exists = await bookingModel.exists({ _id: id });
+  if (!exists) return next(new Error("Booking not found", { cause: 404 }));
+
+  const [providerPayments, providerCollections] = await Promise.all([
+    providerPaymentModel
+      .find({ booking: id })
+      .populate("provider", "name type")
+      .populate("recordedBy", "userName")
+      .sort({ date: -1 })
+      .lean(),
+    providerCollectionModel
+      .find({ booking: id })
+      .populate("provider", "name type")
+      .populate("recordedBy", "userName")
+      .sort({ date: -1 })
+      .lean(),
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    message: "Linked transactions retrieved successfully",
+    data: { providerPayments, providerCollections },
     errors: null,
   });
 });

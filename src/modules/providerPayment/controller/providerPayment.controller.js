@@ -280,3 +280,49 @@ export const getProviderPaymentById = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
+
+// NEW — add after getProviderPaymentById
+/**
+ * Streams a PDFKit-based receipt for a provider payment.
+ * GET /api/v1/provider-payment/payment/:paymentId/receipt
+ */
+export const downloadProviderPaymentReceipt = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+
+  const payment = await providerPaymentModel
+    .findById(paymentId)
+    .populate("provider", "name")
+    .populate("booking", "bookingID referenceCode")
+    .populate("recordedBy", "userName")
+    .lean();
+
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  const officeSettingsModel = (await import("../../../../DB/model/officeSettings.model.js")).default;
+  const officeSettings = await officeSettingsModel.findOne().lean();
+
+  const receipt = {
+    receiptType:   "PROVIDER PAYMENT",
+    receiptNumber: `REC-${payment._id.toString().slice(-8).toUpperCase()}`,
+    issueDate:     new Date(),
+    amount:        payment.amount,
+    method:        payment.method,
+    date:          payment.date,
+    reference:     payment.reference || null,
+    notes:         payment.notes     || null,
+    booking:       payment.booking
+      ? { bookingID: payment.booking.bookingID, referenceCode: payment.booking.referenceCode }
+      : null,
+    entity: { label: "Provider", name: payment.provider?.name || "—" },
+    recordedBy: payment.recordedBy?.userName || "—",
+  };
+
+  const { generateReceiptPdfBuffer } = await import("../../../services/receiptPdfService.js");
+  const buffer = await generateReceiptPdfBuffer(receipt, officeSettings);
+
+  const filename = `receipt-provider-payment-${payment._id.toString().slice(-8)}.pdf`;
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Content-Length", buffer.length);
+  return res.end(buffer);
+});

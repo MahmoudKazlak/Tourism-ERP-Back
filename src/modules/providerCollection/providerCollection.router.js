@@ -23,6 +23,13 @@ router.get(
   providerCollectionController.getProviderCollectionById,
 );
 
+// Case 8 / Gap 2: server-generated PDF receipt
+router.get(
+  "/collection/:collectionId/receipt",
+  auth(endpoint.accounting_only),
+  providerCollectionController.downloadProviderCollectionReceipt,
+);
+
 // PATCH /api/v1/provider-collection/:collectionId — Admin only
 router.patch(
   "/:collectionId",

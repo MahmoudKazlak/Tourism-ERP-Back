@@ -39,6 +39,13 @@ router.get(
   bookingController.getBookingById,
 );
 
+router.get(
+  "/:id/linked-transactions",
+  auth(endpoint.booking_view),
+  validation(validators.bookingIdParam),
+  bookingController.getLinkedTransactions,
+);
+
 router.patch(
   "/edit/:id",
   auth(endpoint.booking_manage),

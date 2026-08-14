@@ -398,3 +398,49 @@ export const getProviderCollectionById = asyncHandler(async (req, res, next) => 
     errors: null,
   });
 });
+
+// NEW — add after getProviderCollectionById
+/**
+ * Streams a PDFKit-based receipt for a provider collection.
+ * GET /api/v1/provider-collection/collection/:collectionId/receipt
+ */
+export const downloadProviderCollectionReceipt = asyncHandler(async (req, res, next) => {
+  const { collectionId } = req.params;
+
+  const collection = await providerCollectionModel
+    .findById(collectionId)
+    .populate("provider", "name")
+    .populate("booking", "bookingID referenceCode")
+    .populate("recordedBy", "userName")
+    .lean();
+
+  if (!collection) return next(new Error("Collection not found", { cause: 404 }));
+
+  const officeSettingsModel = (await import("../../../../DB/model/officeSettings.model.js")).default;
+  const officeSettings = await officeSettingsModel.findOne().lean();
+
+  const receipt = {
+    receiptType:   "PROVIDER COLLECTION",
+    receiptNumber: `REC-${collection._id.toString().slice(-8).toUpperCase()}`,
+    issueDate:     new Date(),
+    amount:        collection.amount,
+    method:        collection.method,
+    date:          collection.date,
+    reference:     collection.reference || null,
+    notes:         collection.notes     || null,
+    booking:       collection.booking
+      ? { bookingID: collection.booking.bookingID, referenceCode: collection.booking.referenceCode }
+      : null,
+    entity: { label: "Provider", name: collection.provider?.name || "—" },
+    recordedBy: collection.recordedBy?.userName || "—",
+  };
+
+  const { generateReceiptPdfBuffer } = await import("../../../services/receiptPdfService.js");
+  const buffer = await generateReceiptPdfBuffer(receipt, officeSettings);
+
+  const filename = `receipt-collection-${collection._id.toString().slice(-8)}.pdf`;
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Content-Length", buffer.length);
+  return res.end(buffer);
+});

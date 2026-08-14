@@ -558,3 +558,51 @@ export const getPaymentById = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
+
+// NEW — add at end of file, after all existing exports
+/**
+ * Streams a PDFKit-based receipt for a customer payment.
+ * GET /api/v1/booking/payments/:paymentId/receipt
+ */
+export const downloadPaymentReceipt = asyncHandler(async (req, res, next) => {
+  const { paymentId } = req.params;
+
+  const payment = await paymentModel
+    .findById(paymentId)
+    .populate("booking", "bookingID referenceCode customers")
+    .populate("providerRecipient", "name")
+    .populate("recordedBy", "userName")
+    .lean();
+
+  if (!payment) return next(new Error("Payment not found", { cause: 404 }));
+
+  const officeSettings = await officeSettingsModel.findOne().lean();
+
+  const receipt = {
+    receiptType:   "PAYMENT RECEIPT",
+    receiptNumber: `REC-${payment._id.toString().slice(-8).toUpperCase()}`,
+    issueDate:     new Date(),
+    amount:        payment.amount,
+    method:        payment.method,
+    date:          payment.date,
+    reference:     null,
+    notes:         payment.notes || null,
+    booking:       payment.booking
+      ? { bookingID: payment.booking.bookingID, referenceCode: payment.booking.referenceCode }
+      : null,
+    entity: {
+      label: "Customer",
+      name:  payment.booking?.customers?.[0]?.name || "—",
+    },
+    recordedBy: payment.recordedBy?.userName || "—",
+  };
+
+  const { generateReceiptPdfBuffer } = await import("../../../services/receiptPdfService.js");
+  const buffer = await generateReceiptPdfBuffer(receipt, officeSettings);
+
+  const filename = `receipt-payment-${payment._id.toString().slice(-8)}.pdf`;
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Content-Length", buffer.length);
+  return res.end(buffer);
+});
