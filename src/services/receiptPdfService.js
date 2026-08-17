@@ -12,6 +12,7 @@
  * respect the project's regression-avoidance rule.
  */
 import PDFDocument from "pdfkit";
+import { getPdfTranslator, registerPdfFont, PDF_FONTS } from "./pdfDictionary.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -74,7 +75,7 @@ const fixedText = (doc, text, x, y, options = {}) => {
   doc.text(String(text ?? "—"), x, y, { lineBreak: false, ...rest });
 };
 
-const drawAppBrandBlock = (doc, profile, receiptType) => {
+const drawAppBrandBlock = (doc, profile, receiptType, t) => {
   const blockLeft = MARGIN;
   const markSize = 38;
   let y = 36;
@@ -107,14 +108,14 @@ const drawAppBrandBlock = (doc, profile, receiptType) => {
   y += 14;
 
   const rightX = doc.page.width - MARGIN - 150;
-  fixedText(doc, "RECEIPT", rightX, 40, {
+  fixedText(doc, t("receipt"), rightX, 40, {
     font: "Helvetica-Bold",
     fontSize: 22,
     fillColor: COLORS.primary,
     width: 150,
     align: "right",
   });
-  fixedText(doc, receiptType, rightX, 66, {
+  fixedText(doc, t(receiptType), rightX, 66, {
     font: "Helvetica",
     fontSize: 7.5,
     fillColor: COLORS.muted,
@@ -189,12 +190,12 @@ const drawOfficeBlock = (doc, profile, startY) => {
   return y + 10;
 };
 
-const drawBrandHeader = (doc, profile, receiptType) => {
-  const brandEndY = drawAppBrandBlock(doc, profile, receiptType);
+const drawBrandHeader = (doc, profile, receiptType, t) => {
+  const brandEndY = drawAppBrandBlock(doc, profile, receiptType, t);
   return drawOfficeBlock(doc, profile, brandEndY);
 };
 
-const drawFooter = (doc, profile) => {
+const drawFooter = (doc, profile, t) => {
   doc
     .moveTo(MARGIN, FOOTER_TOP)
     .lineTo(doc.page.width - MARGIN, FOOTER_TOP)
@@ -204,7 +205,7 @@ const drawFooter = (doc, profile) => {
 
   fixedText(
     doc,
-    `Thank you for choosing ${profile.officeName}. Keep this receipt for your records.`,
+    t("thankYouReceipt", { office: profile.officeName }),
     MARGIN,
     FOOTER_TOP + 10,
     {
@@ -218,7 +219,7 @@ const drawFooter = (doc, profile) => {
 
   fixedText(
     doc,
-    `Powered by ${profile.brandName} Booking ERP`,
+    t("poweredBy", { brand: profile.brandName }),
     MARGIN,
     FOOTER_TOP + 24,
     {
@@ -251,14 +252,17 @@ const drawFooter = (doc, profile) => {
  * @param {object|null} officeSettings
  */
 export const createReceiptPdfDocument = (receipt, officeSettings = null) => {
+  const lang = officeSettings?.pdfLanguage || "en";
+  const t    = getPdfTranslator(lang);
   const profile = buildProfile(officeSettings);
   const doc = new PDFDocument({
     size: "A4",
     margin: MARGIN,
     autoFirstPage: true,
   });
+  registerPdfFont(doc);
 
-  let y = drawBrandHeader(doc, profile, receipt.receiptType);
+  let y = drawBrandHeader(doc, profile, receipt.receiptType, t);
 
   // ── Amount block (prominent) ───────────────────────────────────────────────
   fixedText(doc, "AMOUNT", MARGIN, y, {
@@ -305,11 +309,11 @@ export const createReceiptPdfDocument = (receipt, officeSettings = null) => {
     y += rowH;
   };
 
-  detailRow("Receipt No.", receipt.receiptNumber);
-  detailRow("Issue Date", formatDate(receipt.issueDate));
-  detailRow("Transaction Date", formatDate(receipt.date));
-  detailRow("Method", PAYMENT_METHOD_LABELS[receipt.method] || receipt.method);
-  detailRow(receipt.entity.label, receipt.entity.name);
+  detailRow(t("receiptNo"),        receipt.receiptNumber);
+  detailRow(t("issueDate"),        formatDate(receipt.issueDate));
+  detailRow(t("transactionDate"),  formatDate(receipt.date));
+  detailRow(t("method"),           t(receipt.method) || receipt.method);
+  detailRow(receipt.entity.label,  receipt.entity.name);
 
   if (receipt.booking?.bookingID) {
     const bookingRef = receipt.booking.referenceCode
@@ -318,10 +322,10 @@ export const createReceiptPdfDocument = (receipt, officeSettings = null) => {
     detailRow("Booking", bookingRef);
   }
 
-  if (receipt.reference) detailRow("Reference", receipt.reference);
-  if (receipt.notes) detailRow("Notes", receipt.notes);
+  if (receipt.reference) detailRow(t("reference"), receipt.reference);
+  if (receipt.notes)     detailRow(t("notes"),     receipt.notes);
 
-  detailRow("Recorded By", receipt.recordedBy);
+  detailRow(t("recordedBy"),       receipt.recordedBy);
 
   // ── Bottom rule ────────────────────────────────────────────────────────────
   y += 6;
@@ -332,7 +336,7 @@ export const createReceiptPdfDocument = (receipt, officeSettings = null) => {
     .lineWidth(0.5)
     .stroke();
 
-  drawFooter(doc, profile);
+  drawFooter(doc, profile, t);
 
   return doc;
 };

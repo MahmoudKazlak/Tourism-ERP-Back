@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import SVGtoPDF from "svg-to-pdfkit";
+import { getPdfTranslator, registerPdfFont, PDF_FONTS } from "./pdfDictionary.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const KAZLAK_MARK_SVG = path.join(__dirname, "../../assets/kazlak-mark.svg");
@@ -21,12 +22,8 @@ const COLORS = {
   tableHeader: "#f1f5f9",
 };
 
-const PAYMENT_METHOD_LABELS = {
-  cash: "Cash",
-  bank_transfer: "Bank Transfer",
-  check: "Check",
-  other: "Other",
-};
+const methodLabel = (method, t) =>
+  t(method) || method;   // dictionary keys match method enum values
 
 const formatCurrency = (value) =>
   `$${(Number(value) || 0).toLocaleString("en-US", {
@@ -112,16 +109,16 @@ const drawMetaBlock = (doc, title, rows, x, y, colWidth) => {
   return rowY;
 };
 
-const drawServicesTable = (doc, lineItems, startY, maxEndY) => {
+const drawServicesTable = (doc, lineItems, startY, maxEndY, t) => {
   const left = MARGIN;
   const right = doc.page.width - MARGIN;
   const tableWidth = right - left;
   const columns = [
-    { label: "#", width: 22 },
-    { label: "Service", width: 88 },
-    { label: "Description", width: 200 },
-    { label: "Provider", width: 78 },
-    { label: "Amount", width: tableWidth - 388 },
+    { label: t("serviceNo"),   width: 22  },
+    { label: t("service"),     width: 88  },
+    { label: t("description"), width: 200 },
+    { label: t("provider"),    width: 78  },
+    { label: t("amount"),      width: tableWidth - 388 },
   ];
 
   const headerHeight = 16;
@@ -150,7 +147,7 @@ const drawServicesTable = (doc, lineItems, startY, maxEndY) => {
   const hiddenCount = lineItems.length - visibleItems.length;
 
   if (visibleItems.length === 0) {
-    fixedText(doc, "No services listed.", left + 4, y + 4);
+    fixedText(doc, t("noServices"), left + 4, y + 4);
     y += rowHeight;
   }
 
@@ -184,7 +181,7 @@ const drawServicesTable = (doc, lineItems, startY, maxEndY) => {
   if (hiddenCount > 0) {
     fixedText(
       doc,
-      `+ ${hiddenCount} more service(s) not shown`,
+      t("moreServices", { n: hiddenCount }),
       left + 4,
       y + 2,
       { font: "Helvetica-Oblique", fontSize: 6.5, fillColor: COLORS.muted },
@@ -202,23 +199,17 @@ const drawServicesTable = (doc, lineItems, startY, maxEndY) => {
   return y + 6;
 };
 
-const drawTotals = (doc, totals, startY) => {
+const drawTotals = (doc, totals, startY, t) => {
   const boxWidth = 185;
   const boxLeft = doc.page.width - MARGIN - boxWidth;
   let y = startY;
 
   const rows = [
-    ["Subtotal", formatCurrency(totals.subtotal)],
-    [
-      "Total Paid",
-      formatCurrency(totals.totalPaid ?? totals.fullBooking?.totalPaid),
-    ],
-    [
-      "Balance Due",
-      formatCurrency(
+    [t("subtotal"),   formatCurrency(totals.subtotal)],
+    [t("totalPaid"),  formatCurrency(totals.totalPaid ?? totals.fullBooking?.totalPaid)],
+    [t("balanceDue"), formatCurrency(
         totals.remainingBalance ?? totals.fullBooking?.remainingBalance,
-      ),
-    ],
+      )],
   ];
 
   for (const [label, value] of rows) {
@@ -240,7 +231,7 @@ const drawTotals = (doc, totals, startY) => {
 
   const paymentStatus =
     totals.paymentStatus ?? totals.fullBooking?.paymentStatus ?? "unpaid";
-  fixedText(doc, `Status: ${paymentStatus.toUpperCase()}`, boxLeft, y + 2, {
+  fixedText(doc, `${t("paymentStatusLbl")}: ${paymentStatus.toUpperCase()}`, boxLeft, y + 2, {
     font: "Helvetica-Bold",
     fontSize: 7.5,
     fillColor: COLORS.brand,
@@ -251,10 +242,10 @@ const drawTotals = (doc, totals, startY) => {
   return y + 16;
 };
 
-const drawPaymentsSummary = (doc, payments, startY) => {
+const drawPaymentsSummary = (doc, payments, startY, t) => {
   if (!payments?.length) return startY;
 
-  fixedText(doc, "Payments", MARGIN, startY, {
+  fixedText(doc, t("payments"), MARGIN, startY, {
     font: "Helvetica-Bold",
     fontSize: 8,
     fillColor: COLORS.primary,
@@ -265,7 +256,7 @@ const drawPaymentsSummary = (doc, payments, startY) => {
   const shown = payments.slice(-maxShown);
 
   for (const p of shown) {
-    const line = `${formatDate(p.date)} • ${PAYMENT_METHOD_LABELS[p.method] || p.method} • ${formatCurrency(p.amount)} → ${truncate(p.paidTo, 18)}`;
+    const line = `${formatDate(p.date)} • ${methodLabel(p.method, t)} • ${formatCurrency(p.amount)} → ${truncate(p.paidTo, 18)}`;
     fixedText(doc, line, MARGIN, y, {
       font: "Helvetica",
       fontSize: 7,
@@ -277,7 +268,7 @@ const drawPaymentsSummary = (doc, payments, startY) => {
   if (payments.length > maxShown) {
     fixedText(
       doc,
-      `+ ${payments.length - maxShown} earlier payment(s)`,
+      t("morePayments", { n: payments.length - maxShown }),
       MARGIN,
       y,
       { font: "Helvetica-Oblique", fontSize: 6.5, fillColor: COLORS.muted },
@@ -288,7 +279,7 @@ const drawPaymentsSummary = (doc, payments, startY) => {
   return y + 2;
 };
 
-const drawFooter = (doc, profile) => {
+const drawFooter = (doc, profile, t) => {
   doc
     .moveTo(MARGIN, FOOTER_TOP)
     .lineTo(doc.page.width - MARGIN, FOOTER_TOP)
@@ -298,7 +289,7 @@ const drawFooter = (doc, profile) => {
 
   fixedText(
     doc,
-    `Thank you for choosing ${profile.officeName}. Present this invoice at your provider.`,
+    t("thankYouInvoice", { office: profile.officeName }),
     MARGIN,
     FOOTER_TOP + 10,
     {
@@ -312,7 +303,7 @@ const drawFooter = (doc, profile) => {
 
   fixedText(
     doc,
-    `Powered by ${profile.brandName} Booking ERP`,
+    t("poweredBy", { brand: profile.brandName }),
     MARGIN,
     FOOTER_TOP + 24,
     {
@@ -382,7 +373,7 @@ const drawAppBrandBlock = (doc, profile, invoiceType) => {
  * Customer-facing travel agency block — clearly separated below app brand.
  * Renders the office logo (if a buffer was pre-fetched) then name/contact.
  */
-const drawOfficeBlock = (doc, profile, startY) => {
+const drawOfficeBlock = (doc, profile, startY, t) => {
   let y = startY + 6;
 
   doc
@@ -394,7 +385,7 @@ const drawOfficeBlock = (doc, profile, startY) => {
 
   y += 12;
 
-  fixedText(doc, "AGENCY", MARGIN, y, {
+  fixedText(doc, t("agency"), MARGIN, y, {
     font: "Helvetica-Bold",
     fontSize: 6.5,
     fillColor: COLORS.muted,
@@ -452,9 +443,9 @@ const drawOfficeBlock = (doc, profile, startY) => {
   return y + 10;
 };
 
-const drawBrandHeader = (doc, profile, invoiceType) => {
+const drawBrandHeader = (doc, profile, invoiceType, t) => {
   const brandEndY = drawAppBrandBlock(doc, profile, invoiceType);
-  return drawOfficeBlock(doc, profile, brandEndY);
+  return drawOfficeBlock(doc, profile, brandEndY, t);
 };
 
 /**
@@ -467,24 +458,26 @@ const drawBrandHeader = (doc, profile, invoiceType) => {
  */
 export const createInvoicePdfDocument = (invoice, officeSettings = null) => {
   const profile = buildProfile(officeSettings);
+  const t = getPdfTranslator(officeSettings?.pdfLanguage);
   const doc = new PDFDocument({
     size: "A4",
     margin: MARGIN,
     autoFirstPage: true,
   });
+  registerPdfFont(doc);
 
-  let y = drawBrandHeader(doc, profile, invoice.invoiceType);
+  let y = drawBrandHeader(doc, profile, invoice.invoiceType, t);
 
   const colWidth = (doc.page.width - MARGIN * 2 - 20) / 2;
   const rightColX = MARGIN + colWidth + 20;
 
   const leftEnd = drawMetaBlock(
     doc,
-    "Invoice Details",
+    t("invoiceDetails"),
     [
-      ["Invoice No.", invoice.invoiceNumber],
-      ["Issue Date", formatDate(invoice.issueDate)],
-      ["Issued By", invoice.issuedBy],
+      [t("invoiceNo"),  invoice.invoiceNumber],
+      [t("issueDate"),  formatDate(invoice.issueDate)],
+      [t("issuedBy"),   invoice.issuedBy],
     ],
     MARGIN,
     y,
@@ -494,11 +487,11 @@ export const createInvoicePdfDocument = (invoice, officeSettings = null) => {
   const pax = invoice.billTo.pax;
   const rightEnd = drawMetaBlock(
     doc,
-    "Bill To",
+    t("billTo"),
     [
-      ["Customer(s)", invoice.billTo.names.join(", ") || "—"],
+      [t("customers"),  invoice.billTo.names.join(", ") || "—"],
       [
-        "Passengers",
+        t("passengers"),
         pax
           ? `${pax.adults ?? 0}A / ${pax.kids ?? 0}C (${pax.total ?? 0} total)`
           : "—",
@@ -511,7 +504,7 @@ export const createInvoicePdfDocument = (invoice, officeSettings = null) => {
 
   y = Math.max(leftEnd, rightEnd) + 4;
 
-  fixedText(doc, "Booking", MARGIN, y, {
+  fixedText(doc, t("booking"), MARGIN, y, {
     font: "Helvetica-Bold",
     fontSize: 8,
     fillColor: COLORS.primary,
@@ -532,17 +525,17 @@ export const createInvoicePdfDocument = (invoice, officeSettings = null) => {
   );
 
   y += 16;
-  fixedText(doc, "Services", MARGIN, y, {
+  fixedText(doc, t("services"), MARGIN, y, {
     font: "Helvetica-Bold",
     fontSize: 8,
     fillColor: COLORS.primary,
   });
   y += 10;
 
-  y = drawServicesTable(doc, invoice.lineItems, y, CONTENT_MAX_Y);
-  y = drawTotals(doc, invoice.totals, y);
-  drawPaymentsSummary(doc, invoice.payments, Math.min(y + 4, FOOTER_TOP - 40));
-  drawFooter(doc, profile);
+  y = drawServicesTable(doc, invoice.lineItems, y, CONTENT_MAX_Y, t);
+  y = drawTotals(doc, invoice.totals, y, t);
+  drawPaymentsSummary(doc, invoice.payments, Math.min(y + 4, FOOTER_TOP - 40), t);
+  drawFooter(doc, profile, t);
 
   return doc;
 };

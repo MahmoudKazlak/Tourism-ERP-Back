@@ -40,12 +40,14 @@ export const getSettings = asyncHandler(async (req, res) => {
 export const updateSettings = asyncHandler(async (req, res) => {
   const settings = await getOrCreate();
 
-  const { name, address, phone, email, removeLogo } = req.body;
+  const { name, address, phone, email, removeLogo, pdfLanguage } = req.body;
 
-  if (name !== undefined)    settings.name    = String(name).trim();
-  if (address !== undefined) settings.address = String(address).trim();
-  if (phone !== undefined)   settings.phone   = String(phone).trim();
-  if (email !== undefined)   settings.email   = String(email).trim();
+  if (name !== undefined)        settings.name        = String(name).trim();
+  if (address !== undefined)     settings.address     = String(address).trim();
+  if (phone !== undefined)       settings.phone       = String(phone).trim();
+  if (email !== undefined)       settings.email       = String(email).trim();
+  if (["en", "ar", "tr"].includes(pdfLanguage))
+    settings.pdfLanguage = pdfLanguage;
 
   // ── Logo removal ──────────────────────────────────────────────────────────
   const shouldRemove = removeLogo === "true" || removeLogo === true;

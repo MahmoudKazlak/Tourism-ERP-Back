@@ -420,7 +420,7 @@ export const downloadProviderCollectionReceipt = asyncHandler(async (req, res, n
   const officeSettings = await officeSettingsModel.findOne().lean();
 
   const receipt = {
-    receiptType:   "PROVIDER COLLECTION",
+    receiptType:   "providerCollection",
     receiptNumber: `REC-${collection._id.toString().slice(-8).toUpperCase()}`,
     issueDate:     new Date(),
     amount:        collection.amount,

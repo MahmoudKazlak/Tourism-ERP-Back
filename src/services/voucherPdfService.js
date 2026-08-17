@@ -1,490 +1,363 @@
 /**
- * PDFKit-based Service Voucher PDF generator.
+ * PDFKit-based Service Voucher PDF.
+ * Matches the "HOTEL RESERVATION FORM" layout in the product spec.
  *
- * Produces a "HOTEL RESERVATION FORM"-style provider voucher matching the
- * layout shown in the product specification image. The document is intended
- * to be handed to the service provider (hotel, car company, etc.) to confirm
- * the reservation details without exposing pricing.
- *
- * Helper functions are intentionally self-contained (no imports from
- * invoicePdfService.js) to respect the regression-avoidance rule.
+ * Field names verified against ServiceDetailsForm.jsx:
+ *   accommodation : checkIn, checkOut, roomType, board
+ *   apartRent     : checkIn, checkOut, address
+ *   carRental     : brand, pickUp, dropOff
+ *   carWithDriver : brand, driverName
+ *   trip          : destination, date
  */
 import PDFDocument from "pdfkit";
-import fs from "fs";
-import path from "path";
+import fs          from "fs";
+import path        from "path";
 import { fileURLToPath } from "url";
-import SVGtoPDF from "svg-to-pdfkit";
+import SVGtoPDF    from "svg-to-pdfkit";
+import { getPdfTranslator, registerPdfFont, PDF_FONTS } from "./pdfDictionary.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOGO_SVG = path.join(__dirname, "../../assets/kazlak-mark.svg");
+const LOGO_SVG  = path.join(__dirname, "../../assets/kazlak-mark.svg");
 
-const MARGIN = 40;
-const PAGE_W = 595; // A4 portrait
+const MARGIN    = 40;
+const PAGE_W    = 595;
 const CONTENT_W = PAGE_W - MARGIN * 2;
 
-// ── Formatting helpers ────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 const pad4 = (n) => String(n ?? 0).padStart(4, "0");
 
 const fmtDate = (v) => {
   if (!v) return "—";
-  return new Date(v)
-    .toLocaleDateString("en-GB", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-    })
-    .replace(/\//g, "/"); // DD/MM/YYYY
+  return new Date(v).toLocaleDateString("en-GB", {
+    day: "2-digit", month: "2-digit", year: "numeric",
+  });
 };
 
-const fmtDateTime = (v) => {
-  const d = v ? new Date(v) : new Date();
-  const date = d.toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
-  const time = d.toLocaleTimeString("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-  return { date, time };
+const fmtNow = () => {
+  const d = new Date();
+  return {
+    date: d.toLocaleDateString("en-GB",  { day: "2-digit", month: "2-digit", year: "numeric" }),
+    time: d.toLocaleTimeString("en-GB",  { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+  };
 };
 
-const capFirst = (s) =>
-  s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : "";
+const capFirst = (s) => s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : "";
 
 const guestTitle = (ageType) => {
-  if (!ageType) return "";
-  switch (ageType.toLowerCase()) {
-    case "adult":
-      return "Mr/Ms";
-    case "child":
-      return "Mstr";
-    case "infant":
-      return "Inf";
-    default:
-      return capFirst(ageType);
+  switch ((ageType ?? "adult").toLowerCase()) {
+    case "adult":  return "Mr/Ms";
+    case "child":  return "Mstr";
+    case "infant": return "Inf";
+    default:       return capFirst(ageType);
   }
 };
-
-// ── Low-level draw helpers ────────────────────────────────────────────────────
 
 const tx = (doc, text, x, y, opts = {}) => {
   const {
-    font = "Helvetica",
-    size = 7.5,
-    color = "#000000",
-    width,
-    align,
-    lineBreak = false,
+    font = PDF_FONTS.regular, size = 7.5,
+    color = "#000000", width, align, lineBreak = false,
   } = opts;
   doc.font(font).fontSize(size).fillColor(color);
   doc.text(String(text ?? ""), x, y, {
-    lineBreak,
-    ...(width ? { width } : {}),
-    ...(align ? { align } : {}),
+    lineBreak, ...(width ? { width } : {}), ...(align ? { align } : {}),
   });
 };
 
-const hLine = (
-  doc,
-  y,
-  x1 = MARGIN,
-  x2 = PAGE_W - MARGIN,
-  weight = 0.5,
-  color = "#cccccc",
-) => {
-  doc.moveTo(x1, y).lineTo(x2, y).strokeColor(color).lineWidth(weight).stroke();
-};
+const hLine = (doc, y, x1 = MARGIN, x2 = PAGE_W - MARGIN, w = 0.5, c = "#cccccc") =>
+  doc.moveTo(x1, y).lineTo(x2, y).strokeColor(c).lineWidth(w).stroke();
 
-const vLine = (doc, x, y1, y2, weight = 0.5, color = "#cccccc") => {
-  doc.moveTo(x, y1).lineTo(x, y2).strokeColor(color).lineWidth(weight).stroke();
-};
+const vLine = (doc, x, y1, y2, w = 0.5, c = "#cccccc") =>
+  doc.moveTo(x, y1).lineTo(x, y2).strokeColor(c).lineWidth(w).stroke();
 
-const rect = (doc, x, y, w, h, strokeColor = "#cccccc", weight = 0.5) => {
-  doc.rect(x, y, w, h).strokeColor(strokeColor).lineWidth(weight).stroke();
-};
+const drawRect = (doc, x, y, w, h, stroke = "#cccccc", lw = 0.5) =>
+  doc.rect(x, y, w, h).strokeColor(stroke).lineWidth(lw).stroke();
 
-// ── Document title based on dominant service type ─────────────────────────────
+// ── Document title based on service types ─────────────────────────────────────
 
-const docTitle = (services) => {
+const getDocTitle = (services, t) => {
   const types = [...new Set(services.map((s) => s.serviceType))];
   if (types.length === 1) {
     switch (types[0]) {
-      case "accommodation":
-        return "HOTEL RESERVATION FORM";
-      case "apartRent":
-        return "APARTMENT RESERVATION FORM";
-      case "carRental":
-        return "CAR RENTAL VOUCHER";
-      case "carWithDriver":
-        return "TRANSPORTATION VOUCHER";
-      case "trip":
-        return "EXCURSION VOUCHER";
-      default:
-        return "SERVICE VOUCHER";
+      case "accommodation": return t("hotelReservationForm");
+      case "apartRent":     return t("apartmentReservationForm");
+      case "carRental":     return t("carRentalVoucher");
+      case "carWithDriver": return t("transportationVoucher");
+      case "trip":          return t("excursionVoucher");
     }
   }
-  return "BOOKING VOUCHER";
+  return t("bookingVoucher");
 };
 
 // ── Header ────────────────────────────────────────────────────────────────────
 
-const drawHeader = (doc, profile, services, booking) => {
-  const now = fmtDateTime();
-  let y = MARGIN;
+const drawHeader = (doc, profile, services, booking, t) => {
+  const now    = fmtNow();
+  const y0     = MARGIN;
+  const hdrH   = 100;
 
-  // Outer border for the header block
-  const headerH = 100;
-  rect(doc, MARGIN, y, CONTENT_W, headerH, "#999999", 0.6);
+  drawRect(doc, MARGIN, y0, CONTENT_W, hdrH, "#888888", 0.7);
 
-  // Left column — logo + company name block
-  let logoEndY = y + 8;
+  // Left: app logo
   const logoSize = 36;
   if (fs.existsSync(LOGO_SVG)) {
     try {
       const svg = fs.readFileSync(LOGO_SVG, "utf8");
-      SVGtoPDF(doc, svg, MARGIN + 6, y + 8, {
-        width: logoSize,
-        height: logoSize,
-        preserveAspectRatio: "xMidYMid meet",
+      SVGtoPDF(doc, svg, MARGIN + 6, y0 + 8, {
+        width: logoSize, height: logoSize, preserveAspectRatio: "xMidYMid meet",
       });
-      logoEndY = y + 8 + logoSize + 4;
     } catch (_) {}
   } else if (profile.logoBuffer) {
-    try {
-      doc.image(profile.logoBuffer, MARGIN + 6, y + 8, {
-        height: logoSize,
-        fit: [60, logoSize],
-      });
-      logoEndY = y + 8 + logoSize + 4;
-    } catch (_) {}
+    try { doc.image(profile.logoBuffer, MARGIN + 6, y0 + 8, { height: logoSize }); } catch (_) {}
   }
 
-  // Center column — company + document type + hotel + city
-  const centerX = MARGIN + 80;
-  const centerW = CONTENT_W - 80 - 100;
-  let cy = y + 10;
+  // Centre: office + document type + provider + city
+  const cx = MARGIN + 80;
+  const cw = CONTENT_W - 80 - 100;
+  let cy = y0 + 10;
+  tx(doc, profile.officeName,        cx, cy, { font: PDF_FONTS.boldItalic, size: 11, width: cw, align: "center" }); cy += 14;
+  tx(doc, getDocTitle(services, t),  cx, cy, { font: PDF_FONTS.boldItalic, size: 9,  width: cw, align: "center" }); cy += 12;
 
-  tx(doc, profile.officeName, centerX, cy, {
-    font: "Helvetica-BoldOblique",
-    size: 11,
-    width: centerW,
-    align: "center",
-  });
-  cy += 14;
-  tx(doc, docTitle(services), centerX, cy, {
-    font: "Helvetica-BoldOblique",
-    size: 9,
-    width: centerW,
-    align: "center",
-  });
-  cy += 12;
-  // Provider (hotel) name — first accommodation service provider
-  const accomService = services.find((s) =>
-    ["accommodation", "apartRent"].includes(s.serviceType),
-  );
-  const hotelName =
-    accomService?.provider?.name ?? services[0]?.provider?.name ?? "";
-  if (hotelName) {
-    tx(doc, hotelName.toUpperCase(), centerX, cy, {
-      font: "Helvetica-Bold",
-      size: 9,
-      width: centerW,
-      align: "center",
-      color: "#222222",
-    });
-    cy += 12;
-  }
-  // City from provider address (first word/line) or booking notes
-  const city = (
-    accomService?.provider?.address ??
-    services[0]?.provider?.address ??
-    ""
-  )
-    .split(/[\n,]/)[0]
-    .trim();
-  if (city) {
-    tx(doc, city.toUpperCase(), centerX, cy, {
-      font: "Helvetica-Bold",
-      size: 9,
-      width: centerW,
-      align: "center",
-    });
-  }
+  const accom = services.find((s) => ["accommodation","apartRent"].includes(s.serviceType))
+             ?? services[0];
+  const hotelName = accom?.provider?.name ?? "";
+  const city      = (accom?.provider?.address ?? "").split(/[\n,]/)[0].trim();
+  if (hotelName) { tx(doc, hotelName.toUpperCase(), cx, cy, { font: PDF_FONTS.bold, size: 9, width: cw, align: "center", color: "#222222" }); cy += 12; }
+  if (city)      { tx(doc, city.toUpperCase(),      cx, cy, { font: PDF_FONTS.bold, size: 9, width: cw, align: "center" }); }
 
-  // Right column — date / time / page
-  const rightX = PAGE_W - MARGIN - 95;
-  let ry = y + 12;
-  tx(doc, `Date : ${now.date}`, rightX, ry, { size: 7, width: 90 });
-  ry += 11;
-  tx(doc, `Time : ${now.time}`, rightX, ry, { size: 7, width: 90 });
-  ry += 11;
-  tx(doc, `Page : 1`, rightX, ry, { size: 7, width: 90 });
+  // Right: date / time / page
+  const rx = PAGE_W - MARGIN - 95;
+  let ry = y0 + 12;
+  tx(doc, `${t("dateLabel")} : ${now.date}`, rx, ry, { size: 7 }); ry += 11;
+  tx(doc, `${t("timeLabel")} : ${now.time}`, rx, ry, { size: 7 }); ry += 11;
+  tx(doc, `${t("page")}    : 1`,             rx, ry, { size: 7 });
 
-  return y + headerH;
+  return y0 + hdrH;
 };
 
-// ── Voucher number + status row ───────────────────────────────────────────────
+// ── Voucher number + status ───────────────────────────────────────────────────
 
-const drawVoucherRow = (doc, booking, startY) => {
+const drawVoucherRow = (doc, booking, startY, t) => {
   const y = startY + 8;
-  const voucherNo = `Voucher No: ${pad4(booking.bookingID)}`;
-  tx(doc, voucherNo, MARGIN + 4, y, { font: "Helvetica-Bold", size: 10 });
-
-  // Status label — centred
-  const status = (booking.status ?? "new").toUpperCase();
-  tx(doc, status, MARGIN, y - 2, {
-    font: "Helvetica-Bold",
-    size: 18,
-    color: "#111111",
-    width: CONTENT_W,
-    align: "center",
+  tx(doc, `${t("voucherNo")} : ${pad4(booking.bookingID)}`, MARGIN + 4, y, { font: PDF_FONTS.bold, size: 10 });
+  tx(doc, (booking.status ?? "new").toUpperCase(), MARGIN, y - 2, {
+    font: PDF_FONTS.bold, size: 18, color: "#111111", width: CONTENT_W, align: "center",
   });
-
-  hLine(doc, startY + 26, MARGIN, PAGE_W - MARGIN, 0.7, "#888888");
-  return startY + 30;
+  hLine(doc, startY + 28, MARGIN, PAGE_W - MARGIN, 0.7, "#888888");
+  return startY + 32;
 };
 
-// ── Service block (one per service) ──────────────────────────────────────────
+// ── Service block ─────────────────────────────────────────────────────────────
 
-/**
- * Draws a numbered service block.
- * Mirrors the 3-column layout in the image:
- *   Col A (dates/stay)  |  Col B (room/service details)  |  Col C (pax)
- */
-const drawServiceBlock = (doc, service, idx, booking, startY) => {
-  const d = service.details || {};
-  const typeDef = service._typeDef || {};
-  const isHotel = ["accommodation", "apartRent"].includes(service.serviceType);
-  const isCarR = ["carRental", "carWithDriver"].includes(service.serviceType);
-
-  let y = startY + 6;
-
-  // Row number
-  tx(doc, `${idx + 1}.`, MARGIN + 2, y, { font: "Helvetica-Bold", size: 8 });
+const drawServiceBlock = (doc, service, idx, booking, startY, t) => {
+  const d   = service.details || {};
+  const LH  = 11.5;
 
   const col = {
-    a: { x: MARGIN + 18, w: 145 },
-    b: { x: MARGIN + 168, w: 195 },
-    c: { x: MARGIN + 368, w: CONTENT_W - 368 },
+    a: { x: MARGIN + 18,  w: 148 },
+    b: { x: MARGIN + 171, w: 195 },
+    c: { x: MARGIN + 371, w: CONTENT_W - 371 },
   };
 
-  const LH = 11; // line height within block
-  let ay = y;
-  let by = y;
-  let cy = y;
+  let y = startY + 8;
 
-  // ── Column A: dates & stay info ───────────────────────────────────────────
-  if (isHotel) {
-    const colARows = [
-      ["C/In Date", fmtDate(d.checkIn)],
-      ["C/Out Date", fmtDate(d.checkOut)],
-      ["Day", service.duration != null ? String(service.duration) : "—"],
-      [
-        "Sejour Card Nr",
-        service.serviceNumber != null ? String(service.serviceNumber) : "—",
-      ],
-    ];
-    for (const [label, value] of colARows) {
-      tx(doc, `${label} :`, col.a.x, ay, { font: "Helvetica-Bold", size: 7 });
-      tx(doc, value, col.a.x + 70, ay, {
-        size: 7,
-        font: "Helvetica-Bold",
-        color: "#111111",
-      });
-      ay += LH;
+  // Row number
+  tx(doc, `${idx + 1}.`, MARGIN + 3, y, { font: PDF_FONTS.bold, size: 8 });
+
+  let ay = y, by = y, cy = y;
+
+  // ── Column A: dates/stay info ──────────────────────────────────────────────
+  switch (service.serviceType) {
+
+    case "accommodation":
+    case "apartRent": {
+      const rows = [
+        [t("checkIn"),      fmtDate(d.checkIn)],
+        [t("checkOut"),     fmtDate(d.checkOut)],
+        [t("nights"),       service.duration != null ? `${service.duration}` : "—"],
+        [t("sejourCardNr"), service.serviceNumber != null ? String(service.serviceNumber) : "—"],
+      ];
+      for (const [label, val] of rows) {
+        tx(doc, `${label} :`, col.a.x, ay, { font: PDF_FONTS.bold, size: 7 });
+        tx(doc, val, col.a.x + 76, ay, { font: PDF_FONTS.bold, size: 7 });
+        ay += LH;
+      }
+      break;
     }
-  } else if (isCarR) {
-    const colARows = [
-      ["Pick-up Date", fmtDate(d.pickUp || d.from)],
-      ["Drop-off Date", fmtDate(d.dropOff || d.to)],
-      ["Duration", service.duration != null ? `${service.duration} days` : "—"],
-    ];
-    for (const [label, value] of colARows) {
-      tx(doc, `${label} :`, col.a.x, ay, { font: "Helvetica-Bold", size: 7 });
-      tx(doc, value, col.a.x + 72, ay, { size: 7, font: "Helvetica-Bold" });
-      ay += LH;
+
+    case "carRental":
+    case "carWithDriver": {
+      const rows = [
+        [t("pickUpDate"),  fmtDate(d.pickUp)],
+        [t("dropOffDate"), fmtDate(d.dropOff)],
+        [t("days"),        service.duration != null ? `${service.duration}` : "—"],
+      ];
+      for (const [label, val] of rows) {
+        tx(doc, `${label} :`, col.a.x, ay, { font: PDF_FONTS.bold, size: 7 });
+        tx(doc, val, col.a.x + 82, ay, { size: 7 });
+        ay += LH;
+      }
+      break;
     }
-  } else {
-    const date = d.date || d.from || d.startDate;
-    if (date) {
-      tx(doc, "Date :", col.a.x, ay, { font: "Helvetica-Bold", size: 7 });
-      tx(doc, fmtDate(date), col.a.x + 38, ay, { size: 7 });
+
+    case "trip": {
+      tx(doc, `${t("tripDate")} :`, col.a.x, ay, { font: PDF_FONTS.bold, size: 7 });
+      tx(doc, fmtDate(d.date),     col.a.x + 60, ay, { size: 7 });
       ay += LH;
+      break;
     }
-    if (service.duration != null) {
-      tx(doc, "Duration :", col.a.x, ay, { font: "Helvetica-Bold", size: 7 });
-      tx(doc, `${service.duration} days`, col.a.x + 52, ay, { size: 7 });
-      ay += LH;
+
+    default: {
+      // Generic: show date if any durationFields-compatible value exists
+      const dateVal = d.from ?? d.date ?? d.startDate;
+      if (dateVal) {
+        tx(doc, `${t("dateLabel")} :`, col.a.x, ay, { font: PDF_FONTS.bold, size: 7 });
+        tx(doc, fmtDate(dateVal), col.a.x + 44, ay, { size: 7 });
+        ay += LH;
+      }
+      if (service.duration != null) {
+        tx(doc, `${t("days")} :`, col.a.x, ay, { font: PDF_FONTS.bold, size: 7 });
+        tx(doc, String(service.duration), col.a.x + 38, ay, { size: 7 });
+        ay += LH;
+      }
     }
   }
 
-  // ── Column B: room/service details ───────────────────────────────────────
-  if (isHotel) {
-    const roomCount = d.roomCount ?? d.rooms ?? 1;
-    const roomView = d.roomView ?? d.view ?? "";
-    const roomType = d.roomType ?? "";
-    const board = d.board ?? "";
-    const status = d.status ?? "Ok";
+  // ── Column B: service-specific details ────────────────────────────────────
+  switch (service.serviceType) {
 
-    const colBRows = [
-      ["Room Count", String(roomCount)],
-      ["Room", roomView || "—"],
-      ["Room Type", roomType || "—"],
-      ["Board", board || "—"],
-      ["Status", status],
-    ];
-    for (const [label, value] of colBRows) {
-      tx(doc, `${label} :`, col.b.x, by, { font: "Helvetica-Bold", size: 7 });
-      tx(
-        doc,
-        value.toString().toUpperCase().slice(0, 3) || value,
-        col.b.x + 68,
-        by,
-        { size: 7, font: "Helvetica-Bold" },
-      );
-      by += LH;
+    case "accommodation": {
+      // Only fields actually stored by ServiceDetailsForm: roomType, board
+      const rows = [
+        [t("roomType"), d.roomType || "—"],
+        [t("board"),    d.board    || "—"],
+        [t("statusOk"), t("statusOk")],   // static "Ok" — not a stored field
+      ];
+      for (const [label, val] of rows) {
+        tx(doc, `${label} :`, col.b.x, by, { font: PDF_FONTS.bold, size: 7 });
+        tx(doc, val, col.b.x + 64, by, { font: PDF_FONTS.bold, size: 7 });
+        by += LH;
+      }
+      // Descriptive lines (parenthetical) for stored values
+      by += 3;
+      if (d.roomType) { tx(doc, `(${d.roomType.toUpperCase()})`, col.b.x + 64, by, { size: 7, color: "#444444" }); by += LH; }
+      if (d.board)    { tx(doc, `(${d.board.toUpperCase()})`,    col.b.x + 64, by, { size: 7, color: "#444444" }); by += LH; }
+      break;
     }
 
-    // Descriptive lines below the grid (parenthetical, like in the image)
-    by += 3;
-    if (roomView) {
-      tx(doc, `(${roomView.toUpperCase()})`, col.b.x + 68, by, {
-        size: 7,
-        color: "#444444",
-      });
-      by += LH;
+    case "apartRent": {
+      if (d.address) {
+        tx(doc, `${t("address")} :`, col.b.x, by, { font: PDF_FONTS.bold, size: 7 });
+        tx(doc, d.address, col.b.x + 50, by, { size: 7, width: col.b.w - 54 });
+        by += LH;
+      }
+      break;
     }
-    if (roomType) {
-      tx(doc, `(${roomType.toUpperCase()})`, col.b.x + 68, by, {
-        size: 7,
-        color: "#444444",
-      });
-      by += LH;
+
+    case "carRental": {
+      if (d.brand) {
+        tx(doc, `${t("vehicle")} :`, col.b.x, by, { font: PDF_FONTS.bold, size: 7 });
+        tx(doc, d.brand, col.b.x + 50, by, { size: 7 });
+        by += LH;
+      }
+      break;
     }
-    if (board) {
-      tx(doc, `(${board.toUpperCase()})`, col.b.x + 68, by, {
-        size: 7,
-        color: "#444444",
-      });
-      by += LH;
+
+    case "carWithDriver": {
+      const bRows = [
+        [t("vehicle"), d.brand      || "—"],
+        [t("driver"),  d.driverName || "—"],
+      ];
+      for (const [label, val] of bRows) {
+        tx(doc, `${label} :`, col.b.x, by, { font: PDF_FONTS.bold, size: 7 });
+        tx(doc, val, col.b.x + 48, by, { size: 7 });
+        by += LH;
+      }
+      break;
     }
-  } else if (isCarR) {
-    const colBRows = [
-      ["Vehicle", d.brand || d.vehicle || "—"],
-      ["Driver", d.driverName || "—"],
-      ["Plate", d.plate || "—"],
-    ].filter(([, v]) => v !== "—");
-    for (const [label, value] of colBRows) {
-      tx(doc, `${label} :`, col.b.x, by, { font: "Helvetica-Bold", size: 7 });
-      tx(doc, value, col.b.x + 50, by, { size: 7 });
-      by += LH;
+
+    case "trip": {
+      if (d.destination) {
+        tx(doc, `${t("destination")} :`, col.b.x, by, { font: PDF_FONTS.bold, size: 7 });
+        tx(doc, d.destination, col.b.x + 68, by, { size: 7 });
+        by += LH;
+      }
+      break;
     }
-  } else {
-    // Generic: show first few detail key-value pairs
-    const entries = Object.entries(d).slice(0, 5);
-    for (const [key, value] of entries) {
-      tx(doc, `${capFirst(key)} :`, col.b.x, by, {
-        font: "Helvetica-Bold",
-        size: 7,
-      });
-      tx(doc, String(value), col.b.x + 70, by, {
-        size: 7,
-        width: col.b.w - 74,
-      });
-      by += LH;
+
+    default: {
+      // Generic: show first 4 detail entries
+      for (const [k, v] of Object.entries(d).slice(0, 4)) {
+        tx(doc, `${capFirst(k)} :`, col.b.x, by, { font: PDF_FONTS.bold, size: 7 });
+        tx(doc, String(v), col.b.x + 64, by, { size: 7, width: col.b.w - 68 });
+        by += LH;
+      }
     }
   }
 
-  // ── Column C: pax ────────────────────────────────────────────────────────
-  const allotment = d.allotment ?? d.allotmentType ?? "On-Request";
-  const pax = booking.totalPax || {};
-  const adults =
-    pax.adults ??
-    booking.customers?.filter((c) => (c.ageType || "adult") === "adult")
-      .length ??
-    0;
-  const children =
-    pax.kids ??
-    booking.customers?.filter((c) => c.ageType === "child").length ??
-    0;
-  const infants =
-    booking.customers?.filter((c) => c.ageType === "infant").length ?? 0;
-  const total = pax.total ?? adults + children + infants;
+  // ── Column C: pax ─────────────────────────────────────────────────────────
+  const pax     = booking.totalPax || {};
+  const adults  = pax.adults  ?? booking.customers?.filter((c) => (c.ageType ?? "adult") === "adult").length  ?? 0;
+  const children = pax.kids   ?? booking.customers?.filter((c) => c.ageType === "child").length               ?? 0;
+  const infants  = booking.customers?.filter((c) => c.ageType === "infant").length                            ?? 0;
+  const total    = pax.total  ?? (adults + children + infants);
 
   const colCRows = [
-    ["Allotment", allotment],
-    ["Adult", adults > 0 ? String(adults) : ""],
-    ["Ext. Bed", d.extraBed ? String(d.extraBed) : ""],
-    ["Child", children > 0 ? String(children) : ""],
-    ["Infant", infants > 0 ? String(infants) : ""],
-    ["Total Pax", String(total)],
+    [t("allotment"),  t("onRequest")],
+    [t("adult"),      adults   > 0 ? String(adults)   : ""],
+    [t("extBed"),     ""],
+    [t("child"),      children > 0 ? String(children) : ""],
+    [t("infant"),     infants  > 0 ? String(infants)  : ""],
+    [t("totalPax"),   String(total)],
   ];
-  for (const [label, value] of colCRows) {
-    tx(doc, `${label} :`, col.c.x, cy, { font: "Helvetica-Bold", size: 7 });
-    tx(doc, value, col.c.x + 62, cy, { size: 7, font: "Helvetica-Bold" });
+  for (const [label, val] of colCRows) {
+    tx(doc, `${label} :`, col.c.x, cy, { font: PDF_FONTS.bold, size: 7 });
+    tx(doc, val, col.c.x + 70, cy, { font: PDF_FONTS.bold, size: 7 });
     cy += LH;
   }
 
   // Notes (if any)
+  const blockEnd = Math.max(ay, by, cy) + 6;
   if (service.notes?.trim()) {
-    const noteY = Math.max(ay, by, cy) + 4;
-    tx(doc, `Notes: ${service.notes}`, col.a.x, noteY, {
-      size: 7,
-      color: "#555555",
-      width: CONTENT_W - 22,
-    });
-    return noteY + 14;
+    tx(doc, service.notes, col.a.x, blockEnd, { size: 7, color: "#555555", width: CONTENT_W - 22 });
+    hLine(doc, blockEnd + 14, MARGIN, PAGE_W - MARGIN, 0.4, "#cccccc");
+    return blockEnd + 18;
   }
-
-  const blockEnd = Math.max(ay, by, cy) + 10;
   hLine(doc, blockEnd, MARGIN, PAGE_W - MARGIN, 0.4, "#cccccc");
   return blockEnd + 4;
 };
 
 // ── Passenger table ───────────────────────────────────────────────────────────
 
-const drawPassengerTable = (doc, customers, startY) => {
+const drawPassengerTable = (doc, customers, startY, t) => {
   const cols = [
-    { label: "SURNAME, NAME", w: 138 },
-    { label: "AGE/B.DATE", w: 65 },
-    { label: "ARRIV.POINT", w: 68 },
-    { label: "TIME", w: 36 },
-    { label: "DEPAR.POINT", w: 68 },
-    { label: "TIME", w: 36 },
-    { label: "UB VOUCHE", w: CONTENT_W - 411 },
+    { label: t("surnameCol"),     w: 138 },
+    { label: t("ageDobCol"),      w: 65  },
+    { label: t("arrivPointCol"),  w: 68  },
+    { label: t("timeCol"),        w: 36  },
+    { label: t("departPointCol"), w: 68  },
+    { label: t("timeCol"),        w: 36  },
+    { label: t("voucherCol"),     w: CONTENT_W - 411 },
   ];
 
   const rowH = 14;
-  const tableH = rowH * (1 + (customers?.length ?? 0));
-
   let y = startY;
 
   // Header row
-  rect(doc, MARGIN, y, CONTENT_W, rowH, "#888888", 0.6);
-  let x = MARGIN;
+  drawRect(doc, MARGIN, y, CONTENT_W, rowH, "#888888", 0.7);
+  let hx = MARGIN;
   for (const col of cols) {
-    tx(doc, col.label, x + 3, y + 3, {
-      font: "Helvetica-Bold",
-      size: 6,
-      width: col.w - 6,
-    });
-    x += col.w;
+    tx(doc, col.label, hx + 3, y + 3, { font: PDF_FONTS.bold, size: 6, width: col.w - 6 });
+    hx += col.w;
   }
 
   // Customer rows
   for (const customer of customers ?? []) {
     y += rowH;
-    rect(doc, MARGIN, y, CONTENT_W, rowH, "#cccccc", 0.4);
-
-    const title = guestTitle(customer.ageType);
-    const fullName = `${title ? title + " " : ""}${customer.name ?? ""}`.trim();
-    tx(doc, fullName, MARGIN + 3, y + 3, { size: 7, width: cols[0].w - 6 });
-
-    // Draw vertical column separators
+    drawRect(doc, MARGIN, y, CONTENT_W, rowH, "#cccccc", 0.4);
+    const name = `${guestTitle(customer.ageType)} ${customer.name ?? ""}`.trim();
+    tx(doc, name, MARGIN + 3, y + 3, { size: 7, width: cols[0].w - 6 });
+    // Vertical separators
     let sx = MARGIN;
     for (let i = 0; i < cols.length - 1; i++) {
       sx += cols[i].w;
@@ -497,32 +370,21 @@ const drawPassengerTable = (doc, customers, startY) => {
 
 // ── Footer ────────────────────────────────────────────────────────────────────
 
-const drawVoucherFooter = (doc, profile, booking, startY) => {
+const drawVoucherFooter = (doc, profile, booking, startY, t) => {
   hLine(doc, startY, MARGIN, PAGE_W - MARGIN, 0.7, "#888888");
+  const y       = startY + 7;
+  const rightX  = MARGIN + CONTENT_W / 2;
+  const agent   = booking.createdBy?.userName ?? "";
 
-  const y = startY + 6;
-  const rightX = MARGIN + CONTENT_W / 2;
-  const agentName = booking.createdBy?.userName ?? "";
+  if (profile.email) tx(doc, `${t("emailLabel")} : ${profile.email}`, MARGIN + 4, y,      { size: 7 });
+  if (profile.phone) tx(doc, `${t("telLabel")} : ${profile.phone}`,   MARGIN + 4, y + 11, { size: 7 });
 
-  if (profile.email) {
-    tx(doc, `E mail : ${profile.email}`, MARGIN + 4, y, { size: 7 });
-  }
-  if (profile.phone) {
-    tx(doc, `Tel : ${profile.phone}`, MARGIN + 4, y + 11, { size: 7 });
-  }
-
-  tx(doc, "The Extra Expenses Belong To The Guest", rightX, y, {
-    size: 7,
-    font: "Helvetica-Bold",
-    width: CONTENT_W / 2,
-    align: "center",
+  tx(doc, t("extraExpenses"), rightX, y, {
+    font: PDF_FONTS.bold, size: 7, width: CONTENT_W / 2, align: "center",
   });
-  if (agentName) {
-    tx(doc, agentName.toUpperCase(), rightX, y + 11, {
-      size: 7,
-      font: "Helvetica-Bold",
-      width: CONTENT_W / 2,
-      align: "center",
+  if (agent) {
+    tx(doc, agent.toUpperCase(), rightX, y + 11, {
+      font: PDF_FONTS.bold, size: 7, width: CONTENT_W / 2, align: "center",
     });
   }
 };
@@ -530,66 +392,49 @@ const drawVoucherFooter = (doc, profile, booking, startY) => {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Builds the voucher PDFKit document.
- *
- * @param {object} booking   - Lean booking document (services populated with provider)
- * @param {object|null} officeSettings - Lean OfficeSettings with optional `logoBuffer`
- * @param {string|null} serviceType    - Optional filter; null = all services
+ * @param {object} booking        — Lean booking document, services.provider populated
+ * @param {object|null} officeSettings — Extended with optional `logoBuffer`
+ * @param {string|null} serviceType   — Filter to one type; null = all
  */
-export const createVoucherPdfDocument = (
-  booking,
-  officeSettings = null,
-  serviceType = null,
-) => {
+export const createVoucherPdfDocument = (booking, officeSettings = null, serviceType = null) => {
+  const lang = officeSettings?.pdfLanguage || "en";
+  const t    = getPdfTranslator(lang);
+
   const profile = {
-    officeName: officeSettings?.name || process.env.COMPANY_NAME || "Office",
-    phone: officeSettings?.phone || process.env.COMPANY_PHONE || "",
-    email: officeSettings?.email || process.env.COMPANY_EMAIL || "",
+    officeName: officeSettings?.name  || process.env.COMPANY_NAME  || "Office",
+    phone:      officeSettings?.phone || process.env.COMPANY_PHONE || "",
+    email:      officeSettings?.email || process.env.COMPANY_EMAIL || "",
     logoBuffer: officeSettings?.logoBuffer ?? null,
   };
 
   let services = booking.services || [];
-  if (serviceType) {
-    services = services.filter((s) => s.serviceType === serviceType);
-  }
-  if (!services.length) {
-    services = booking.services || [];
-  }
+  if (serviceType) services = services.filter((s) => s.serviceType === serviceType);
+  if (!services.length) services = booking.services || [];
 
-  const doc = new PDFDocument({
-    size: "A4",
-    margin: MARGIN,
-    autoFirstPage: true,
-  });
+  const doc = new PDFDocument({ size: "A4", margin: MARGIN, autoFirstPage: true });
+  registerPdfFont(doc);
 
-  let y = drawHeader(doc, profile, services, booking);
+  let y = drawHeader(doc, profile, services, booking, t);
   y += 4;
-  y = drawVoucherRow(doc, booking, y);
+  y = drawVoucherRow(doc, booking, y, t);
   y += 2;
-
   for (let i = 0; i < services.length; i++) {
-    y = drawServiceBlock(doc, services[i], i, booking, y);
+    y = drawServiceBlock(doc, services[i], i, booking, y, t);
     y += 2;
   }
-
   y += 4;
-  y = drawPassengerTable(doc, booking.customers ?? [], y);
-
-  drawVoucherFooter(doc, profile, booking, y + 4);
+  y = drawPassengerTable(doc, booking.customers ?? [], y, t);
+  drawVoucherFooter(doc, profile, booking, y + 4, t);
 
   return doc;
 };
 
-export const generateVoucherPdfBuffer = (
-  booking,
-  officeSettings = null,
-  serviceType = null,
-) =>
+export const generateVoucherPdfBuffer = (booking, officeSettings = null, serviceType = null) =>
   new Promise((resolve, reject) => {
-    const doc = createVoucherPdfDocument(booking, officeSettings, serviceType);
+    const doc    = createVoucherPdfDocument(booking, officeSettings, serviceType);
     const chunks = [];
-    doc.on("data", (c) => chunks.push(c));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("data",  (c) => chunks.push(c));
+    doc.on("end",   () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
     doc.end();
   });

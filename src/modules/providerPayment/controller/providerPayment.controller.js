@@ -302,7 +302,7 @@ export const downloadProviderPaymentReceipt = asyncHandler(async (req, res, next
   const officeSettings = await officeSettingsModel.findOne().lean();
 
   const receipt = {
-    receiptType:   "PROVIDER PAYMENT",
+    receiptType:   "providerPayment",
     receiptNumber: `REC-${payment._id.toString().slice(-8).toUpperCase()}`,
     issueDate:     new Date(),
     amount:        payment.amount,
