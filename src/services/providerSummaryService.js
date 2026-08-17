@@ -71,14 +71,9 @@ const buildSummaryPipeline = (delta) => {
         "summary.totalSell":                  inc("totalSell",                  delta.totalSell                  ?? 0),
         "summary.totalWeHavePaid":            inc("totalWeHavePaid",            delta.totalWeHavePaid            ?? 0),
         "summary.totalCustomersPaidDirect":   inc("totalCustomersPaidDirect",   delta.totalCustomersPaidDirect   ?? 0),
+// NEW (original — exactly as it was before Case 8)
         "summary.totalCollectedFromProvider": inc("totalCollectedFromProvider",  delta.totalCollectedFromProvider ?? 0),
-        // Case 8: agency receivables bucket — fully independent of the
-        // vendor-balance fields above and of the balanceType/balanceLabel
-        // derivation below, which only reads totalBuy/totalCollectedFromProvider/etc.
-        "summary.agency.totalInvoiced":       inc("agency.totalInvoiced",       delta.agencyTotalInvoiced         ?? 0),
-        "summary.agency.totalReceived":       inc("agency.totalReceived",       delta.agencyTotalReceived         ?? 0),
-        "summary.lastSynced":                 new Date(),
-        "summary.agency.lastSynced":          new Date(),
+        "summary.lastSynced":                 new Date()
       },
     },
     {
@@ -159,6 +154,59 @@ export const applyProviderSummaryDelta = async (providerId, delta, source = "unk
     // it can be detected and resolved without relying on log monitoring.
     await recordSyncFailure({
       providerId: providerId.toString(),
+      source,
+      delta,
+      errorMessage: err.message,
+    });
+  }
+};
+
+// NEW — add after the closing brace of applyProviderSummaryDelta
+
+// ── Agency receivables delta (Case 8) ─────────────────────────────────────────
+//
+// Deliberately separate from buildSummaryPipeline / applyProviderSummaryDelta.
+// Rationale: mixing agency path-writes ("summary.agency.*") into the existing
+// vendor-balance pipeline caused a MongoDB error on pre-Case8 provider documents
+// (where summary.agency didn't exist as a subdocument) — the error was silently
+// caught, leaving currentBalance at 0 for all providers. Keeping the two pipelines
+// independent eliminates the conflict entirely.
+//
+// Called from:
+//   booking.model.js  post-save/post-delete — tracks agency invoiced amounts
+//   payment.controller.js addPayment/deletePayment/editPayment — tracks received
+const buildAgencyPipeline = (delta) => {
+  const inc = (field, amount) => ({
+    $add: [{ $ifNull: [`$summary.agency.${field}`, 0] }, amount],
+  });
+  return [
+    {
+      $set: {
+        "summary.agency.totalInvoiced": inc("totalInvoiced", delta.agencyTotalInvoiced ?? 0),
+        "summary.agency.totalReceived": inc("totalReceived", delta.agencyTotalReceived ?? 0),
+        "summary.agency.lastSynced":    new Date(),
+      },
+    },
+  ];
+};
+
+export const applyAgencyDelta = async (providerId, delta, source = "unknown") => {
+  if (!providerId) return;
+  const hasChange = Object.values(delta).some((v) => v !== 0);
+  if (!hasChange) return;
+
+  try {
+    await providerModel.collection.updateOne(
+      { _id: new mongoose.Types.ObjectId(providerId.toString()) },
+      buildAgencyPipeline(delta),
+    );
+  } catch (err) {
+    console.error(
+      `❌ providerSummaryService [${source}]: agency delta failed for provider ${providerId}:`,
+      err.message,
+    );
+    await recordSyncFailure({
+      providerId:   providerId.toString(),
       source,
       delta,
       errorMessage: err.message,

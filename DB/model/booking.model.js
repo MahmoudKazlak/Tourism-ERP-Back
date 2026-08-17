@@ -3,8 +3,10 @@ import {
   assignBookingSequences,
   calculateBookingTotals,
 } from "../../src/services/bookingService.js";
+// NEW
 import {
   applyProviderSummaryDelta,
+  applyAgencyDelta,
   computeServiceDeltas,
 } from "../../src/services/providerSummaryService.js";
 import { getMergedServiceTypeKeys } from "../../src/services/serviceTypeRegistry.js";
@@ -138,7 +140,7 @@ bookingSchema.post("save", async function () {
       }
 
       if (this.bookingType === "agency" && this.provider) {
-        await applyProviderSummaryDelta(
+        await applyAgencyDelta(
           this.provider,
           { agencyTotalInvoiced: this.totalToPay },
           "booking_save_agency_invoice_new",
@@ -185,27 +187,22 @@ bookingSchema.post("save", async function () {
         ) {
           const diff = this.totalToPay - (oldAgency.totalToPay || 0);
           if (diff !== 0) {
-            await applyProviderSummaryDelta(
+            await applyAgencyDelta(
               newProviderId,
               { agencyTotalInvoiced: diff },
               "booking_save_agency_invoice_diff",
             );
           }
         } else {
-          // KNOWN LIMITATION: swapping the main provider on an agency booking
-          // reverses/reapplies the invoiced total but does NOT retroactively
-          // move any already-recorded payments' agencyTotalReceived contribution
-          // to the new provider. Avoid swapping the main provider on an agency
-          // booking that already has payments recorded against it.
           if (oldAgency?.bookingType === "agency" && oldProviderId) {
-            await applyProviderSummaryDelta(
+            await applyAgencyDelta(
               oldProviderId,
               { agencyTotalInvoiced: -(oldAgency.totalToPay || 0) },
               "booking_save_agency_invoice_reversal",
             );
           }
           if (this.bookingType === "agency" && newProviderId) {
-            await applyProviderSummaryDelta(
+            await applyAgencyDelta(
               newProviderId,
               { agencyTotalInvoiced: this.totalToPay },
               "booking_save_agency_invoice_new",
@@ -238,8 +235,9 @@ bookingSchema.post(
       // Deletion is already restricted to paymentStatus === "unpaid" bookings
       // (see deleteBooking in booking.controller.js), so agencyTotalReceived
       // never needs reversing here — no payments could exist yet.
+      // NEW
       if (this.bookingType === "agency" && this.provider) {
-        await applyProviderSummaryDelta(
+        await applyAgencyDelta(
           this.provider,
           { agencyTotalInvoiced: -this.totalToPay },
           "booking_delete_agency_invoice_reversal",

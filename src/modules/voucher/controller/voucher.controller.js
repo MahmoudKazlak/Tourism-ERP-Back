@@ -5,6 +5,7 @@ import { describeService } from "../../../config/serviceTypes.js";
 import { getMergedServiceTypes } from "../../../services/serviceTypeRegistry.js";
 import { buildInvoiceData } from "../../../services/invoiceService.js";
 import { createInvoicePdfDocument } from "../../../services/invoicePdfService.js";
+import { generateVoucherPdfBuffer } from "../../../services/voucherPdfService.js";
 import officeSettingsModel from "../../../../DB/model/officeSettings.model.js";
 
 export const getServiceVoucher = asyncHandler(async (req, res, next) => {
@@ -134,7 +135,10 @@ export const downloadInvoicePdf = asyncHandler(async (req, res, next) => {
 
   // Pass the DB settings + pre-fetched logo buffer into the PDF builder.
   // The builder remains synchronous — no async inside PDFKit callbacks.
-  const doc = createInvoicePdfDocument(invoice, { ...officeSettings, logoBuffer });
+  const doc = createInvoicePdfDocument(invoice, {
+    ...officeSettings,
+    logoBuffer,
+  });
   doc.on("error", (err) => next(err));
   doc.pipe(res);
   doc.end();
@@ -195,3 +199,63 @@ export const getReceipt = asyncHandler(async (req, res, next) => {
     errors: null,
   });
 });
+
+// NEW — add at end of file, before final blank line
+/**
+ * Streams a PDFKit-based provider voucher for a booking.
+ * Matches the "HOTEL RESERVATION FORM" layout shown in the product spec.
+ *
+ * GET /api/v1/voucher/service/:bookingId/pdf?serviceType=accommodation
+ *
+ * @query serviceType {string}  Optional — filter to a specific service type only.
+ */
+export const downloadServiceVoucherPdf = asyncHandler(
+  async (req, res, next) => {
+    const { bookingId } = req.params;
+    const { serviceType } = req.query;
+
+    const [booking, officeSettings] = await Promise.all([
+      bookingModel
+        .findById(bookingId)
+        .populate("provider", "name phone address")
+        .populate("services.provider", "name phone address")
+        .populate("createdBy", "userName")
+        .lean(),
+      officeSettingsModel.findOne().lean(),
+    ]);
+
+    if (!booking) return next(new Error("Booking not found", { cause: 404 }));
+
+    // Pre-fetch office logo (non-critical — PDF generates fine without it)
+    let logoBuffer = null;
+    if (officeSettings?.logoUrl) {
+      try {
+        const r = await fetch(officeSettings.logoUrl);
+        if (r.ok) logoBuffer = Buffer.from(await r.arrayBuffer());
+      } catch (e) {
+        console.warn(
+          "⚠️  Could not fetch office logo for voucher PDF:",
+          e.message,
+        );
+      }
+    }
+
+    const buffer = await generateVoucherPdfBuffer(
+      booking,
+      { ...officeSettings, logoBuffer },
+      serviceType || null,
+    );
+
+    const filename = `voucher-${pad4(booking.bookingID)}.pdf`;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Content-Length", buffer.length);
+    return res.end(buffer);
+  },
+);
+
+// helper — local to this controller, not exported
+function pad4(n) {
+  return String(n ?? 0).padStart(4, "0");
+}

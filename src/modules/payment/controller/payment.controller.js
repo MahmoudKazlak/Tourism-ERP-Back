@@ -7,8 +7,10 @@ import logModel from "../../../../DB/model/log.model.js";
 import { pagination } from "../../../services/pagination.js";
 import { withTransaction } from "../../../services/transaction.js";
 import { notifyPaymentRecorded } from "../../../services/notification.js";
-import { applyProviderSummaryDelta } from "../../../services/providerSummaryService.js";
-
+import {
+  applyProviderSummaryDelta,
+  applyAgencyDelta,
+} from "../../../services/providerSummaryService.js";
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: recalculate totalPaid from all payments and sync the booking.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -163,13 +165,13 @@ export const addPayment = asyncHandler(async (req, res, next) => {
   }
 
   // Case 8: this booking's main provider is an agency that owes us money.
-  if (booking.bookingType === "agency") {
-    await applyProviderSummaryDelta(
-      booking.provider,
-      { agencyTotalReceived: numAmount },
-      "booking_payment_agency_received",
-    );
-  }
+ if (booking.bookingType === "agency") {
+   await applyAgencyDelta(
+     booking.provider,
+     { agencyTotalReceived: numAmount },
+     "booking_payment_agency_received",
+   );
+ }
 
   return res.status(201).json({
     success: true,
@@ -322,13 +324,13 @@ export const deletePayment = asyncHandler(async (req, res, next) => {
     });
   }
 
-  if (parentBooking?.bookingType === "agency") {
-    await applyProviderSummaryDelta(
-      parentBooking.provider,
-      { agencyTotalReceived: -deletedAmount },
-      "booking_payment_agency_received_reversal",
-    );
-  }
+if (parentBooking?.bookingType === "agency") {
+  await applyAgencyDelta(
+    parentBooking.provider,
+    { agencyTotalReceived: -deletedAmount },
+    "booking_payment_agency_received_reversal",
+  );
+}
 
   return res.status(200).json({
     success: true,
@@ -520,13 +522,13 @@ export const editPayment = asyncHandler(async (req, res, next) => {
     });
   }
 
-  if (parentBooking?.bookingType === "agency" && amountChanged) {
-    await applyProviderSummaryDelta(
-      parentBooking.provider,
-      { agencyTotalReceived: newAmount - oldAmount },
-      "booking_payment_agency_received_diff",
-    );
-  }
+ if (parentBooking?.bookingType === "agency" && amountChanged) {
+   await applyAgencyDelta(
+     parentBooking.provider,
+     { agencyTotalReceived: newAmount - oldAmount },
+     "booking_payment_agency_received_diff",
+   );
+ }
 
   return res.status(200).json({
     success: true,
@@ -576,26 +578,32 @@ export const downloadPaymentReceipt = asyncHandler(async (req, res, next) => {
 
   if (!payment) return next(new Error("Payment not found", { cause: 404 }));
 
-  const officeSettings = await officeSettingsModel.findOne().lean();
+ const officeSettingsModel = (
+   await import("../../../../DB/model/officeSettings.model.js")
+ ).default;
+ const officeSettings = await officeSettingsModel.findOne().lean();
 
-  const receipt = {
-    receiptType:   "PAYMENT RECEIPT",
-    receiptNumber: `REC-${payment._id.toString().slice(-8).toUpperCase()}`,
-    issueDate:     new Date(),
-    amount:        payment.amount,
-    method:        payment.method,
-    date:          payment.date,
-    reference:     null,
-    notes:         payment.notes || null,
-    booking:       payment.booking
-      ? { bookingID: payment.booking.bookingID, referenceCode: payment.booking.referenceCode }
-      : null,
-    entity: {
-      label: "Customer",
-      name:  payment.booking?.customers?.[0]?.name || "—",
-    },
-    recordedBy: payment.recordedBy?.userName || "—",
-  };
+ const receipt = {
+   receiptType: "PAYMENT RECEIPT",
+   receiptNumber: `REC-${payment._id.toString().slice(-8).toUpperCase()}`,
+   issueDate: new Date(),
+   amount: payment.amount,
+   method: payment.method,
+   date: payment.date,
+   reference: null,
+   notes: payment.notes || null,
+   booking: payment.booking
+     ? {
+         bookingID: payment.booking.bookingID,
+         referenceCode: payment.booking.referenceCode,
+       }
+     : null,
+   entity: {
+     label: "Customer",
+     name: payment.booking?.customers?.[0]?.name || "—",
+   },
+   recordedBy: payment.recordedBy?.userName || "—",
+ };
 
   const { generateReceiptPdfBuffer } = await import("../../../services/receiptPdfService.js");
   const buffer = await generateReceiptPdfBuffer(receipt, officeSettings);
